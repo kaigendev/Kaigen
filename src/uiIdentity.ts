@@ -66,17 +66,12 @@ export function sha256Hex(value: string): string {
   return [...hash].map((word) => word.toString(16).padStart(8, "0")).join("");
 }
 
+/** Produce a stable DOM entity key without exposing the underlying model ID. */
 export function opaqueUiEntityKey(scope: string, modelKey: string | number): string {
   if (!/^[a-z][a-z0-9-]{0,47}$/u.test(scope)) throw new Error("UI entity-key scope is invalid.");
   const normalizedModelKey = String(modelKey);
   if (!normalizedModelKey) throw new Error("UI entity-key source is empty.");
   return `e-${sha256Hex(`${scope}\u0000${normalizedModelKey}`).slice(0, 32)}`;
-}
-
-export function uiCompositeIdentity(familyId: string, entityKey: string): string {
-  if (!/^kaigen\.[a-z0-9.-]+\.family\.[a-z0-9.-]+$/u.test(familyId)) throw new Error("UI family ID is invalid.");
-  if (!/^e-[a-f0-9]{32}$/u.test(entityKey)) throw new Error("UI entity key is invalid.");
-  return `${familyId}::${entityKey}`;
 }
 
 export function messageDayModelKey(timestampSeconds: number): string {

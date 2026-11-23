@@ -28,9 +28,10 @@ use subtle::ConstantTimeEq;
 
 use crate::kai::KaiProfileVolume;
 use crate::profiles;
+use crate::tox_native::ToxRef;
 use crate::web_transfer_store::{
     StoreDirection, StoreError, StoreObjectStatus, StoreOperation, StorePhase, StoreReply,
-    StoreSpec, WebTransferStore,
+    StoreRetention, StoreSpec, WebTransferStore,
 };
 use crate::{
     sanitize_untrusted_text, FileReceiveSettings, NetworkSettings, PendingToxMessage,
@@ -59,6 +60,8 @@ const TOX_FILE_SEND_CHUNK_INVALID_LENGTH: i32 = 6;
 const TOX_FILE_SEND_CHUNK_SENDQ: i32 = 7;
 const TOX_FILE_SEND_CHUNK_WRONG_POSITION: i32 = 8;
 const TOX_FILE_CONTROL_ALREADY_PAUSED: i32 = 6;
+// Internal closure result: the selected native route cannot currently send.
+const WEB_NATIVE_ROUTE_NOT_READY: i32 = i32::MIN;
 
 #[cfg(test)]
 std::thread_local! {
@@ -67,7 +70,7 @@ std::thread_local! {
 }
 
 fn web_user_file_control(
-    tox: *mut std::ffi::c_void,
+    tox: ToxRef<'_>,
     friend_number: u32,
     file_number: u32,
     control: i32,
@@ -76,7 +79,6 @@ fn web_user_file_control(
     if let Some((expected_friend, expected_file, expected_control, error)) =
         WEB_USER_FILE_CONTROL_REPLY.with(|reply| reply.borrow_mut().take())
     {
-        assert!(!tox.is_null());
         assert_eq!(
             (friend_number, file_number, control),
             (expected_friend, expected_file, expected_control)
@@ -84,9 +86,7 @@ fn web_user_file_control(
         return error;
     }
     let mut error = 0_i32;
-    unsafe {
-        let _ = crate::tox_file_control(tox, friend_number, file_number, control, &mut error);
-    }
+    let _ = tox.file_control(friend_number, file_number, control, &mut error);
     error
 }
 
@@ -183,6 +183,7 @@ pub struct WebTransferView {
     pub payload_committed: bool,
     pub payload_sha256: Option<String>,
     pub download_available: bool,
+    pub retained_for_mirrors: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -302,7 +303,7 @@ pub fn read_kai_profile_import(
             password.ok_or_else(|| "PROFILE_PASSWORD_REQUIRED".to_string())?,
         )?;
         let decrypted = cipher.decrypt(&savedata)?;
-        crate::wipe_sensitive_bytes(&mut savedata);
+        crate::wipe_secret_bytes(&mut savedata);
         savedata = decrypted;
     }
     let data_root = namespace.join("data");
@@ -470,7 +471,7 @@ fn resume_web_transfer_with_native_control(
     bridge: &WebFileBridge,
     messages: &Arc<Mutex<Vec<crate::ToxMessage>>>,
     route: &WebTransferRouting,
-    native_control: impl FnOnce(*mut std::ffi::c_void) -> i32,
+    native_control: impl FnOnce(ToxRef<'_>) -> i32,
     #[cfg(test)] before_publish: impl FnOnce(),
 ) -> Result<bool, String> {
     // Publish the resumed row before the native worker can deliver a callback.
@@ -485,7 +486,7 @@ fn resume_web_transfer_with_native_control(
         return Err("TRANSFER_NOT_RESUMABLE".to_string());
     }
     let handle = handle_guard.as_ref().ok_or("TOX_NOT_INITIALIZED")?;
-    let error = native_control(handle.instance.as_ptr());
+    let error = native_control(handle.native());
     if error != 0 {
         bridge.scheduled_start_failed(&route.id);
         return Ok(false);
@@ -518,14 +519,18 @@ fn offer_web_transfer_with_native_send(
     route: &WebTransferRouting,
     message_id: &str,
     mut transfer: crate::OutgoingFile,
-    native_send: impl FnOnce(*mut std::ffi::c_void, &crate::OutgoingFile) -> (u32, i32),
+    native_send: impl FnOnce(ToxRef<'_>, &crate::OutgoingFile) -> (u32, i32),
     #[cfg(test)] before_publish: impl FnOnce(),
 ) -> Result<(), String> {
     // Native callbacks must see all bindings for a successfully offered file.
     let handle_guard = native_handle.lock().map_err(|_| "TOX_BUSY".to_string())?;
     let handle = handle_guard.as_ref().ok_or("TOX_NOT_INITIALIZED")?;
-    let (file_number, error) = native_send(handle.instance.as_ptr(), &transfer);
+    let (file_number, error) = native_send(handle.native(), &transfer);
     if error != 0 {
+        if error == WEB_NATIVE_ROUTE_NOT_READY {
+            bridge.scheduled_start_failed(&route.id);
+            return Ok(());
+        }
         bridge.outgoing_start_failed(&route.id);
         return Ok(());
     }
@@ -545,6 +550,14 @@ fn offer_web_transfer_with_native_send(
     Ok(())
 }
 
+#[derive(PartialEq, Eq)]
+struct WebNativeTransferIdentity {
+    file_id: [u8; 32],
+    local_key: String,
+    peer_key: String,
+    generation: u64,
+}
+
 #[derive(Default)]
 struct WebFileBridgeState {
     transfers: HashMap<String, WebTransfer>,
@@ -553,6 +566,101 @@ struct WebFileBridgeState {
     buffered_bytes: u64,
     token_bytes: u64,
     token_updated_at_ms: u64,
+    pending_native_resumes: HashMap<String, (WebTransferRouting, u64)>,
+    native_generations: HashMap<String, u64>,
+    native_identities: HashMap<String, WebNativeTransferIdentity>,
+    companion_id: Option<String>,
+}
+
+impl WebFileBridgeState {
+    fn active_ids(&self) -> impl Iterator<Item = &String> {
+        self.active_id.iter().chain(self.companion_id.iter())
+    }
+
+    fn is_active(&self, id: &str) -> bool {
+        self.active_ids().any(|active| active == id)
+    }
+
+    fn release_leg(&mut self, id: &str) {
+        if self.active_id.as_deref() == Some(id) {
+            self.active_id = self.companion_id.take();
+        } else if self.companion_id.as_deref() == Some(id) {
+            self.companion_id = None;
+        }
+    }
+
+    fn matches_callback_generation(&self, id: &str, generation: Option<u64>) -> bool {
+        generation.is_none_or(|expected| self.native_generations.get(id) == Some(&expected))
+    }
+
+    fn paired_native_legs(&self, first: &str, second: &str) -> bool {
+        let Some((a, b, a_id, b_id)) = self
+            .transfers
+            .get(first)
+            .zip(self.transfers.get(second))
+            .zip(
+                self.native_identities
+                    .get(first)
+                    .zip(self.native_identities.get(second)),
+            )
+            .map(|((a, b), (a_id, b_id))| (a, b, a_id, b_id))
+        else {
+            return false;
+        };
+        a.profile_id != b.profile_id
+            && matches!(
+                a.state.as_str(),
+                "sending" | "receiving" | "backpressure" | "paused"
+            )
+            && a.outgoing != b.outgoing
+            && (a.outgoing || a.incoming_accepted)
+            && (b.outgoing || b.incoming_accepted)
+            && a.size_bytes == b.size_bytes
+            && a.file_number.is_some()
+            && b.file_number.is_some()
+            && a_id.file_id == b_id.file_id
+            && a_id.local_key == b_id.peer_key
+            && a_id.peer_key == b_id.local_key
+            && self.native_generations.get(first) == Some(&a_id.generation)
+            && self.native_generations.get(second) == Some(&b_id.generation)
+    }
+}
+
+fn web_transfer_storage_ready(transfer: &WebTransfer) -> bool {
+    transfer.storage.as_ref().is_none_or(|stored| {
+        transfer.storage_ready && (!transfer.outgoing || stored.phase == StorePhase::Committed)
+    })
+}
+
+fn bridge_native_route_generation(
+    inner: &WebFileBridgeState,
+    route: &WebTransferRouting,
+) -> Option<u64> {
+    let transfer = inner.transfers.get(&route.id)?;
+    if transfer.profile_id != route.profile_id
+        || transfer.friend_number != route.friend_number
+        || transfer.file_number != Some(route.file_number)
+        || transfer.outgoing != route.outgoing
+    {
+        return None;
+    }
+    inner.native_generations.get(&route.id).copied()
+}
+
+fn bridge_incoming_resume_generation(
+    inner: &WebFileBridgeState,
+    route: &WebTransferRouting,
+) -> Option<u64> {
+    let transfer = inner.transfers.get(&route.id)?;
+    if !inner.is_active(&route.id)
+        || transfer.outgoing
+        || !transfer.incoming_accepted
+        || transfer.locally_paused
+        || transfer.state != "receiving"
+    {
+        return None;
+    }
+    bridge_native_route_generation(inner, route)
 }
 
 fn fail_incoming_transfer(inner: &mut WebFileBridgeState, id: &str) {
@@ -591,6 +699,19 @@ pub(crate) struct WebFileBridge {
 }
 
 impl WebFileBridge {
+    fn retention(&self) -> StoreRetention {
+        self.store
+            .get()
+            .map_or(StoreRetention::EndpointReceipt, |store| store.retention())
+    }
+
+    fn payload_available(&self, status: &StoreObjectStatus) -> bool {
+        self.store.get().map_or_else(
+            || status.payload_available(),
+            |store| store.payload_available(status),
+        )
+    }
+
     pub(crate) fn uses_durable_storage(&self) -> bool {
         self.store.get().is_some()
     }
@@ -637,23 +758,8 @@ impl WebFileBridge {
             let Some(attachment) = message.attachment.as_mut() else {
                 continue;
             };
-            let id = if let Some(id) = attachment.path.strip_prefix("browser-stream://") {
-                id
-            } else {
-                // Older profile loads could incorrectly rebase this URI as a
-                // portable path. Recover only the exact retained object name
-                // beneath the corresponding managed attachment directory.
-                let mut parts = attachment.path.rsplit(['/', '\\']);
-                let Some(id) = parts.next() else { continue };
-                let directory = if message.mine {
-                    "outgoing-files"
-                } else {
-                    "downloads"
-                };
-                if parts.next() != Some(directory) {
-                    continue;
-                }
-                id
+            let Some(id) = attachment.path.strip_prefix("browser-stream://") else {
+                continue;
             };
             let Some(transfer) = inner.transfers.get(id) else {
                 continue;
@@ -674,7 +780,6 @@ impl WebFileBridge {
             {
                 continue;
             }
-            attachment.path = format!("browser-stream://{}", stored.spec.object_id);
             if stored.spec.direction == StoreDirection::Outgoing && transfer.state == "failed" {
                 // A restored terminal outcome can predate loading this history
                 // row into RAM. Project the actual bridge state, never infer
@@ -969,7 +1074,24 @@ impl WebFileBridge {
             .map(|stored| stored.spec.clone())
     }
 
-    #[cfg(test)]
+    // Caller holds the profile handle or chat transaction gate through the action.
+    fn require_contact_incarnation(&self, profile: &ToxState, id: &str) -> Result<(), String> {
+        let spec = {
+            let inner = self.inner.lock().map_err(|_| "TRANSFER_STATE_UNAVAILABLE")?;
+            let transfer = inner.transfers.get(id).ok_or("TRANSFER_NOT_FOUND")?;
+            if transfer.outgoing && self.store.get().is_some() && transfer.storage.is_none() {
+                return Err("TRANSFER_STORAGE_BUSY".into());
+            }
+            transfer.storage.as_ref().map(|stored| stored.spec.clone())
+        };
+        if let Some(spec) = spec {
+            crate::pending_contact::require_incarnation(
+                profile, &spec.friend_public_key, Some(spec.contact_incarnation),
+            )?;
+        }
+        Ok(())
+    }
+
     fn routing(&self, id: &str) -> Result<WebTransferRouting, String> {
         let inner = self
             .inner
@@ -1029,11 +1151,12 @@ impl WebFileBridge {
             .collect::<Vec<_>>();
         for (id, buffered) in removed {
             inner.transfers.remove(&id);
+            inner.native_generations.remove(&id);
+            inner.pending_native_resumes.remove(&id);
             inner.queue.retain(|queued| queued != &id);
             inner.buffered_bytes = inner.buffered_bytes.saturating_sub(buffered);
-            if inner.active_id.as_deref() == Some(id.as_str()) {
-                inner.active_id = None;
-            }
+            inner.native_identities.remove(&id);
+            inner.release_leg(&id);
         }
         // Pending worker results own their own Arc, so a late read from the old
         // native generation cannot overwrite a new probe after profile unlock.
@@ -1049,6 +1172,7 @@ impl WebFileBridge {
         profile_id: &str,
         friend_number: u32,
         public_key: &str,
+        contact_incarnation: Option<u64>,
     ) -> Result<Vec<String>, String> {
         let inner = self
             .inner
@@ -1059,20 +1183,21 @@ impl WebFileBridge {
             .values()
             .filter(|transfer| {
                 transfer.profile_id == profile_id && transfer.friend_number == friend_number
+                    && contact_incarnation.is_none_or(|epoch| transfer.storage.as_ref()
+                        .is_none_or(|stored| stored.spec.contact_incarnation == epoch))
             })
             .map(|transfer| transfer.message_id.clone())
             .collect::<Vec<_>>();
         drop(inner);
         if let Some(store) = self.store.get() {
-            if !store.is_ready() {
-                return Err("TRANSFER_STORAGE_UNAVAILABLE".to_string());
-            }
             ids.extend(
                 store
-                    .snapshot()
+                    .try_snapshot()
+                    .map_err(|error| error.code().to_string())?
                     .into_iter()
                     .filter(|status| {
                         status.spec.profile_id == profile_id
+                            && contact_incarnation.is_none_or(|epoch| status.spec.contact_incarnation == epoch)
                             && status
                                 .spec
                                 .friend_public_key
@@ -1080,6 +1205,11 @@ impl WebFileBridge {
                     })
                     .map(|status| status.spec.message_id),
             );
+            ids.extend(store.pending_purges().map_err(|error| error.code().to_string())?
+                .into_iter().filter(|spec| spec.profile_id == profile_id
+                    && spec.friend_public_key.eq_ignore_ascii_case(public_key)
+                    && contact_incarnation.is_none_or(|epoch| spec.contact_incarnation == epoch))
+                .map(|spec| spec.message_id));
         }
         ids.sort();
         ids.dedup();
@@ -1097,6 +1227,33 @@ impl WebFileBridge {
         friend_public_key: &str,
         message_id: &str,
     ) -> Result<(), String> {
+        self.forget_message_with_policy(
+            profile_id, friend_number, friend_public_key, message_id, None,
+        )
+    }
+
+    fn purge_message(
+        &self,
+        profile_id: &str,
+        friend_number: u32,
+        friend_public_key: &str,
+        message_id: &str,
+        contact_incarnation: u64,
+    ) -> Result<(), String> {
+        self.forget_message_with_policy(
+            profile_id, friend_number, friend_public_key, message_id, Some(contact_incarnation),
+        )
+    }
+
+    fn forget_message_with_policy(
+        &self,
+        profile_id: &str,
+        friend_number: u32,
+        friend_public_key: &str,
+        message_id: &str,
+        purge_incarnation: Option<u64>,
+    ) -> Result<(), String> {
+        let purge_metadata = purge_incarnation.is_some();
         let mut objects = Vec::new();
         {
             let mut inner = self
@@ -1107,43 +1264,71 @@ impl WebFileBridge {
                 transfer.profile_id == profile_id
                     && transfer.friend_number == friend_number
                     && transfer.message_id == message_id
+                    && purge_incarnation.is_none_or(|epoch| transfer.storage.as_ref()
+                        .is_none_or(|stored| stored.spec.contact_incarnation == epoch))
             }) {
                 // Immediately fence reads/native delivery while asynchronous
                 // storage removal is pending or retrying after an IO error.
                 transfer.state = "cancelled".into();
                 if let Some(stored) = &transfer.storage {
-                    objects.push(stored.spec.object_id.clone());
+                    if stored.spec.profile_id != profile_id
+                        || stored.spec.message_id != message_id
+                        || !stored.spec.friend_public_key.eq_ignore_ascii_case(friend_public_key)
+                    {
+                        return Err("TRANSFER_CONTACT_IDENTITY_CHANGED".into());
+                    }
+                    objects.push(stored.spec.clone());
                 }
             }
         }
         if let Some(store) = self.store.get() {
-            if !store.is_ready() {
-                return Err("TRANSFER_STORAGE_BUSY".into());
-            }
-            let statuses = store.snapshot();
+            let statuses = store.try_snapshot().map_err(|error| error.code().to_string())?;
             objects.extend(
                 statuses
                     .iter()
                     .filter(|status| {
                         status.spec.profile_id == profile_id
                             && status.spec.message_id == message_id
+                            && purge_incarnation.is_none_or(|epoch| status.spec.contact_incarnation == epoch)
                             && status
                                 .spec
                                 .friend_public_key
                                 .eq_ignore_ascii_case(friend_public_key)
                     })
-                    .map(|status| status.spec.object_id.clone()),
+                    .map(|status| status.spec.clone()),
             );
-            objects.sort();
-            objects.dedup();
-            for object_id in objects {
+            objects.extend(store.pending_purges().map_err(|error| error.code().to_string())?
+                .into_iter().filter(|spec| spec.profile_id == profile_id
+                    && spec.message_id == message_id
+                    && spec.friend_public_key.eq_ignore_ascii_case(friend_public_key)
+                    && purge_incarnation.is_none_or(|epoch| spec.contact_incarnation == epoch)));
+            objects.sort_by(|left, right| left.object_id.cmp(&right.object_id));
+            for pair in objects.windows(2) {
+                if pair[0].object_id == pair[1].object_id
+                    && !pair[0].same_identity(&pair[1])
+                {
+                    return Err("TRANSFER_CONTACT_IDENTITY_CHANGED".into());
+                }
+            }
+            objects.dedup_by(|left, right| left.object_id == right.object_id);
+            for spec in objects {
                 if statuses.iter().any(|status| {
-                    status.spec.object_id == object_id && status.phase == StorePhase::Removed
+                    status.spec.same_identity(&spec)
+                        && status.phase == StorePhase::Removed
+                        && (!purge_metadata || status.is_identity_tombstone())
                 }) {
                     continue;
                 }
-                match self.storage_operation(StoreOperation::Remove { object_id })? {
-                    Some(StoreReply::Status(status)) if status.phase == StorePhase::Removed => {}
+                let operation = if purge_metadata {
+                    StoreOperation::Purge { spec: spec.clone() }
+                } else {
+                    StoreOperation::Remove { object_id: spec.object_id.clone() }
+                };
+                match self.storage_operation(operation)? {
+                    Some(StoreReply::Status(status))
+                        if status.spec.same_identity(&spec)
+                            && status.phase == StorePhase::Removed
+                            && (!purge_metadata || status.is_identity_tombstone()) => {}
                     _ => return Err("TRANSFER_STORAGE_BUSY".into()),
                 }
             }
@@ -1175,11 +1360,12 @@ impl WebFileBridge {
             .collect::<Vec<_>>();
         for (id, buffered) in removed {
             inner.transfers.remove(&id);
+            inner.native_generations.remove(&id);
+            inner.pending_native_resumes.remove(&id);
             inner.queue.retain(|queued| queued != &id);
             inner.buffered_bytes = inner.buffered_bytes.saturating_sub(buffered);
-            if inner.active_id.as_deref() == Some(id.as_str()) {
-                inner.active_id = None;
-            }
+            inner.native_identities.remove(&id);
+            inner.release_leg(&id);
         }
         Ok(())
     }
@@ -1190,6 +1376,9 @@ impl WebFileBridge {
         friend_number: u32,
         sent_complete: bool,
     ) -> Result<(), String> {
+        if status.is_identity_tombstone() {
+            return Ok(());
+        }
         let mut inner = self
             .inner
             .lock()
@@ -1301,6 +1490,27 @@ impl WebFileBridge {
         let published = store.snapshot();
         let mut progress = Vec::new();
         for status in published {
+            if status.is_identity_tombstone() {
+                let target = {
+                    let inner = self.inner.lock().map_err(|_| "TRANSFER_STATE_UNAVAILABLE")?;
+                    match inner.transfers.get(&status.spec.object_id) {
+                        None => None,
+                        Some(transfer) => {
+                            if !transfer.storage.as_ref().is_some_and(|stored| {
+                                stored.spec.same_identity(&status.spec)
+                            }) {
+                                return Err("TRANSFER_STORAGE_CONFLICT".into());
+                            }
+                            Some((transfer.profile_id.clone(), transfer.friend_number,
+                                transfer.message_id.clone()))
+                        }
+                    }
+                };
+                if let Some((profile, friend, message)) = target {
+                    self.forget_matching(&profile, friend, Some(&message))?;
+                }
+                continue;
+            }
             let (incoming, through, previous, should_ack, newly_committed, newly_delivered) = {
                 let mut inner = self
                     .inner
@@ -1434,7 +1644,8 @@ impl WebFileBridge {
                         Some(StoreOperation::Finalize {
                             object_id: transfer.id.clone(),
                         })
-                    } else if stored.delivery_confirmed()
+                    } else if self.retention() == StoreRetention::EndpointReceipt
+                        && stored.delivery_confirmed()
                         && !stored.payload_released
                         && transfer
                             .outgoing_delivery_retry_at
@@ -1564,6 +1775,16 @@ impl WebFileBridge {
             .transfers
             .values()
             .filter_map(|transfer| {
+                // Retained history is available on demand, never a request to
+                // download every old file into each newly connected browser.
+                if transfer.state == "complete"
+                    && transfer
+                        .storage
+                        .as_ref()
+                        .is_some_and(StoreObjectStatus::delivery_confirmed)
+                {
+                    return None;
+                }
                 let profile = profiles.get(&transfer.profile_id)?;
                 let settings = profile.file_receive_settings.lock().ok()?.clone();
                 Some(BackgroundTransferWorkEntry::from_transfer(
@@ -1698,10 +1919,11 @@ impl WebFileBridge {
         }
         if let Some(cancelled_id) = cancelled_offer_id {
             inner.transfers.remove(&cancelled_id);
+            inner.native_generations.remove(&cancelled_id);
+            inner.pending_native_resumes.remove(&cancelled_id);
             inner.queue.retain(|queued| queued != &cancelled_id);
-            if inner.active_id.as_deref() == Some(cancelled_id.as_str()) {
-                inner.active_id = None;
-            }
+            inner.native_identities.remove(&cancelled_id);
+            inner.release_leg(&cancelled_id);
         }
         inner.transfers.insert(
             id.clone(),
@@ -1743,8 +1965,36 @@ impl WebFileBridge {
 
     pub(crate) fn next_to_start(&self) -> Option<WebTransferRouting> {
         let mut inner = self.inner.lock().ok()?;
-        if inner.active_id.is_some() {
-            return None;
+        if let Some(active) = inner.active_id.as_deref() {
+            // A local Tox stream needs both of its bound native routes to run.
+            // Its companion shares the current slot and never admits another file.
+            if inner.companion_id.is_some() {
+                return None;
+            }
+            let index = inner.queue.iter().position(|id| {
+                inner.paired_native_legs(active, id)
+                    && inner.transfers.get(id).is_some_and(|transfer| {
+                        transfer.state == "queued" && web_transfer_storage_ready(transfer)
+                    })
+            })?;
+            let id = inner.queue.remove(index)?;
+            let transfer = inner.transfers.get_mut(&id)?;
+            transfer.state = if transfer.outgoing {
+                "sending"
+            } else {
+                "receiving"
+            }
+            .to_string();
+            refresh_outgoing_request(transfer);
+            let route = WebTransferRouting {
+                id: id.clone(),
+                profile_id: transfer.profile_id.clone(),
+                friend_number: transfer.friend_number,
+                file_number: transfer.file_number?,
+                outgoing: transfer.outgoing,
+            };
+            inner.companion_id = Some(id);
+            return Some(route);
         }
         while let Some(id) = inner.queue.pop_front() {
             let (profile_id, friend_number, file_number, outgoing) = {
@@ -1760,14 +2010,7 @@ impl WebFileBridge {
                 if transfer.state != "queued" {
                     continue;
                 }
-                if transfer.storage.is_some()
-                    && (!transfer.storage_ready
-                        || (transfer.outgoing
-                            && !transfer
-                                .storage
-                                .as_ref()
-                                .is_some_and(|stored| stored.phase == StorePhase::Committed)))
-                {
+                if !web_transfer_storage_ready(transfer) {
                     inner.queue.push_front(id);
                     break;
                 }
@@ -1850,8 +2093,152 @@ impl WebFileBridge {
             refresh_outgoing_request(transfer);
             inner.queue.push_front(id.to_string());
         }
-        if inner.active_id.as_deref() == Some(id) {
-            inner.active_id = None;
+        inner.release_leg(id);
+    }
+
+    // Only real native creation sites may stamp a binding, while owning its handle.
+    pub(crate) fn bind_native_transfer_identity(
+        &self,
+        id: &str,
+        generation: u64,
+        file_id: [u8; 32],
+        local_key: String,
+        peer_key: String,
+    ) -> Result<(), String> {
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|_| "TRANSFER_STATE_UNAVAILABLE")?;
+        if inner.native_generations.get(id) != Some(&generation) {
+            return Err("TRANSFER_NATIVE_BINDING_CHANGED".to_string());
+        }
+        if file_id != [0; 32]
+            && local_key.len() == 64
+            && peer_key.len() == 64
+            && local_key != peer_key
+        {
+            let identity = WebNativeTransferIdentity {
+                file_id,
+                local_key,
+                peer_key,
+                generation,
+            };
+            if inner
+                .native_identities
+                .get(id)
+                .is_some_and(|existing| existing.generation == generation && existing != &identity)
+            {
+                return Err("TRANSFER_NATIVE_BINDING_CHANGED".to_string());
+            }
+            inner.native_identities.insert(id.to_string(), identity);
+        }
+        Ok(())
+    }
+
+    fn companion_owner(&self, id: &str) -> Option<String> {
+        let inner = self.inner.lock().ok()?;
+        if inner.companion_id.as_deref() == Some(id) {
+            inner.active_id.clone()
+        } else {
+            None
+        }
+    }
+
+    pub(crate) fn bind_native_generation(&self, id: &str, generation: u64) -> Result<(), String> {
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|_| "TRANSFER_STATE_UNAVAILABLE")?;
+        if !inner.transfers.contains_key(id) {
+            return Err("TRANSFER_NOT_FOUND".to_string());
+        }
+        if inner
+            .native_generations
+            .insert(id.to_string(), generation)
+            .is_some_and(|previous| previous != generation)
+        {
+            inner.native_identities.remove(id);
+        }
+        Ok(())
+    }
+
+    fn retire_obsolete_native_bindings(&self, profile_id: &str, generation: u64) -> bool {
+        let Ok(mut inner) = self.inner.lock() else {
+            return false;
+        };
+        let obsolete_for_profile = |transfer: &WebTransfer| {
+            transfer.profile_id == profile_id
+                && inner
+                    .native_generations
+                    .get(&transfer.id)
+                    .is_some_and(|original| *original != generation)
+        };
+        // Replacing either native handle breaks the same local wire stream.
+        // Retire both unfinished legs and let normal terminal reconciliation
+        // seal their state before admitting the next logical file.
+        let obsolete_pair = inner.companion_id.is_some()
+            && inner
+                .active_ids()
+                .filter_map(|id| inner.transfers.get(id))
+                .any(obsolete_for_profile);
+        let obsolete = inner
+            .transfers
+            .values()
+            .filter(|transfer| {
+                (transfer.outgoing && obsolete_for_profile(transfer)
+                    || obsolete_pair && inner.is_active(&transfer.id))
+                    && transfer.file_number.is_some()
+                    && !transfer.outgoing_remote_complete
+                    && !(transfer.incoming_remote_complete
+                        && transfer.transferred_bytes == transfer.size_bytes)
+                    && !transfer
+                        .storage
+                        .as_ref()
+                        .is_some_and(|stored| stored.delivery_confirmed())
+                    && !matches!(transfer.state.as_str(), "complete" | "cancelled" | "failed")
+            })
+            .map(|transfer| transfer.id.clone())
+            .collect::<Vec<_>>();
+        let mut released = 0;
+        for id in &obsolete {
+            if let Some(transfer) = inner.transfers.get_mut(id) {
+                released += transfer_buffered_bytes(transfer);
+                transfer.outgoing_chunks.clear();
+                transfer.incoming_chunks.clear();
+                transfer.pending_store_append = None;
+                transfer.native_chunk_bytes = None;
+                transfer.state = "failed".to_string();
+                transfer.speed_bytes_per_sec = 0;
+                refresh_outgoing_request(transfer);
+            }
+            inner.pending_native_resumes.remove(id);
+        }
+        inner.buffered_bytes = inner.buffered_bytes.saturating_sub(released);
+        // Existing terminal reconciliation releases the active slot and retains committed store data.
+        !obsolete.is_empty()
+    }
+
+    fn native_route_matches(&self, route: &WebTransferRouting, generation: u64) -> bool {
+        self.inner
+            .lock()
+            .ok()
+            .is_some_and(|inner| bridge_native_route_generation(&inner, route) == Some(generation))
+    }
+
+    fn incoming_resume_generation(&self, route: &WebTransferRouting) -> Option<u64> {
+        let inner = self.inner.lock().ok()?;
+        bridge_incoming_resume_generation(&inner, route)
+    }
+
+    // Called while the matching native handle is held. Local ACK bytes remain committed.
+    fn defer_incoming_native_resume(&self, route: &WebTransferRouting, generation: u64) {
+        let Ok(mut inner) = self.inner.lock() else {
+            return;
+        };
+        if bridge_incoming_resume_generation(&inner, route) == Some(generation) {
+            inner
+                .pending_native_resumes
+                .insert(route.id.clone(), (route.clone(), generation));
         }
     }
 
@@ -1866,16 +2253,38 @@ impl WebFileBridge {
                 inner.queue.push_front(id.to_string());
             }
         }
-        if inner.active_id.as_deref() == Some(id) {
-            inner.active_id = None;
-        }
+        inner.release_leg(id);
     }
 
-    pub(crate) fn on_outgoing_request(&self, id: &str, position: u64, length: usize) -> bool {
+    #[cfg(test)]
+    fn on_outgoing_request(&self, id: &str, position: u64, length: usize) -> bool {
+        self.outgoing_request(id, position, length, None)
+    }
+
+    pub(crate) fn on_outgoing_request_at_generation(
+        &self,
+        id: &str,
+        position: u64,
+        length: usize,
+        generation: u64,
+    ) -> bool {
+        self.outgoing_request(id, position, length, Some(generation))
+    }
+
+    fn outgoing_request(
+        &self,
+        id: &str,
+        position: u64,
+        length: usize,
+        generation: Option<u64>,
+    ) -> bool {
         let Ok(mut inner) = self.inner.lock() else {
             return false;
         };
-        let is_active = inner.active_id.as_deref() == Some(id);
+        if !inner.matches_callback_generation(id, generation) {
+            return false;
+        }
+        let is_active = inner.is_active(id);
         let released = {
             let Some(transfer) = inner.transfers.get_mut(id) else {
                 return false;
@@ -2107,11 +2516,47 @@ impl WebFileBridge {
         Ok(())
     }
 
-    pub(crate) fn incoming_by_native(
+    #[cfg(test)]
+    fn incoming_by_native(
         &self,
         profile_id: &str,
         friend_number: u32,
         file_number: u32,
+    ) -> Option<String> {
+        self.incoming_chunk_route(profile_id, friend_number, file_number, None)
+    }
+
+    #[cfg(test)]
+    fn incoming_terminal_by_native(
+        &self,
+        profile_id: &str,
+        friend_number: u32,
+        file_number: u32,
+    ) -> Option<String> {
+        self.incoming_terminal_route(profile_id, friend_number, file_number, None)
+    }
+
+    pub(crate) fn incoming_callback_route(
+        &self,
+        profile_id: &str,
+        friend_number: u32,
+        file_number: u32,
+        generation: u64,
+        terminal: bool,
+    ) -> Option<String> {
+        if terminal {
+            self.incoming_terminal_route(profile_id, friend_number, file_number, Some(generation))
+        } else {
+            self.incoming_chunk_route(profile_id, friend_number, file_number, Some(generation))
+        }
+    }
+
+    fn incoming_chunk_route(
+        &self,
+        profile_id: &str,
+        friend_number: u32,
+        file_number: u32,
+        generation: Option<u64>,
     ) -> Option<String> {
         let inner = self.inner.lock().ok()?;
         inner.transfers.values().find_map(|transfer| {
@@ -2120,26 +2565,31 @@ impl WebFileBridge {
                     || (transfer.state == "paused" && transfer.incoming_accepted))
                 && transfer.profile_id == profile_id
                 && transfer.friend_number == friend_number
-                && transfer.file_number == Some(file_number))
+                && transfer.file_number == Some(file_number)
+                && inner.matches_callback_generation(&transfer.id, generation))
             .then(|| transfer.id.clone())
         })
     }
 
-    pub(crate) fn incoming_terminal_by_native(
+    fn incoming_terminal_route(
         &self,
         profile_id: &str,
         friend_number: u32,
         file_number: u32,
+        generation: Option<u64>,
     ) -> Option<String> {
         let inner = self.inner.lock().ok()?;
-        let active = inner.active_id.as_deref()?;
-        let transfer = inner.transfers.get(active)?;
-        (!transfer.outgoing
-            && transfer.profile_id == profile_id
-            && transfer.friend_number == friend_number
-            && transfer.file_number == Some(file_number)
-            && !matches!(transfer.state.as_str(), "cancelled" | "failed"))
-        .then(|| transfer.id.clone())
+        let found = inner.active_ids().find_map(|id| {
+            let transfer = inner.transfers.get(id)?;
+            (!transfer.outgoing
+                && transfer.profile_id == profile_id
+                && transfer.friend_number == friend_number
+                && transfer.file_number == Some(file_number)
+                && inner.matches_callback_generation(&transfer.id, generation)
+                && !matches!(transfer.state.as_str(), "cancelled" | "failed"))
+            .then(|| transfer.id.clone())
+        });
+        found
     }
 
     pub(crate) fn push_incoming_chunk(
@@ -2367,7 +2817,7 @@ impl WebFileBridge {
             .lock()
             .map_err(|_| "TRANSFER_STATE_UNAVAILABLE")?;
         let id = id.to_string();
-        let is_active = inner.active_id.as_deref() == Some(id.as_str());
+        let is_active = inner.is_active(&id);
         let (profile_id, friend_number, file_number, outgoing, buffered_removed, queue, deactivate) = {
             let transfer = inner.transfers.get_mut(&id).ok_or("TRANSFER_NOT_FOUND")?;
             if transfer.outgoing_remote_complete {
@@ -2376,6 +2826,23 @@ impl WebFileBridge {
                 return Err("TRANSFER_ALREADY_COMPLETE".to_string());
             }
             let file_number = transfer.file_number.unwrap_or(u32::MAX);
+            // Automatic accept or an earlier browser request can win before
+            // the visible card catches up. Return this receive unchanged.
+            if action == "resume"
+                && !transfer.outgoing
+                && transfer.incoming_accepted
+                && !transfer.locally_paused
+                && (transfer.state == "queued"
+                    || is_active && matches!(transfer.state.as_str(), "receiving" | "backpressure"))
+            {
+                return Ok(WebTransferRouting {
+                    id,
+                    profile_id: transfer.profile_id.clone(),
+                    friend_number: transfer.friend_number,
+                    file_number,
+                    outgoing: false,
+                });
+            }
             let mut buffered_removed = 0_u64;
             let mut queue = false;
             let deactivate;
@@ -2444,7 +2911,7 @@ impl WebFileBridge {
             inner.queue.push_back(id.clone());
         }
         if deactivate {
-            inner.active_id = None;
+            inner.release_leg(&id);
         }
         Ok(WebTransferRouting {
             id,
@@ -2455,10 +2922,16 @@ impl WebFileBridge {
         })
     }
 
-    pub(crate) fn cancel_incoming_for_policy(
+    #[cfg(test)]
+    pub(crate) fn cancel_incoming_for_policy(&self, profile_id: &str) -> Result<bool, String> {
+        self.cancel_incoming_for_policy_at_generation(profile_id, None, 0)
+    }
+
+    pub(crate) fn cancel_incoming_for_policy_at_generation(
         &self,
         profile_id: &str,
-        tox: *mut std::ffi::c_void,
+        tox: Option<ToxRef<'_>>,
+        generation: u64,
     ) -> Result<bool, String> {
         let ids = self
             .inner
@@ -2475,49 +2948,74 @@ impl WebFileBridge {
             .collect::<Vec<_>>();
         for id in &ids {
             let route = self.control_id(id, "cancel")?;
-            if !tox.is_null() && route.file_number != u32::MAX {
-                let mut error = 0_i32;
-                unsafe {
-                    crate::tox_file_control(
-                        tox,
-                        route.friend_number,
-                        route.file_number,
-                        2,
-                        &mut error,
-                    )
-                };
+            if let Some(tox) = tox.filter(|_| {
+                route.file_number != u32::MAX && self.native_route_matches(&route, generation)
+            }) {
+                let mut error = 0;
+                let _ = tox.file_control(route.friend_number, route.file_number, 2, &mut error);
             }
         }
         Ok(!ids.is_empty())
     }
 
-    pub(crate) fn on_native_control(
+    #[cfg(test)]
+    fn on_native_control(
         &self,
         profile_id: &str,
         friend_number: u32,
         file_number: u32,
         control: u32,
     ) -> Option<WebNativeControlUpdate> {
+        self.native_control(profile_id, friend_number, file_number, control, None)
+    }
+
+    pub(crate) fn on_native_control_at_generation(
+        &self,
+        profile_id: &str,
+        friend_number: u32,
+        file_number: u32,
+        control: u32,
+        generation: u64,
+    ) -> Option<WebNativeControlUpdate> {
+        self.native_control(
+            profile_id,
+            friend_number,
+            file_number,
+            control,
+            Some(generation),
+        )
+    }
+
+    fn native_control(
+        &self,
+        profile_id: &str,
+        friend_number: u32,
+        file_number: u32,
+        control: u32,
+        generation: Option<u64>,
+    ) -> Option<WebNativeControlUpdate> {
         let mut inner = self.inner.lock().ok()?;
-        let active_match = inner.active_id.as_ref().and_then(|id| {
-            inner.transfers.get(id).filter(|transfer| {
-                transfer.profile_id == profile_id
-                    && transfer.friend_number == friend_number
-                    && transfer.file_number == Some(file_number)
-                    && !matches!(transfer.state.as_str(), "complete" | "cancelled" | "failed")
-            })?;
+        let matches_route = |transfer: &WebTransfer| {
+            transfer.profile_id == profile_id
+                && transfer.friend_number == friend_number
+                && transfer.file_number == Some(file_number)
+                && inner.matches_callback_generation(&transfer.id, generation)
+                && !matches!(transfer.state.as_str(), "complete" | "cancelled" | "failed")
+        };
+        let active_match = inner.active_ids().find_map(|id| {
+            inner
+                .transfers
+                .get(id)
+                .filter(|transfer| matches_route(transfer))?;
             Some(id.clone())
         });
         let id = active_match.or_else(|| {
-            inner.transfers.values().find_map(|transfer| {
-                (transfer.profile_id == profile_id
-                    && transfer.friend_number == friend_number
-                    && transfer.file_number == Some(file_number)
-                    && !matches!(transfer.state.as_str(), "complete" | "cancelled" | "failed"))
-                .then(|| transfer.id.clone())
-            })
+            inner
+                .transfers
+                .values()
+                .find_map(|transfer| matches_route(transfer).then(|| transfer.id.clone()))
         })?;
-        let is_active = inner.active_id.as_deref() == Some(id.as_str());
+        let is_active = inner.is_active(&id);
         let (message_id, outgoing, state, buffered_removed) = {
             let transfer = inner.transfers.get_mut(&id)?;
             if transfer.outgoing_remote_complete {
@@ -2569,7 +3067,7 @@ impl WebFileBridge {
                 // WorkspaceDomain entry. Releasing it here lets the next
                 // native transfer start against the previous domain slot
                 // and fail with NO_ACTIVE_TRANSFER.
-                debug_assert_eq!(inner.active_id.as_deref(), Some(id.as_str()));
+                debug_assert!(inner.is_active(&id));
             }
         }
         Some(WebNativeControlUpdate {
@@ -2579,28 +3077,36 @@ impl WebFileBridge {
         })
     }
 
-    pub(crate) fn pause_active(&self) -> Option<WebTransferRouting> {
-        let mut inner = self.inner.lock().ok()?;
-        if inner
-            .active_id
-            .as_ref()
-            .and_then(|id| inner.transfers.get(id))
-            .is_some_and(|transfer| transfer.outgoing_remote_complete)
-        {
-            return None;
-        }
-        let id = inner.active_id.take()?;
-        let transfer = inner.transfers.get_mut(&id)?;
-        transfer.state = "paused".to_string();
-        transfer.locally_paused = true;
-        refresh_outgoing_request(transfer);
-        Some(WebTransferRouting {
-            id,
-            profile_id: transfer.profile_id.clone(),
-            friend_number: transfer.friend_number,
-            file_number: transfer.file_number?,
-            outgoing: transfer.outgoing,
-        })
+    fn pause_active(&self) -> Vec<WebTransferRouting> {
+        let Ok(mut inner) = self.inner.lock() else {
+            return Vec::new();
+        };
+        let active: Vec<_> = inner.active_ids().cloned().collect();
+        active
+            .into_iter()
+            .filter_map(|id| {
+                let transfer = inner.transfers.get_mut(&id)?;
+                if transfer.outgoing_remote_complete
+                    || (transfer.incoming_remote_complete
+                        && transfer.transferred_bytes == transfer.size_bytes)
+                    || matches!(transfer.state.as_str(), "complete" | "cancelled" | "failed")
+                {
+                    return None;
+                }
+                transfer.state = "paused".to_string();
+                transfer.locally_paused = true;
+                refresh_outgoing_request(transfer);
+                let route = transfer.file_number.map(|file_number| WebTransferRouting {
+                    id: id.clone(),
+                    profile_id: transfer.profile_id.clone(),
+                    friend_number: transfer.friend_number,
+                    file_number,
+                    outgoing: transfer.outgoing,
+                });
+                inner.release_leg(&id);
+                route
+            })
+            .collect()
     }
 
     pub(crate) fn view(&self, id: &str, now_ms: u64) -> Result<WebTransferView, String> {
@@ -2687,7 +3193,8 @@ impl WebFileBridge {
                 && transfer
                     .storage
                     .as_ref()
-                    .is_some_and(StoreObjectStatus::payload_available),
+                    .is_some_and(|status| self.payload_available(status)),
+            retained_for_mirrors: self.retention() == StoreRetention::UntilRemoval,
         })
     }
 
@@ -2756,7 +3263,7 @@ impl WebFileBridge {
             .inner
             .lock()
             .map(|inner| {
-                inner.active_id.as_deref() == Some(id)
+                inner.is_active(id)
                     && inner
                         .transfers
                         .get(id)
@@ -2787,9 +3294,8 @@ impl WebFileBridge {
                 })
                 .unwrap_or(0);
             inner.buffered_bytes = inner.buffered_bytes.saturating_sub(released);
-            if inner.active_id.as_deref() == Some(id) {
-                inner.active_id = None;
-            }
+            inner.native_identities.remove(id);
+            inner.release_leg(id);
             inner.queue.retain(|queued| queued != id);
             return true;
         }
@@ -2819,16 +3325,18 @@ impl WebFileBridge {
 
     pub(crate) fn active_outgoing_id(&self) -> Option<String> {
         let inner = self.inner.lock().ok()?;
-        let id = inner.active_id.as_ref()?;
-        inner
-            .transfers
-            .get(id)
-            .is_some_and(|transfer| {
-                transfer.outgoing
-                    && transfer.state == "sending"
-                    && !transfer.outgoing_chunks.is_empty()
-            })
-            .then(|| id.clone())
+        let found = inner.active_ids().find_map(|id| {
+            inner
+                .transfers
+                .get(id)
+                .is_some_and(|transfer| {
+                    transfer.outgoing
+                        && transfer.state == "sending"
+                        && !transfer.outgoing_chunks.is_empty()
+                })
+                .then(|| id.clone())
+        });
+        found
     }
 }
 
@@ -2943,12 +3451,7 @@ fn sha256(parts: &[&[u8]]) -> [u8; 32] {
     digest.finalize().into()
 }
 
-fn wipe(value: &mut [u8]) {
-    for byte in value {
-        // Volatile writes make the erasure intent observable to the compiler.
-        unsafe { std::ptr::write_volatile(byte, 0) };
-    }
-}
+use crate::wipe_secret_bytes as wipe;
 
 /// Derives an archive-only key from the user supplied export password.
 ///
@@ -2970,7 +3473,7 @@ pub fn derive_export_key(password: &str, salt: &[u8; 32]) -> Result<[u8; 32], St
 /// import by Kaigen and other compatible Tox clients.
 pub fn encrypt_tox_profile_export(
     mut savedata: Vec<u8>,
-    mut password: String,
+    password: String,
 ) -> Result<Vec<u8>, String> {
     if password.is_empty() {
         wipe(&mut savedata);
@@ -2980,8 +3483,7 @@ pub fn encrypt_tox_profile_export(
         .and_then(|cipher| cipher.encrypt(&savedata))
         .map_err(|_| "PROFILE_EXPORT_ENCRYPTION_FAILED".to_string());
     wipe(&mut savedata);
-    unsafe { wipe(password.as_bytes_mut()) };
-    password.clear();
+    wipe(&mut password.into_bytes());
     result
 }
 
@@ -4311,6 +4813,8 @@ pub struct TransferCoordinator {
     offers: HashMap<String, TransferOffer>,
     queue: VecDeque<String>,
     active_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    companion_id: Option<String>,
     buffered_bytes: u64,
     token_bytes: u64,
     token_updated_at_ms: u64,
@@ -4322,6 +4826,7 @@ impl Default for TransferCoordinator {
             offers: HashMap::new(),
             queue: VecDeque::new(),
             active_id: None,
+            companion_id: None,
             buffered_bytes: 0,
             token_bytes: TRANSFER_RATE_BYTES_PER_SECOND,
             token_updated_at_ms: 0,
@@ -4330,13 +4835,47 @@ impl Default for TransferCoordinator {
 }
 
 impl TransferCoordinator {
+    fn attach_companion(&mut self, owner: &str, id: &str) -> Result<(), String> {
+        let primary = self.offers.get(owner).ok_or("TRANSFER_NOT_FOUND")?;
+        let companion = self.offers.get(id).ok_or("TRANSFER_NOT_FOUND")?;
+        if self.active_id.as_deref() != Some(owner)
+            || self.companion_id.is_some()
+            || companion.state != TransferState::Queued
+            || primary.direction == companion.direction
+            || primary.profile_id == companion.profile_id
+            || primary.size_bytes != companion.size_bytes
+        {
+            return Err("TRANSFER_STATE_INVALID".to_string());
+        }
+        self.queue.retain(|queued| queued != id);
+        self.offers.get_mut(id).ok_or("TRANSFER_NOT_FOUND")?.state = TransferState::Active;
+        self.companion_id = Some(id.to_string());
+        Ok(())
+    }
+
+    fn requeue_companion(&mut self, id: &str) {
+        if self.companion_id.as_deref() == Some(id) {
+            self.companion_id = None;
+            if let Some(offer) = self.offers.get_mut(id) {
+                offer.state = TransferState::Queued;
+                self.queue.push_front(id.to_string());
+            }
+        }
+    }
+
+    fn release_leg(&mut self, id: &str) {
+        if self.active_id.as_deref() == Some(id) {
+            self.active_id = self.companion_id.take();
+            self.start_next();
+        } else if self.companion_id.as_deref() == Some(id) {
+            self.companion_id = None;
+        }
+    }
+
     fn forget(&mut self, id: &str) {
         self.offers.remove(id);
         self.queue.retain(|queued| queued != id);
-        if self.active_id.as_deref() == Some(id) {
-            self.active_id = None;
-            self.start_next();
-        }
+        self.release_leg(id);
     }
 
     pub fn contains(&self, id: &str) -> bool {
@@ -4380,10 +4919,7 @@ impl TransferCoordinator {
         }
         offer.state = TransferState::Paused;
         self.queue.retain(|queued| queued != id);
-        if self.active_id.as_deref() == Some(id) {
-            self.active_id = None;
-            self.start_next();
-        }
+        self.release_leg(id);
         Ok(())
     }
 
@@ -4402,10 +4938,7 @@ impl TransferCoordinator {
         let offer = self.offers.get_mut(id).ok_or("TRANSFER_NOT_FOUND")?;
         offer.state = TransferState::Cancelled;
         self.queue.retain(|queued| queued != id);
-        if self.active_id.as_deref() == Some(id) {
-            self.active_id = None;
-            self.start_next();
-        }
+        self.release_leg(id);
         Ok(())
     }
 
@@ -4450,20 +4983,19 @@ impl TransferCoordinator {
     }
 
     pub fn record_progress(&mut self, bytes: u64, now: u64) -> Result<(), String> {
-        let id = self.active_id.as_ref().ok_or("NO_ACTIVE_TRANSFER")?;
-        let offer = self.offers.get_mut(id).ok_or("TRANSFER_NOT_FOUND")?;
+        let id = self.active_id.clone().ok_or("NO_ACTIVE_TRANSFER")?;
+        let offer = self.offers.get_mut(&id).ok_or("TRANSFER_NOT_FOUND")?;
         offer.transferred_bytes = offer.transferred_bytes.saturating_add(bytes);
         offer.last_progress_at = Some(now);
         if offer.transferred_bytes >= offer.size_bytes {
             offer.state = TransferState::Completed;
-            self.active_id = None;
-            self.start_next();
+            self.release_leg(&id);
         }
         Ok(())
     }
 
     pub fn record_stream_progress(&mut self, id: &str, bytes: u64, now: u64) -> Result<(), String> {
-        if self.active_id.as_deref() != Some(id) {
+        if self.active_id.as_deref() != Some(id) && self.companion_id.as_deref() != Some(id) {
             return Err("NO_ACTIVE_TRANSFER".to_string());
         }
         let offer = self.offers.get_mut(id).ok_or("TRANSFER_NOT_FOUND")?;
@@ -4479,15 +5011,17 @@ impl TransferCoordinator {
         let offer = self.offers.get_mut(id).ok_or("TRANSFER_NOT_FOUND")?;
         offer.transferred_bytes = offer.size_bytes;
         offer.state = TransferState::Completed;
-        if self.active_id.as_deref() == Some(id) {
-            self.active_id = None;
-            self.start_next();
-        }
+        self.release_leg(id);
         Ok(())
     }
 
     pub fn on_ui_lost(&mut self) {
-        if let Some(id) = self.active_id.take() {
+        for id in self
+            .active_id
+            .take()
+            .into_iter()
+            .chain(self.companion_id.take())
+        {
             if let Some(offer) = self.offers.get_mut(&id) {
                 offer.state = TransferState::Paused;
             }
@@ -4653,6 +5187,13 @@ impl ProfileCatalog {
         if self.selected_profile_id.is_none() {
             self.selected_profile_id = Some(id);
         }
+        Ok(())
+    }
+
+    pub fn activate_for_mirror(&mut self, id: &str) -> Result<(), String> {
+        let selected = self.selected_profile_id.clone();
+        self.activate(id)?;
+        self.selected_profile_id = selected;
         Ok(())
     }
 
@@ -5047,6 +5588,10 @@ impl WorkspaceDomain {
     }
 
     pub fn lock_after_restart(&mut self) {
+        // Native handles and their pair proof do not survive a restart.
+        if self.transfers.companion_id.is_some() {
+            self.transfers.on_ui_lost();
+        }
         if self.resume_profile_ids.is_empty() {
             self.resume_profile_ids = self
                 .profiles
@@ -5182,12 +5727,14 @@ impl WebQtoxImportTemp {
                 std::process::id(),
                 NEXT.fetch_add(1, Ordering::Relaxed)
             ));
-            let mut builder = fs::DirBuilder::new();
+            let builder = fs::DirBuilder::new();
             #[cfg(unix)]
-            {
+            let builder = {
                 use std::os::unix::fs::DirBuilderExt;
+                let mut builder = builder;
                 builder.mode(0o700);
-            }
+                builder
+            };
             match builder.create(&root) {
                 Ok(()) => {
                     created = Some(Self { root });
@@ -5207,7 +5754,7 @@ impl WebQtoxImportTemp {
             }
             let mut bytes = profiles::read_file(&source)?;
             if bytes.len() as u64 > MAX_MATERIAL_BYTES {
-                crate::wipe_sensitive_bytes(&mut bytes);
+                crate::wipe_secret_bytes(&mut bytes);
                 return Err("QTOX_ZIP_MATERIAL_TOO_LARGE".to_string());
             }
             let written = fs::OpenOptions::new()
@@ -5215,7 +5762,7 @@ impl WebQtoxImportTemp {
                 .create_new(true)
                 .open(temporary.root.join(name))
                 .and_then(|mut file| std::io::Write::write_all(&mut file, &bytes));
-            crate::wipe_sensitive_bytes(&mut bytes);
+            crate::wipe_secret_bytes(&mut bytes);
             written.map_err(|_| "QTOX_IMPORT_TEMP_UNAVAILABLE")?;
         }
         Ok(temporary)
@@ -5236,6 +5783,19 @@ impl Drop for WebQtoxImportTemp {
 /// Owns the native processes and toxcore handles for exactly one workspace.
 /// It is intentionally not serializable: disk metadata survives a restart,
 /// while Tor/toxcore are recreated only after a valid workspace password.
+pub struct WebBootstrapNodesUpdate {
+    owner: Arc<crate::bootstrap_nodes::State>,
+    nodes: Vec<crate::bootstrap_nodes::Node>,
+}
+
+impl WebBootstrapNodesUpdate {
+    pub fn commit(self, checkpoint: impl FnOnce() -> Result<(), String>) -> Result<(), String> {
+        self.owner.replace_after_checkpoint(self.nodes, checkpoint)
+    }
+}
+
+pub type WebProfileEventHandler = Arc<dyn Fn(String, serde_json::Value) + Send + Sync>;
+
 pub struct WebWorkspaceRuntime {
     workspace_root: PathBuf,
     resource_root: PathBuf,
@@ -5245,9 +5805,11 @@ pub struct WebWorkspaceRuntime {
     proxy_settings_path: PathBuf,
     network_settings: Arc<Mutex<NetworkSettings>>,
     network_settings_path: PathBuf,
+    bootstrap_nodes: Arc<crate::bootstrap_nodes::State>,
     profiles: HashMap<String, Arc<ToxState>>,
     retained_stopped_profiles: HashMap<String, Arc<ToxState>>,
     file_bridge: Arc<WebFileBridge>,
+    event_handler: Arc<Mutex<Option<WebProfileEventHandler>>>,
 }
 
 /// A contact snapshot bound to one loaded profile. Native iteration can finish
@@ -5255,6 +5817,121 @@ pub struct WebWorkspaceRuntime {
 pub struct WebFriendsRequest {
     profile_id: String,
     profile: Arc<ToxState>,
+}
+
+/// Prepared under the workspace dispatcher, read on a blocking worker after
+/// releasing it. The captured native account and stable peer cannot be retargeted.
+pub struct WebNotificationRequest {
+    profile_id: String,
+    profile: Arc<ToxState>,
+    event: crate::ProfileNotification,
+    event_id: String,
+}
+
+impl WebNotificationRequest {
+    pub fn execute(&self) -> Option<crate::webgate_notifications::NotificationProjection> {
+        use crate::webgate_notifications::{excerpt, NotificationKind, NotificationProjection};
+        let (kind, message_id, friend_public_key, public_key, title, body) = match &self.event {
+            crate::ProfileNotification::Message {
+                friend_number,
+                friend_public_key,
+                message_id,
+            } => {
+                if !self
+                    .profile
+                    .stable_friend_public_key(*friend_number)
+                    .eq_ignore_ascii_case(friend_public_key)
+                {
+                    return None;
+                }
+                let _transaction = self.profile.chat_transaction_gate.lock().ok()?;
+                let resident = self
+                    .profile
+                    .messages
+                    .lock()
+                    .ok()?
+                    .iter()
+                    .find(|message| {
+                        message.id == *message_id
+                            && crate::message_matches_friend(
+                                message,
+                                *friend_number,
+                                friend_public_key,
+                            )
+                    })
+                    .cloned();
+                let message = resident.or_else(|| {
+                    if !self.profile.history_enabled.load(Ordering::Acquire) {
+                        return None;
+                    }
+                    crate::chat_history_store::find_message_registered(
+                        &self.profile.history_path,
+                        *friend_number,
+                        friend_public_key,
+                        message_id,
+                    )
+                    .ok()
+                    .flatten()
+                })?;
+                if message.mine || message.event.is_some() {
+                    return None;
+                }
+                let title = self
+                    .profile
+                    .friend_cache
+                    .lock()
+                    .ok()?
+                    .get(friend_public_key)
+                    .map(|friend| excerpt(friend.name.trim()))
+                    .unwrap_or_default();
+                let body = if message.text.trim().is_empty() {
+                    message
+                        .attachment
+                        .as_ref()
+                        .map(|file| excerpt(&file.name))
+                        .unwrap_or_default()
+                } else {
+                    excerpt(&message.text)
+                };
+                (
+                    NotificationKind::Message,
+                    Some(message_id.clone()),
+                    Some(friend_public_key.to_ascii_uppercase()),
+                    None,
+                    title,
+                    body,
+                )
+            }
+            crate::ProfileNotification::Request { public_key } => {
+                let request = self
+                    .profile
+                    .incoming_requests
+                    .lock()
+                    .ok()?
+                    .iter()
+                    .find(|request| request.public_key.eq_ignore_ascii_case(public_key))
+                    .cloned()?;
+                (
+                    NotificationKind::Request,
+                    None,
+                    None,
+                    Some(public_key.to_ascii_uppercase()),
+                    String::new(),
+                    excerpt(&request.message),
+                )
+            }
+        };
+        Some(NotificationProjection {
+            version: 1,
+            event_id: self.event_id.clone(),
+            kind,
+            message_id,
+            friend_public_key,
+            public_key,
+            title,
+            body,
+        })
+    }
 }
 
 impl WebFriendsRequest {
@@ -5296,7 +5973,10 @@ impl fmt::Debug for WebWorkspaceRuntime {
         formatter
             .debug_struct("WebWorkspaceRuntime")
             .field("active_profiles", &self.profiles.len())
-            .field("retained_stopped_profiles", &self.retained_stopped_profiles.len())
+            .field(
+                "retained_stopped_profiles",
+                &self.retained_stopped_profiles.len(),
+            )
             .field("tor_state", &self.tor.status().state)
             .finish()
     }
@@ -5310,6 +5990,8 @@ impl WebWorkspaceRuntime {
         if !self.profiles.is_empty() {
             return Err("TRANSFER_STORAGE_INSTALL_TOO_LATE".to_string());
         }
+        // The store owns the immutable retention/read policy; do not advertise
+        // retention independently from the worker that admits actual ranges.
         self.file_bridge.install_store(store)
     }
 
@@ -5344,6 +6026,10 @@ impl WebWorkspaceRuntime {
             .ok()
             .and_then(|contents| serde_json::from_slice(&contents).ok())
             .unwrap_or_default();
+        let bootstrap_nodes = crate::bootstrap_nodes::State::load(
+            Some(runtime_root.join("bootstrap-nodes.json")),
+            true,
+        )?;
         let tor = TorManager::new_privacy_preserving(resource_root.clone(), runtime_root)?;
         Ok(Self {
             workspace_root,
@@ -5354,10 +6040,103 @@ impl WebWorkspaceRuntime {
             proxy_settings_path,
             network_settings: Arc::new(Mutex::new(network_settings)),
             network_settings_path,
+            bootstrap_nodes,
             profiles: HashMap::new(),
             retained_stopped_profiles: HashMap::new(),
             file_bridge: Arc::new(WebFileBridge::default()),
+            event_handler: Arc::new(Mutex::new(None)),
         })
+    }
+
+    /// Install the workspace event sink without replacing any running ToxState.
+    /// The sink must never acquire the workspace dispatcher mutex: native Tox
+    /// callbacks may run while a command already owns that mutex.
+    pub fn set_event_handler(&self, handler: WebProfileEventHandler) {
+        if let Ok(mut slot) = self.event_handler.lock() {
+            *slot = Some(handler);
+        }
+    }
+
+    pub fn webgate_transport_policy(
+        &self,
+        allow_private_networks: bool,
+    ) -> crate::webgate::TransportPolicy {
+        let ready_tor = self.tor.clone();
+        let required_tor = self.tor.clone();
+        let proxy_settings = Arc::clone(&self.proxy_settings);
+        crate::webgate::TransportPolicy {
+            allow_private_networks,
+            require_tor: Some(Arc::new(move || required_tor.enabled())),
+            tor: Some(Arc::new(move || {
+                if !ready_tor.enabled() || !ready_tor.is_ready() {
+                    return None;
+                }
+                ready_tor
+                    .proxy_port()
+                    .map(|port| std::net::SocketAddr::from(([127, 0, 0, 1], port)))
+            })),
+            proxy: Some(Arc::new(move || {
+                use crate::webgate::{ProxyMode, ProxyRoute};
+                let Ok(settings) = proxy_settings.lock() else {
+                    return Some(ProxyRoute {
+                        mode: ProxyMode::Unsupported,
+                        host: String::new(),
+                        port: 0,
+                        username: String::new(),
+                        password: String::new(),
+                    });
+                };
+                let mode = match settings.mode.as_str() {
+                    "none" => return None,
+                    "http" => ProxyMode::HttpConnect,
+                    "socks5" => ProxyMode::Socks5,
+                    _ => ProxyMode::Unsupported,
+                };
+                Some(ProxyRoute {
+                    mode,
+                    host: settings.host.clone(),
+                    port: settings.port,
+                    username: settings.username.clone(),
+                    password: settings.password.clone(),
+                })
+            })),
+            ..crate::webgate::TransportPolicy::default()
+        }
+    }
+
+    fn profile_event_emitter(&self, profile_id: &str) -> crate::ProfileUpdateEmitter {
+        let handlers = Arc::clone(&self.event_handler);
+        let profile_id = profile_id.to_string();
+        crate::ProfileUpdateEmitter(Arc::new(move |notification| {
+            let payload = match notification {
+                Some(crate::ProfileNotification::Message {
+                    friend_number,
+                    friend_public_key,
+                    message_id,
+                }) => {
+                    let event_id = format!(
+                        "message:{}:{}",
+                        friend_public_key.to_ascii_uppercase(),
+                        message_id
+                    );
+                    serde_json::json!({ "kind": "message", "friendNumber": friend_number,
+                        "friendPublicKey": friend_public_key, "messageId": message_id,
+                        "notificationEventId": event_id })
+                }
+                Some(crate::ProfileNotification::Request { public_key }) => {
+                    let event_id = crate::webgate::new_operation_id()
+                        .ok()
+                        .map(|id| format!("request:{id}"));
+                    serde_json::json!({ "kind": "friend-request", "publicKey": public_key,
+                        "notificationEventId": event_id })
+                }
+                None => serde_json::json!({ "kind": "profile" }),
+            };
+            let handler = handlers.lock().ok().and_then(|slot| slot.clone());
+            if let Some(handler) = handler {
+                handler(profile_id.clone(), payload);
+            }
+        }))
     }
 
     pub fn prepare_friends(&self, profile_id: &str) -> Result<WebFriendsRequest, String> {
@@ -5372,6 +6151,51 @@ impl WebWorkspaceRuntime {
     }
 
     pub fn friends_request_is_current(&self, request: &WebFriendsRequest) -> bool {
+        self.profiles
+            .get(&request.profile_id)
+            .is_some_and(|profile| Arc::ptr_eq(profile, &request.profile))
+    }
+
+    pub fn prepare_notification(
+        &self,
+        profile_id: &str,
+        payload: &Value,
+    ) -> Option<WebNotificationRequest> {
+        let event_id = payload.get("notificationEventId")?.as_str()?;
+        if !crate::webgate_notifications::valid_event_id(event_id) {
+            return None;
+        }
+        let key = |field| {
+            payload
+                .get(field)
+                .and_then(Value::as_str)
+                .filter(|key| key.len() == 64 && key.bytes().all(|byte| byte.is_ascii_hexdigit()))
+                .map(str::to_ascii_uppercase)
+        };
+        let event = match payload.get("kind")?.as_str()? {
+            "message" => crate::ProfileNotification::Message {
+                friend_number: u32::try_from(payload.get("friendNumber")?.as_u64()?).ok()?,
+                friend_public_key: key("friendPublicKey")?,
+                message_id: payload
+                    .get("messageId")?
+                    .as_str()
+                    .filter(|id| !id.is_empty() && id.len() <= 128)?
+                    .to_string(),
+            },
+            "friend-request" => crate::ProfileNotification::Request {
+                public_key: key("publicKey")?,
+            },
+            _ => return None,
+        };
+        Some(WebNotificationRequest {
+            profile_id: profile_id.to_string(),
+            profile: self.profiles.get(profile_id)?.clone(),
+            event,
+            event_id: event_id.to_string(),
+        })
+    }
+
+    pub fn notification_request_is_current(&self, request: &WebNotificationRequest) -> bool {
         self.profiles
             .get(&request.profile_id)
             .is_some_and(|profile| Arc::ptr_eq(profile, &request.profile))
@@ -5426,7 +6250,12 @@ impl WebWorkspaceRuntime {
         if self.retained_stopped_profiles.contains_key(profile_id) {
             return Err("PROFILE_FINALIZATION_REQUIRED".to_string());
         }
-        if self.profiles.len().saturating_add(self.retained_stopped_profiles.len()) >= 3 {
+        if self
+            .profiles
+            .len()
+            .saturating_add(self.retained_stopped_profiles.len())
+            >= 3
+        {
             return Err("ACTIVE_PROFILE_LIMIT".to_string());
         }
         if self.profiles.contains_key(profile_id) {
@@ -5439,17 +6268,17 @@ impl WebWorkspaceRuntime {
         let volume = KaiProfileVolume::create(container_path, profile_password)?;
         let paths = self.profile_paths_for_volume(Arc::clone(&volume))?;
         let mut state = ToxState::new_for_profile(
-            paths.with_legacy_033_owner(profile_id),
+            paths.with_profile_owner(profile_id, Arc::clone(&self.bootstrap_nodes)),
             self.tor.clone(),
             Arc::clone(&self.proxy_settings),
             Arc::clone(&self.network_settings),
-            None,
+            Some(self.profile_event_emitter(profile_id)),
             None,
             None,
             Some(display_name),
         )?;
-        state.transfer_log_path = PathBuf::new();
-        state.network_log_path = PathBuf::new();
+        state.transfer_log_path = crate::ProfileLogPath::disabled();
+        state.network_log_path = crate::ProfileLogPath::disabled();
         state.web_profile_id = Some(profile_id.to_string());
         state.web_file_bridge = Some(Arc::clone(&self.file_bridge));
         crate::initialize_created_profile_offline(&state)?;
@@ -5473,7 +6302,12 @@ impl WebWorkspaceRuntime {
         if self.profiles.contains_key(profile_id) {
             return Ok(());
         }
-        if self.profiles.len().saturating_add(self.retained_stopped_profiles.len()) >= 3 {
+        if self
+            .profiles
+            .len()
+            .saturating_add(self.retained_stopped_profiles.len())
+            >= 3
+        {
             return Err("ACTIVE_PROFILE_LIMIT".to_string());
         }
         let container_path = self.profile_container_path(profile_id)?;
@@ -5481,17 +6315,17 @@ impl WebWorkspaceRuntime {
         let paths = self.profile_paths_for_volume(volume)?;
         let (savedata, cipher) = profiles::read_profile(&paths.profile_path, profile_password)?;
         let mut state = ToxState::new_for_profile(
-            paths.with_legacy_033_owner(profile_id),
+            paths.with_profile_owner(profile_id, Arc::clone(&self.bootstrap_nodes)),
             self.tor.clone(),
             Arc::clone(&self.proxy_settings),
             Arc::clone(&self.network_settings),
-            None,
+            Some(self.profile_event_emitter(profile_id)),
             Some(savedata),
             cipher,
             None,
         )?;
-        state.transfer_log_path = PathBuf::new();
-        state.network_log_path = PathBuf::new();
+        state.transfer_log_path = crate::ProfileLogPath::disabled();
+        state.network_log_path = crate::ProfileLogPath::disabled();
         state.web_profile_id = Some(profile_id.to_string());
         state.web_file_bridge = Some(Arc::clone(&self.file_bridge));
         let state = Arc::new(state);
@@ -5556,7 +6390,13 @@ impl WebWorkspaceRuntime {
         if self.retained_stopped_profiles.contains_key(profile_id) {
             return Err("PROFILE_FINALIZATION_REQUIRED".to_string());
         }
-        if activate && self.profiles.len().saturating_add(self.retained_stopped_profiles.len()) >= 3 {
+        if activate
+            && self
+                .profiles
+                .len()
+                .saturating_add(self.retained_stopped_profiles.len())
+                >= 3
+        {
             return Err("ACTIVE_PROFILE_LIMIT".to_string());
         }
         if self.profiles.contains_key(profile_id) {
@@ -5583,12 +6423,12 @@ impl WebWorkspaceRuntime {
                     )
                 })
             {
-                crate::wipe_sensitive_bytes(bytes);
+                crate::wipe_secret_bytes(bytes);
                 return Err("KAI_VOLUME_PATH_INVALID".to_string());
             }
             let destination = paths.data_dir.join(relative_path);
             let result = profiles::write_file(&destination, bytes);
-            crate::wipe_sensitive_bytes(bytes);
+            crate::wipe_secret_bytes(bytes);
             result?;
         }
         let qtox_history = paths.data_dir.join("qtox-import/history.db");
@@ -5610,17 +6450,17 @@ impl WebWorkspaceRuntime {
         };
         profiles::write_file(&paths.profile_path, &savedata)?;
         let mut state = ToxState::new_for_profile(
-            paths.with_legacy_033_owner(profile_id),
+            paths.with_profile_owner(profile_id, Arc::clone(&self.bootstrap_nodes)),
             self.tor.clone(),
             Arc::clone(&self.proxy_settings),
             Arc::clone(&self.network_settings),
-            None,
+            Some(self.profile_event_emitter(profile_id)),
             Some(savedata),
             None,
             None,
         )?;
-        state.transfer_log_path = PathBuf::new();
-        state.network_log_path = PathBuf::new();
+        state.transfer_log_path = crate::ProfileLogPath::disabled();
+        state.network_log_path = crate::ProfileLogPath::disabled();
         state.web_profile_id = Some(profile_id.to_string());
         state.web_file_bridge = Some(Arc::clone(&self.file_bridge));
         let state = Arc::new(state);
@@ -5634,33 +6474,18 @@ impl WebWorkspaceRuntime {
             let (self_key, friends) = {
                 let handle = state.handle.lock().map_err(|_| "TOX_BUSY".to_string())?;
                 let handle = handle.as_ref().ok_or("TOX_NOT_INITIALIZED")?;
-                let mut address = [0_u8; 38];
-                unsafe {
-                    crate::tox_self_get_address(handle.instance.as_ptr(), address.as_mut_ptr())
-                };
+                let tox = handle.native();
+                let address = tox.address();
                 let mut self_key = [0_u8; 32];
                 self_key.copy_from_slice(&address[..32]);
-                let count =
-                    unsafe { crate::tox_self_get_friend_list_size(handle.instance.as_ptr()) };
-                let mut numbers = vec![0_u32; count];
-                unsafe {
-                    crate::tox_self_get_friend_list(handle.instance.as_ptr(), numbers.as_mut_ptr())
-                };
-                let mut friends = HashMap::<Vec<u8>, u32>::new();
-                for number in numbers {
-                    let mut key = [0_u8; 32];
-                    let mut error = 0_i32;
-                    if unsafe {
-                        crate::tox_friend_get_public_key(
-                            handle.instance.as_ptr(),
-                            number,
-                            key.as_mut_ptr(),
-                            &mut error,
-                        )
-                    } {
-                        friends.insert(key.to_vec(), number);
-                    }
-                }
+                let friends = tox
+                    .friend_numbers()
+                    .into_iter()
+                    .filter_map(|number| {
+                        tox.friend_public_key(number, &mut 0)
+                            .map(|key| (key.to_vec(), number))
+                    })
+                    .collect::<HashMap<_, _>>();
                 (self_key, friends)
             };
             let converted = crate::qtox_import::import_profile_data(
@@ -5788,7 +6613,8 @@ impl WebWorkspaceRuntime {
 
     pub fn stop_profile(&mut self, profile_id: &str) -> Result<(), String> {
         if let Some(profile) = self.profiles.remove(profile_id) {
-            self.retained_stopped_profiles.insert(profile_id.to_string(), profile);
+            self.retained_stopped_profiles
+                .insert(profile_id.to_string(), profile);
         }
         if let Some(profile) = self.retained_stopped_profiles.get(profile_id).cloned() {
             profile.stop();
@@ -5824,6 +6650,7 @@ impl WebWorkspaceRuntime {
         if directory.parent() != Some(profiles_root.as_path()) {
             return Err("PROFILE_PATH_INVALID".to_string());
         }
+        crate::retire_profile_logs_under(directory)?;
         if directory.exists() {
             fs::remove_dir_all(directory)
                 .map_err(|error| format!("Could not remove profile data: {error}"))?;
@@ -5832,8 +6659,12 @@ impl WebWorkspaceRuntime {
     }
 
     pub fn stop(&mut self) -> Result<(), String> {
-        let profile_ids = self.profiles.keys()
-            .chain(self.retained_stopped_profiles.keys()).cloned().collect::<Vec<_>>();
+        let profile_ids = self
+            .profiles
+            .keys()
+            .chain(self.retained_stopped_profiles.keys())
+            .cloned()
+            .collect::<Vec<_>>();
         let mut first_error = None;
         for profile_id in profile_ids {
             if let Err(error) = self.stop_profile(&profile_id) {
@@ -5879,32 +6710,18 @@ impl WebWorkspaceRuntime {
         let (mut savedata, self_key, friends) = {
             let handle = profile.handle.lock().map_err(|_| "TOX_BUSY".to_string())?;
             let handle = handle.as_ref().ok_or("TOX_NOT_INITIALIZED")?;
-            let length = unsafe { crate::tox_get_savedata_size(handle.instance.as_ptr()) };
-            let mut savedata = vec![0_u8; length];
-            unsafe { crate::tox_get_savedata(handle.instance.as_ptr(), savedata.as_mut_ptr()) };
-            let mut address = [0_u8; 38];
-            unsafe { crate::tox_self_get_address(handle.instance.as_ptr(), address.as_mut_ptr()) };
+            let savedata = handle.savedata();
+            let address = handle.address();
             let mut self_key = [0_u8; 32];
             self_key.copy_from_slice(&address[..32]);
-            let count = unsafe { crate::tox_self_get_friend_list_size(handle.instance.as_ptr()) };
-            let mut numbers = vec![0_u32; count];
-            unsafe {
-                crate::tox_self_get_friend_list(handle.instance.as_ptr(), numbers.as_mut_ptr())
-            };
+            let numbers = handle.friend_numbers();
             let friends = numbers
                 .into_iter()
                 .filter_map(|number| {
-                    let mut key = [0_u8; 32];
-                    let mut error = 0_i32;
-                    unsafe {
-                        crate::tox_friend_get_public_key(
-                            handle.instance.as_ptr(),
-                            number,
-                            key.as_mut_ptr(),
-                            &mut error,
-                        )
-                    }
-                    .then_some((number, key))
+                    handle
+                        .native()
+                        .friend_public_key(number, &mut 0)
+                        .map(|key| (number, key))
                 })
                 .collect::<Vec<_>>();
             (savedata, self_key, friends)
@@ -5912,7 +6729,7 @@ impl WebWorkspaceRuntime {
         let tox_bytes = match cipher.as_ref() {
             Some(cipher) => {
                 let encrypted = cipher.encrypt(&savedata);
-                crate::wipe_sensitive_bytes(&mut savedata);
+                crate::wipe_secret_bytes(&mut savedata);
                 encrypted?
             }
             None => savedata,
@@ -5930,7 +6747,7 @@ impl WebWorkspaceRuntime {
             let bytes = match cipher.as_ref() {
                 Some(cipher) => {
                     let encrypted = cipher.encrypt(&bytes);
-                    crate::wipe_sensitive_bytes(&mut bytes);
+                    crate::wipe_secret_bytes(&mut bytes);
                     encrypted?
                 }
                 None => bytes,
@@ -6002,6 +6819,8 @@ impl WebWorkspaceRuntime {
         domain: &mut WorkspaceDomain,
         profile_id: &str,
         friend_number: u32,
+        expected_public_key: &str,
+        expected_contact_incarnation: Option<u64>,
         filename: &str,
         mime: &str,
         size_bytes: u64,
@@ -6010,6 +6829,13 @@ impl WebWorkspaceRuntime {
         now: u64,
         now_ms: u64,
     ) -> Result<WebTransferView, String> {
+        if expected_public_key.len() != 64
+            || !expected_public_key
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Err("CHAT_CONTACT_IDENTITY_CHANGED".to_string());
+        }
         if operation_id.len() != 32
             || !operation_id
                 .bytes()
@@ -6037,8 +6863,15 @@ impl WebWorkspaceRuntime {
             .ok_or("PROFILE_NOT_ACTIVE")?;
         let (peer_online, connection_revision) =
             crate::observe_chat_peer_connection(&profile, friend_number)?;
-        let (friend_public_key, transaction) =
-            crate::lock_chat_transaction_for_friend(&profile, friend_number)?;
+        let (friend_public_key, transaction) = crate::lock_chat_transaction_for_friend_bound(
+            &profile,
+            friend_number,
+            Some(expected_public_key),
+        )?;
+        crate::pending_contact::require_incarnation(
+            &profile, &friend_public_key, expected_contact_incarnation,
+        )?;
+        let contact_incarnation = expected_contact_incarnation.unwrap_or(0);
         let name = crate::safe_file_name(filename);
         let mime = sanitize_untrusted_text(mime)
             .chars()
@@ -6049,6 +6882,7 @@ impl WebWorkspaceRuntime {
             .operation_transfer(profile_id, operation_id)
         {
             if existing.friend_public_key != friend_public_key
+                || existing.contact_incarnation != contact_incarnation
                 || existing.name != name
                 || existing.mime != mime
                 || existing.size_bytes != size_bytes
@@ -6075,12 +6909,13 @@ impl WebWorkspaceRuntime {
         if size_bytes > crate::MAX_CHAT_FILE_BYTES {
             return Err("TRANSFER_FILE_TOO_LARGE".to_string());
         }
-        let message_id =
-            if profile.chat_protocol.supports(friend_number) || profile.pq.is_v2(friend_number) {
-                crate::chat_protocol::new_common_message_id()?
-            } else {
-                crate::new_message_id(friend_number)
-            };
+        let message_id = if profile.chat_protocol.supports(friend_number)
+            || profile.pq.owns_session(friend_number)
+        {
+            crate::chat_protocol::new_common_message_id()?
+        } else {
+            crate::new_message_id(friend_number)
+        };
         let transfer_id = self.file_bridge.enqueue_outgoing(
             profile_id,
             friend_number,
@@ -6097,6 +6932,7 @@ impl WebWorkspaceRuntime {
                 profile_id: profile_id.to_string(),
                 message_id: message_id.clone(),
                 friend_public_key: friend_public_key.clone(),
+                contact_incarnation,
                 direction: StoreDirection::Outgoing,
                 name: name.clone(),
                 mime: mime.clone(),
@@ -6122,7 +6958,7 @@ impl WebWorkspaceRuntime {
             }
         };
         let negotiated = profile.chat_protocol.supports(friend_number)
-            || pq_pending && profile.pq.is_v2(friend_number);
+            || pq_pending && profile.pq.owns_session(friend_number);
         let message = crate::ToxMessage {
             id: message_id.clone(),
             friend_number,
@@ -6190,7 +7026,7 @@ impl WebWorkspaceRuntime {
         self.file_bridge.view(&transfer_id, now_ms)
     }
 
-    fn start_next_web_transfer(&mut self) -> Result<(), String> {
+    fn start_next_web_transfer(&mut self, domain: &mut WorkspaceDomain) -> Result<(), String> {
         let Some(route) = self.file_bridge.next_to_start() else {
             return Ok(());
         };
@@ -6198,29 +7034,74 @@ impl WebWorkspaceRuntime {
             self.file_bridge.scheduled_start_failed(&route.id);
             return Err("PROFILE_NOT_ACTIVE".to_string());
         };
+        {
+            let _handle = profile.handle.lock().map_err(|_| "TOX_BUSY")?;
+            self.file_bridge.require_contact_incarnation(&profile, &route.id)?;
+            if !crate::local_transport_ready(&profile)
+                || (route.file_number != u32::MAX
+                    && !self.file_bridge.native_route_matches(
+                        &route,
+                        profile.handle_generation.load(Ordering::SeqCst),
+                    ))
+            {
+                self.file_bridge.scheduled_start_failed(&route.id);
+                return Ok(());
+            }
+        }
         if route.file_number != u32::MAX {
-            if resume_web_transfer_with_native_control(
+            if let Some(owner) = self.file_bridge.companion_owner(&route.id) {
+                let owner_route = self.file_bridge.routing(&owner)?;
+                let owner_ready =
+                    self.profiles
+                        .get(&owner_route.profile_id)
+                        .is_some_and(|profile| {
+                            crate::local_transport_ready(profile)
+                                && self.file_bridge.native_route_matches(
+                                    &owner_route,
+                                    profile.handle_generation.load(Ordering::SeqCst),
+                                )
+                        });
+                if !owner_ready {
+                    self.file_bridge.scheduled_start_failed(&route.id);
+                    return Ok(());
+                }
+                if let Err(error) = domain.transfers.attach_companion(&owner, &route.id) {
+                    self.file_bridge.scheduled_start_failed(&route.id);
+                    return Err(error);
+                }
+            }
+            let resumed = resume_web_transfer_with_native_control(
                 &profile.handle,
                 &profile.file_receive_settings,
                 &self.file_bridge,
                 &profile.messages,
                 &route,
                 |tox| {
-                    let mut error = 0_i32;
-                    unsafe {
-                        let _ = crate::tox_file_control(
-                            tox,
-                            route.friend_number,
-                            route.file_number,
-                            0,
-                            &mut error,
-                        );
+                    if self.file_bridge.require_contact_incarnation(&profile, &route.id).is_err() {
+                        return WEB_NATIVE_ROUTE_NOT_READY;
                     }
+                    if !crate::local_transport_ready(&profile)
+                        || !self.file_bridge.native_route_matches(
+                            &route,
+                            profile.handle_generation.load(Ordering::SeqCst),
+                        )
+                    {
+                        return WEB_NATIVE_ROUTE_NOT_READY;
+                    }
+                    let mut error = 0_i32;
+                    let _ = tox.file_control(route.friend_number, route.file_number, 0, &mut error);
                     error
                 },
                 #[cfg(test)]
                 || {},
-            )? {
+            );
+            if resumed != Ok(true)
+                && domain.transfers.companion_id.as_deref() == Some(route.id.as_str())
+            {
+                self.file_bridge.scheduled_start_failed(&route.id);
+                domain.transfers.requeue_companion(&route.id);
+            }
+            if resumed? {
                 crate::persist_tox_history(
                     &profile.messages,
                     &profile.history_path,
@@ -6241,7 +7122,7 @@ impl WebWorkspaceRuntime {
         };
         let friend_public_key = profile.stable_friend_public_key(route.friend_number);
         if !profile.chat_transport_ready.load(Ordering::Acquire)
-            || crate::file_chat_transport_waits_for_pq(&profile, route.friend_number)
+            || crate::ordinary_chat_transport_waits_for_pq(&profile, route.friend_number)
         {
             self.file_bridge.scheduled_start_failed(&route.id);
             return Ok(());
@@ -6260,6 +7141,7 @@ impl WebWorkspaceRuntime {
         {
             let (_, _transaction) =
                 crate::lock_chat_transaction_for_friend(&profile, route.friend_number)?;
+            self.file_bridge.require_contact_incarnation(&profile, &route.id)?;
             profile.chat_transport_ready.store(false, Ordering::Release);
             profile.file_card_protocol.offer_for_send(
                 route.friend_number,
@@ -6341,6 +7223,12 @@ impl WebWorkspaceRuntime {
                 web_transfer_id: Some(route.id.clone()),
             },
             |tox, transfer| {
+                if self.file_bridge.require_contact_incarnation(&profile, &route.id).is_err() {
+                    return (0, WEB_NATIVE_ROUTE_NOT_READY);
+                }
+                if !crate::local_transport_ready(&profile) {
+                    return (0, WEB_NATIVE_ROUTE_NOT_READY);
+                }
                 // The scheduler may have waited for the native handle while a
                 // callback started negotiation or closing. Match the network
                 // worker's handle -> transaction lock order and recheck here.
@@ -6348,23 +7236,41 @@ impl WebWorkspaceRuntime {
                     return (0, -1);
                 };
                 if !profile.chat_transport_ready.load(Ordering::Acquire)
-                    || crate::file_chat_transport_waits_for_pq(&profile, route.friend_number)
+                    || crate::ordinary_chat_transport_waits_for_pq(&profile, route.friend_number)
                 {
                     return (0, -1);
                 }
                 let mut error = 0_i32;
-                let file_number = unsafe {
-                    crate::tox_file_send(
-                        tox,
-                        route.friend_number,
-                        0,
-                        transfer.size,
-                        file_id.as_ptr(),
-                        transfer.filename.as_bytes().as_ptr(),
-                        transfer.filename.len(),
-                        &mut error,
-                    )
-                };
+                let file_number = tox.file_send(
+                    route.friend_number,
+                    0,
+                    transfer.size,
+                    Some(&file_id),
+                    transfer.filename.as_bytes(),
+                    &mut error,
+                );
+                if error == 0 {
+                    let generation = profile.handle_generation.load(Ordering::SeqCst);
+                    if self
+                        .file_bridge
+                        .bind_native_generation(&route.id, generation)
+                        .is_err()
+                    {
+                        return (file_number, -1);
+                    }
+                    let local_address = tox.address();
+                    let peer_key = tox
+                        .friend_public_key(route.friend_number, &mut 0)
+                        .map(|key| crate::hex_upper(&key))
+                        .unwrap_or_default();
+                    let _ = self.file_bridge.bind_native_transfer_identity(
+                        &route.id,
+                        generation,
+                        file_id,
+                        crate::hex_upper(&local_address[..32]),
+                        peer_key,
+                    );
+                }
                 (file_number, error)
             },
             #[cfg(test)]
@@ -6389,17 +7295,20 @@ impl WebWorkspaceRuntime {
                 // its slot. The retained committed source remains downloadable.
                 if let Some((route, control)) = self.file_bridge.failed_native_control(&view.id) {
                     let handle = profile.handle.lock().map_err(|_| "TOX_BUSY")?;
-                    if let Some(handle) = handle.as_ref() {
+                    if let Some(handle) = handle.as_ref().filter(|_| {
+                        crate::local_transport_ready(profile)
+                            && self.file_bridge.native_route_matches(
+                                &route,
+                                profile.handle_generation.load(Ordering::SeqCst),
+                            )
+                    }) {
                         let mut error = 0;
-                        unsafe {
-                            let _ = crate::tox_file_control(
-                                handle.instance.as_ptr(),
-                                route.friend_number,
-                                route.file_number,
-                                control,
-                                &mut error,
-                            );
-                        }
+                        let _ = handle.native().file_control(
+                            route.friend_number,
+                            route.file_number,
+                            control,
+                            &mut error,
+                        );
                     }
                 }
                 crate::set_attachment_transfer_state(&profile.messages, &view.message_id, "failed");
@@ -6516,6 +7425,16 @@ impl WebWorkspaceRuntime {
             // instead of rereading an already buffered range.
             let handle = profile.handle.lock().map_err(|_| "TOX_BUSY".to_string())?;
             let handle = handle.as_ref().ok_or("TOX_NOT_INITIALIZED")?;
+            let route = self.file_bridge.routing(transfer_id)?;
+            self.file_bridge.require_contact_incarnation(&profile, transfer_id)?;
+            if !crate::local_transport_ready(&profile)
+                || !self
+                    .file_bridge
+                    .native_route_matches(&route, profile.handle_generation.load(Ordering::SeqCst))
+            {
+                // Retain the staged range and retry without consuming a chunk.
+                return Ok(250);
+            }
             loop {
                 let (chunk, wait_ms) = self.file_bridge.next_outgoing_chunk(transfer_id, now_ms)?;
                 retry_after_ms = retry_after_ms.max(wait_ms);
@@ -6527,17 +7446,13 @@ impl WebWorkspaceRuntime {
                     return Err("TRANSFER_WORKSPACE_BOUNDARY".to_string());
                 }
                 let mut error = 0_i32;
-                let sent = unsafe {
-                    crate::tox_file_send_chunk(
-                        handle.instance.as_ptr(),
-                        chunk.routing.friend_number,
-                        chunk.routing.file_number,
-                        chunk.position,
-                        chunk.data.as_ptr(),
-                        chunk.data.len(),
-                        &mut error,
-                    )
-                };
+                let sent = handle.native().file_send_chunk(
+                    chunk.routing.friend_number,
+                    chunk.routing.file_number,
+                    chunk.position,
+                    &chunk.data,
+                    &mut error,
+                );
                 if !sent || error != 0 {
                     self.file_bridge.outgoing_chunk_rejected(chunk.data.len());
                     send_error = if error == 0 { -1 } else { error };
@@ -6603,6 +7518,47 @@ impl WebWorkspaceRuntime {
         Ok(view)
     }
 
+    /// Inspect identity before any status reconciliation or transfer mutation.
+    pub fn web_transfer_view(
+        &self,
+        transfer_id: &str,
+        now_ms: u64,
+    ) -> Result<WebTransferView, String> {
+        self.file_bridge.view(transfer_id, now_ms)
+    }
+
+    /// Discover active work, never all previously downloaded file history.
+    pub fn web_replication_snapshot(
+        &self,
+        profile_id: &str,
+        now_ms: u64,
+    ) -> Result<Vec<WebTransferView>, String> {
+        let ids = {
+            let inner = self
+                .file_bridge
+                .inner
+                .lock()
+                .map_err(|_| "TRANSFER_STATE_UNAVAILABLE")?;
+            inner
+                .transfers
+                .values()
+                .filter(|transfer| {
+                    transfer.profile_id == profile_id
+                        && !matches!(transfer.state.as_str(), "cancelled" | "failed")
+                        && !(transfer.state == "complete"
+                            && transfer
+                                .storage
+                                .as_ref()
+                                .is_some_and(StoreObjectStatus::delivery_confirmed))
+                })
+                .map(|transfer| transfer.id.clone())
+                .collect::<Vec<_>>()
+        };
+        ids.into_iter()
+            .map(|id| self.file_bridge.view(&id, now_ms))
+            .collect()
+    }
+
     fn restore_published_web_transfers(&self) -> Result<(), String> {
         let Some(store) = self.file_bridge.store.get() else {
             return Ok(());
@@ -6611,16 +7567,38 @@ impl WebWorkspaceRuntime {
             return Ok(());
         }
         for status in store.snapshot() {
-            if self
-                .file_bridge
-                .storage_spec(&status.spec.object_id)
-                .is_some()
-            {
+            if status.is_identity_tombstone() {
                 continue;
             }
             let Some(profile) = self.profiles.get(&status.spec.profile_id) else {
                 continue;
             };
+            let handle = match profile.handle.try_lock() {
+                Ok(handle) => handle,
+                Err(_) => continue,
+            };
+            let Some(handle) = handle.as_ref() else {
+                continue;
+            };
+            match crate::pending_contact::require_incarnation(
+                profile, &status.spec.friend_public_key, Some(status.spec.contact_incarnation),
+            ) {
+                Ok(()) => {}
+                Err(error) if error == "CHAT_CONTACT_INCARNATION_CHANGED" => {
+                    let friend = self.file_bridge.routing(&status.spec.object_id)
+                        .map(|route| route.friend_number).unwrap_or(0);
+                    // Pending deletion owns payload erasure. A generation change
+                    // also fences authorized-contact recovery without rewriting it.
+                    self.file_bridge.forget_matching(
+                        &status.spec.profile_id, friend, Some(&status.spec.message_id),
+                    )?;
+                    continue;
+                }
+                Err(error) => return Err(error),
+            }
+            if self.file_bridge.storage_spec(&status.spec.object_id).is_some() {
+                continue;
+            }
             if profile.chat_protocol.message_cancelled(
                 0,
                 &status.spec.friend_public_key,
@@ -6633,21 +7611,10 @@ impl WebWorkspaceRuntime {
                 }
                 continue;
             }
-            let friend_number = {
-                let handle = match profile.handle.try_lock() {
-                    Ok(handle) => handle,
-                    Err(_) => continue,
-                };
-                let Some(handle) = handle.as_ref() else {
-                    continue;
-                };
-                let Some(friend_number) = crate::resolve_current_friend_number(
-                    handle.instance.as_ptr(),
-                    &status.spec.friend_public_key,
-                ) else {
-                    continue;
-                };
-                friend_number
+            let Some(friend_number) = crate::resolve_current_friend_number(
+                handle.native(), &status.spec.friend_public_key,
+            ) else {
+                continue;
             };
             let resident_completion = {
                 let messages = profile
@@ -6706,6 +7673,13 @@ impl WebWorkspaceRuntime {
             changed = true;
         }
         self.restore_published_web_transfers()?;
+        for (profile_id, profile) in &self.profiles {
+            let _handle = profile.handle.lock().map_err(|_| "TOX_BUSY")?;
+            changed |= self.file_bridge.retire_obsolete_native_bindings(
+                profile_id,
+                profile.handle_generation.load(Ordering::SeqCst),
+            );
+        }
         for profile in self.profiles.values() {
             if crate::incoming_files_denied(&profile.file_receive_settings) {
                 let handle = profile.handle.lock().map_err(|_| "TOX_BUSY".to_string())?;
@@ -6714,8 +7688,8 @@ impl WebWorkspaceRuntime {
                 }
                 let tox = handle
                     .as_ref()
-                    .map(|handle| handle.instance.as_ptr())
-                    .unwrap_or(std::ptr::null_mut());
+                    .filter(|_| crate::local_transport_ready(profile))
+                    .map(crate::ToxHandle::native);
                 changed |= crate::cancel_incoming_receives_for_policy(profile, tox)?;
             }
         }
@@ -6732,25 +7706,39 @@ impl WebWorkspaceRuntime {
             }
         }
         let progress = storage_result?;
+        if let Some(store) = self.file_bridge.store.get() {
+            for retired in store.snapshot().into_iter().filter(StoreObjectStatus::is_identity_tombstone) {
+                let owned = domain.transfers.offers().any(|offer| {
+                    offer.id == retired.spec.object_id && offer.profile_id == retired.spec.profile_id
+                });
+                if owned {
+                    domain.transfers.forget(&retired.spec.object_id);
+                    changed = true;
+                }
+            }
+        }
         for (id, resume, released) in progress {
             if let Some(route) = resume {
                 if let Some(profile) = self.profiles.get(&route.profile_id) {
                     let handle = profile.handle.lock().map_err(|_| "TOX_BUSY")?;
                     if let Some(handle) = handle.as_ref() {
-                        let mut error = 0;
-                        unsafe {
-                            let _ = crate::tox_file_control(
-                                handle.instance.as_ptr(),
-                                route.friend_number,
-                                route.file_number,
-                                0,
-                                &mut error,
-                            );
-                        }
+                        self.resume_web_incoming_native(profile, &route, handle.native());
                     }
                 }
             }
             let view = self.file_bridge.view(&id, now_ms)?;
+            let handler = self.event_handler.lock().ok().and_then(|slot| slot.clone());
+            if let Some(handler) = handler {
+                handler(
+                    view.profile_id.clone(),
+                    serde_json::json!({
+                        "kind": "transfer", "transferId": view.id, "messageId": view.message_id,
+                        "transfer": serde_json::to_value(&view).unwrap_or(Value::Null),
+                        "state": view.state, "persistedBytes": view.persisted_bytes,
+                        "uploadedBytes": view.uploaded_bytes, "downloadAvailable": view.download_available
+                    }),
+                );
+            }
             if matches!(view.state.as_str(), "cancelled" | "failed") {
                 continue;
             }
@@ -6813,14 +7801,17 @@ impl WebWorkspaceRuntime {
                     .status(now, self.file_bridge.has_active())
                     .new_transfers_allowed
                 {
-                    self.control_web_transfer(
+                    match self.control_web_transfer(
                         domain,
                         &offer.profile_id,
                         &offer.message_id,
                         "resume",
                         now_ms,
-                    )?;
-                    changed = true;
+                    ) {
+                        Ok(_) => changed = true,
+                        Err(error) if error == "LOCAL_TRANSPORT_NOT_READY" => {}
+                        Err(error) => return Err(error),
+                    }
                 }
             }
         }
@@ -6829,11 +7820,85 @@ impl WebWorkspaceRuntime {
             self.finalize_web_transfer_terminal(domain, &view, now)?;
             changed = true;
         }
-        self.start_next_web_transfer()?;
+        self.retry_deferred_web_resumes()?;
+        self.start_next_web_transfer(domain)?;
         if let Some(transfer_id) = self.file_bridge.active_outgoing_id() {
             let _ = self.drain_web_outgoing_transfer(domain, &transfer_id, now, now_ms)?;
         }
         Ok(changed)
+    }
+
+    // Caller owns the native handle. The same live bridge predicate protects immediate and retry paths.
+    fn resume_web_incoming_native(
+        &self,
+        profile: &ToxState,
+        route: &WebTransferRouting,
+        tox: ToxRef<'_>,
+    ) {
+        let Some(generation) = self
+            .file_bridge
+            .incoming_resume_generation(route)
+            .filter(|generation| *generation == profile.handle_generation.load(Ordering::SeqCst))
+        else {
+            return;
+        };
+        if self.file_bridge.require_contact_incarnation(profile, &route.id).is_err() {
+            return;
+        }
+        if !crate::local_transport_ready(profile) {
+            self.file_bridge
+                .defer_incoming_native_resume(route, generation);
+            return;
+        }
+        let mut error = 0_i32;
+        let _ = tox.file_control(route.friend_number, route.file_number, 0, &mut error);
+        if error == 0 {
+            if let Ok(mut inner) = self.file_bridge.inner.lock() {
+                inner.pending_native_resumes.remove(&route.id);
+            }
+        } else {
+            self.file_bridge
+                .defer_incoming_native_resume(route, generation);
+        }
+    }
+
+    fn retry_deferred_web_resumes(&self) -> Result<(), String> {
+        let pending = self
+            .file_bridge
+            .inner
+            .lock()
+            .map_err(|_| "TRANSFER_STATE_UNAVAILABLE")?
+            .pending_native_resumes
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        for (route, generation) in pending {
+            let Some(profile) = self.profiles.get(&route.profile_id) else {
+                self.file_bridge
+                    .inner
+                    .lock()
+                    .map_err(|_| "TRANSFER_STATE_UNAVAILABLE")?
+                    .pending_native_resumes
+                    .remove(&route.id);
+                continue;
+            };
+            let handle = profile.handle.lock().map_err(|_| "TOX_BUSY")?;
+            let current = profile.handle_generation.load(Ordering::SeqCst) == generation
+                && self.file_bridge.incoming_resume_generation(&route) == Some(generation);
+            if !current {
+                self.file_bridge
+                    .inner
+                    .lock()
+                    .map_err(|_| "TRANSFER_STATE_UNAVAILABLE")?
+                    .pending_native_resumes
+                    .remove(&route.id);
+                continue;
+            }
+            if let Some(handle) = handle.as_ref() {
+                self.resume_web_incoming_native(profile, &route, handle.native());
+            }
+        }
+        Ok(())
     }
 
     pub fn upload_web_transfer_chunk(
@@ -6863,11 +7928,16 @@ impl WebWorkspaceRuntime {
         if matches!(view.state.as_str(), "cancelled" | "failed" | "paused") {
             return Err("TRANSFER_NOT_RESUMABLE".to_string());
         }
-        let reply = self.file_bridge.storage_operation(StoreOperation::Append {
-            object_id: transfer_id.to_string(),
-            offset: position,
-            bytes: Arc::from(data),
-        })?;
+        let reply = {
+            let profile = self.profiles.get(profile_id).ok_or("PROFILE_NOT_ACTIVE")?;
+            let _handle = profile.handle.lock().map_err(|_| "TOX_BUSY")?;
+            self.file_bridge.require_contact_incarnation(profile, transfer_id)?;
+            self.file_bridge.storage_operation(StoreOperation::Append {
+                object_id: transfer_id.to_string(),
+                offset: position,
+                bytes: Arc::from(data),
+            })?
+        };
         self.reconcile_web_transfer_terminal(domain, now, now_ms)?;
         let retry_after_ms = if reply.is_none() { 100 } else { 0 };
         Ok(WebUploadOutcome {
@@ -6890,6 +7960,13 @@ impl WebWorkspaceRuntime {
             .ok_or("TRANSFER_NOT_FOUND")?;
         let before = self.file_bridge.view(&transfer_id, now_ms)?;
         ensure_transfer_profile(&before.profile_id, profile_id)?;
+        if action == "resume"
+            && before.direction == "incoming"
+            && before.state == "complete"
+            && before.payload_committed
+        {
+            return Ok(before);
+        }
         match action {
             "resume" if matches!(before.state.as_str(), "complete" | "cancelled" | "failed") => {
                 return Err("TRANSFER_NOT_RESUMABLE".to_string())
@@ -6910,6 +7987,17 @@ impl WebWorkspaceRuntime {
             .ok_or("PROFILE_NOT_ACTIVE")?;
         // Policy changes, EOF and user control share this callback boundary.
         let native_handle = profile.handle.lock().map_err(|_| "TOX_BUSY")?;
+        let current_route = self.file_bridge.routing(&transfer_id)?;
+        self.file_bridge.require_contact_incarnation(&profile, &transfer_id)?;
+        let native_binding_current = current_route.file_number == u32::MAX
+            || self.file_bridge.native_route_matches(
+                &current_route,
+                profile.handle_generation.load(Ordering::SeqCst),
+            );
+        let transport_ready = crate::local_transport_ready(&profile) && native_binding_current;
+        if action != "cancel" && !transport_ready {
+            return Err("LOCAL_TRANSPORT_NOT_READY".to_string());
+        }
         if action == "resume"
             && before.direction == "incoming"
             && crate::incoming_files_denied(&profile.file_receive_settings)
@@ -6921,23 +8009,17 @@ impl WebWorkspaceRuntime {
             && self.file_bridge.store.get().is_some()
             && self.file_bridge.storage_spec(&transfer_id).is_none()
         {
-            let profile = self.profiles.get(profile_id).ok_or("PROFILE_NOT_ACTIVE")?;
-            let friend_number = profile
-                .messages
-                .lock()
-                .map_err(|_| "TRANSFER_STATE_UNAVAILABLE")?
-                .iter()
-                .find(|message| message.id == message_id)
-                .map(|message| message.friend_number)
-                .ok_or("TRANSFER_NOT_FOUND")?;
-            // This control boundary already owns the native handle. Resolving
-            // through stable_friend_public_key would lock the same mutex again.
+            // The live transfer retains its validated route even when the chat
+            // history row has been evicted. Reuse the handle already locked above.
             let friend_public_key = native_handle
                 .as_ref()
                 .and_then(|handle| {
-                    crate::tox_friend_public_key(handle.instance.as_ptr(), friend_number)
+                    handle
+                        .native()
+                        .friend_public_key(current_route.friend_number, &mut 0)
+                        .map(|key| crate::hex_upper(&key))
                 })
-                .unwrap_or_default();
+                .ok_or("TRANSFER_NOT_FOUND")?;
             self.file_bridge.bind_storage(
                 &transfer_id,
                 StoreSpec {
@@ -6945,6 +8027,9 @@ impl WebWorkspaceRuntime {
                     operation_id: None,
                     profile_id: profile_id.to_string(),
                     message_id: message_id.to_string(),
+                    contact_incarnation: crate::pending_contact::current_incarnation(
+                        &profile, &friend_public_key,
+                    )?,
                     friend_public_key,
                     direction: StoreDirection::Incoming,
                     name: before.name.clone(),
@@ -6988,7 +8073,7 @@ impl WebWorkspaceRuntime {
         }
         let route = self.file_bridge.control_id(&transfer_id, action)?;
         if action != "resume" {
-            if route.file_number != u32::MAX {
+            if transport_ready && route.file_number != u32::MAX {
                 let control = match action {
                     "pause" => 1,
                     "cancel" => 2,
@@ -6996,7 +8081,7 @@ impl WebWorkspaceRuntime {
                 };
                 let handle = native_handle.as_ref().ok_or("TOX_NOT_INITIALIZED")?;
                 let error = web_user_file_control(
-                    handle.instance.as_ptr(),
+                    handle.native(),
                     route.friend_number,
                     route.file_number,
                     control,
@@ -7033,7 +8118,7 @@ impl WebWorkspaceRuntime {
                 &profile.history_enabled,
             );
         }
-        self.start_next_web_transfer()?;
+        self.start_next_web_transfer(domain)?;
         self.file_bridge.view(&transfer_id, now_ms)
     }
 
@@ -7048,6 +8133,9 @@ impl WebWorkspaceRuntime {
     ) -> Result<Option<WebIncomingChunk>, String> {
         if self.file_bridge.store.get().is_some() {
             let view = self.file_bridge.view(transfer_id, now_ms)?;
+            let profile = self.profiles.get(&view.profile_id).ok_or("PROFILE_NOT_ACTIVE")?;
+            let _handle = profile.handle.lock().map_err(|_| "TOX_BUSY")?;
+            self.file_bridge.require_contact_incarnation(profile, transfer_id)?;
             if length == 0
                 || length > FRAME_STREAM_CHUNK_BYTES
                 || position
@@ -7072,7 +8160,7 @@ impl WebWorkspaceRuntime {
                     offset,
                     bytes,
                 }) if status.spec.object_id == transfer_id
-                    && status.payload_available()
+                    && self.file_bridge.payload_available(&status)
                     && offset == position
                     && bytes.len() == length =>
                 {
@@ -7099,73 +8187,6 @@ impl WebWorkspaceRuntime {
         }))
     }
 
-    pub fn acknowledge_web_incoming_chunk(
-        &mut self,
-        domain: &mut WorkspaceDomain,
-        profile_id: &str,
-        transfer_id: &str,
-        through: u64,
-        now: u64,
-        now_ms: u64,
-    ) -> Result<WebTransferView, String> {
-        let before = self.file_bridge.view(transfer_id, now_ms)?;
-        ensure_transfer_profile(&before.profile_id, profile_id)?;
-        if before.direction != "incoming" {
-            return Err("TRANSFER_DIRECTION_INVALID".to_string());
-        }
-        if self.file_bridge.store.get().is_some() {
-            if through > before.persisted_bytes {
-                return Err("TRANSFER_ACK_RANGE_INVALID".to_string());
-            }
-            // Legacy endpoint is a consumer observation only. It cannot release
-            // native buffers, advance native completion or remove retained data.
-            return Ok(before);
-        }
-        let (resume_route, acknowledged) = self
-            .file_bridge
-            .acknowledge_incoming_chunk(transfer_id, through)?;
-        if let Some(route) = resume_route {
-            if let Some(profile) = self.profiles.get(&route.profile_id) {
-                if let Ok(handle) = profile.handle.lock() {
-                    if let Some(handle) = handle.as_ref() {
-                        let mut error = 0_i32;
-                        unsafe {
-                            let _ = crate::tox_file_control(
-                                handle.instance.as_ptr(),
-                                route.friend_number,
-                                route.file_number,
-                                0,
-                                &mut error,
-                            );
-                        }
-                    }
-                }
-            }
-        }
-        let view = self.file_bridge.view(transfer_id, now_ms)?;
-        if let Some(profile) = self.profiles.get(profile_id) {
-            let _ = crate::update_attachment_progress(
-                &profile.messages,
-                &view.message_id,
-                view.acknowledged_bytes,
-                view.speed_bytes_per_sec,
-                view.size_bytes,
-                "receiving",
-                false,
-                None,
-            );
-            crate::bump_history_revision(&profile.history_path);
-        }
-        self.finalize_web_transfer_terminal(domain, &view, now)?;
-        if domain.transfers.contains(transfer_id) {
-            let _ = domain
-                .transfers
-                .record_stream_progress(transfer_id, acknowledged, now);
-        }
-        domain.data_lease.record_transfer_progress(now);
-        Ok(view)
-    }
-
     pub fn complete_web_incoming_transfer(
         &mut self,
         domain: &mut WorkspaceDomain,
@@ -7182,6 +8203,9 @@ impl WebWorkspaceRuntime {
             return Err("TRANSFER_DIRECTION_INVALID".to_string());
         }
         if self.file_bridge.store.get().is_some() {
+            let profile = self.profiles.get(profile_id).ok_or("PROFILE_NOT_ACTIVE")?;
+            let _handle = profile.handle.lock().map_err(|_| "TOX_BUSY")?;
+            self.file_bridge.require_contact_incarnation(profile, transfer_id)?;
             if !before.payload_committed
                 || browser_bytes != before.size_bytes
                 || before.payload_sha256.as_deref()
@@ -7206,22 +8230,25 @@ impl WebWorkspaceRuntime {
 
     pub fn pause_web_transfer(&self, domain: &mut WorkspaceDomain) {
         domain.transfers.on_ui_lost();
-        let Some(route) = self.file_bridge.pause_active() else {
-            return;
-        };
-        if let Some(profile) = self.profiles.get(&route.profile_id) {
+        for route in self.file_bridge.pause_active() {
+            let Some(profile) = self.profiles.get(&route.profile_id) else {
+                continue;
+            };
             if let Ok(handle) = profile.handle.lock() {
-                if let Some(handle) = handle.as_ref() {
+                if let Some(handle) = handle.as_ref().filter(|_| {
+                    crate::local_transport_ready(profile)
+                        && self.file_bridge.native_route_matches(
+                            &route,
+                            profile.handle_generation.load(Ordering::SeqCst),
+                        )
+                }) {
                     let mut error = 0_i32;
-                    unsafe {
-                        let _ = crate::tox_file_control(
-                            handle.instance.as_ptr(),
-                            route.friend_number,
-                            route.file_number,
-                            1,
-                            &mut error,
-                        );
-                    }
+                    let _ = handle.native().file_control(
+                        route.friend_number,
+                        route.file_number,
+                        1,
+                        &mut error,
+                    );
                 }
             }
         }
@@ -7249,13 +8276,9 @@ impl WebWorkspaceRuntime {
         let savedata = {
             let handle = profile.handle.lock().map_err(|_| "TOX_BUSY".to_string())?;
             let handle = handle.as_ref().ok_or("TOX_NOT_INITIALIZED")?;
-            let size = unsafe { crate::tox_get_savedata_size(handle.instance.as_ptr()) };
-            if size == 0 {
+            let savedata = handle.savedata();
+            if savedata.is_empty() {
                 return Err("PROFILE_EXPORT_EMPTY".to_string());
-            }
-            let mut savedata = vec![0_u8; size];
-            unsafe {
-                crate::tox_get_savedata(handle.instance.as_ptr(), savedata.as_mut_ptr());
             }
             savedata
         };
@@ -7321,7 +8344,8 @@ impl WebWorkspaceRuntime {
     }
 
     pub fn profile_lifecycle_error(&self, profile_id: &str) -> Option<&'static str> {
-        self.retained_stopped_profiles.contains_key(profile_id)
+        self.retained_stopped_profiles
+            .contains_key(profile_id)
             .then_some("PROFILE_FINALIZATION_REQUIRED")
     }
 
@@ -7379,6 +8403,15 @@ impl WebWorkspaceRuntime {
         domain: &WorkspaceDomain,
         ui_has_heartbeat: bool,
     ) -> Result<(), String> {
+        self.apply_effective_presence_with_mirrors(domain, ui_has_heartbeat, &[])
+    }
+
+    pub fn apply_effective_presence_with_mirrors(
+        &self,
+        domain: &WorkspaceDomain,
+        ui_has_heartbeat: bool,
+        mirror_profiles: &[String],
+    ) -> Result<(), String> {
         for web_profile in domain
             .profiles
             .profiles()
@@ -7388,9 +8421,10 @@ impl WebWorkspaceRuntime {
             let Some(profile) = self.profiles.get(&web_profile.id) else {
                 continue;
             };
-            let effective = domain
-                .profiles
-                .effective_presence(&web_profile.id, ui_has_heartbeat)?;
+            let effective = domain.profiles.effective_presence(
+                &web_profile.id,
+                ui_has_heartbeat || mirror_profiles.iter().any(|id| id == &web_profile.id),
+            )?;
             crate::set_user_status_inner(profile, presence_name(effective))?;
         }
         Ok(())
@@ -7495,6 +8529,44 @@ impl WebWorkspaceRuntime {
             return Err(error);
         }
         serde_json::to_value(settings).map_err(|error| error.to_string())
+    }
+
+    pub fn bootstrap_nodes(&self) -> Result<Value, String> {
+        self.bootstrap_nodes.view(|revision| {
+            self.profiles
+                .values()
+                .flat_map(|profile| profile.used_bootstrap_nodes(revision))
+                .collect()
+        })
+    }
+
+    pub fn prepare_bootstrap_nodes_update(
+        &self,
+        value: Value,
+    ) -> Result<WebBootstrapNodesUpdate, String> {
+        let nodes = serde_json::from_value(value).map_err(|_| "BOOTSTRAP_SETTINGS_INVALID")?;
+        Ok(WebBootstrapNodesUpdate {
+            owner: Arc::clone(&self.bootstrap_nodes),
+            nodes,
+        })
+    }
+
+    pub fn prepare_bootstrap_probe(
+        &self,
+        value: Value,
+    ) -> Result<crate::WebBootstrapProbe, String> {
+        let node = serde_json::from_value(value).map_err(|_| "BOOTSTRAP_NODE_INVALID")?;
+        crate::prepare_bootstrap_probe(
+            &self.bootstrap_nodes,
+            &self.network_settings,
+            &self.proxy_settings,
+            &self.tor,
+            node,
+        )
+    }
+
+    pub fn bootstrap_probe_is_current(&self, probe: &crate::WebBootstrapProbe) -> bool {
+        probe.belongs_to(&self.bootstrap_nodes)
     }
 
     pub fn network_settings(&self) -> Result<Value, String> {
@@ -7623,9 +8695,11 @@ impl WebWorkspaceRuntime {
             .map_err(|error| error.to_string()),
             "accept_incoming_friend_request" => self.accept_friend(profile, args),
             "reject_incoming_friend_request" => {
-                crate::reject_incoming_friend_request_for_state(
+                crate::reject_incoming_friend_request_with_cleanup(
                     profile,
                     string_value(args, "publicKey")?,
+                    args.get("expectedContactIncarnation").and_then(Value::as_u64),
+                    |friend, key| self.purge_pending_transfer_payloads(profile, friend, key),
                 )?;
                 Ok(Value::Null)
             }
@@ -7731,17 +8805,7 @@ impl WebWorkspaceRuntime {
         let previous_status = profile.pq.status(friend);
         crate::synchronize_pq_shutdown_history(profile, friend, &public_key, &previous_status)?;
         let packets = match command {
-            "request_pq_session" => {
-                if args
-                    .get("allowLegacy")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false)
-                {
-                    profile.pq.request_legacy(friend)?
-                } else {
-                    profile.pq.request(friend)?
-                }
-            }
+            "request_pq_session" => profile.pq.request(friend)?,
             "withdraw_pq_session" => profile.pq.withdraw(friend)?,
             "accept_pq_session" => profile.pq.accept(friend)?,
             "reject_pq_session" => profile.pq.reject(friend)?,
@@ -7975,12 +9039,16 @@ impl WebWorkspaceRuntime {
             volume.set_durability_hook(durability.hook.clone())?;
         }
         let namespace = volume.namespace_root().to_path_buf();
-        ProfilePaths::new_with_volume(
+        let mut paths = ProfilePaths::new_with_volume(
             self.workspace_root.clone(),
             namespace.join("data"),
             namespace.join("profile.tox"),
             Some(volume),
-        )
+        )?;
+        // Web logging is disabled before constructor reconciliation can emit
+        // or fail, not only after a successfully constructed state returns.
+        paths.logs_enabled = false;
+        Ok(paths)
     }
 
     fn tox_id(&self, profile: &ToxState) -> Result<String, String> {
@@ -7989,8 +9057,7 @@ impl WebWorkspaceRuntime {
             .lock()
             .map_err(|_| "Could not access the Tox profile".to_string())?;
         let handle = guard.as_ref().ok_or("TOX_NOT_INITIALIZED")?;
-        let mut address = [0_u8; 38];
-        unsafe { crate::tox_self_get_address(handle.instance.as_ptr(), address.as_mut_ptr()) };
+        let address = handle.address();
         ToxState::save(handle)?;
         Ok(crate::hex_upper(&address))
     }
@@ -8008,8 +9075,7 @@ impl WebWorkspaceRuntime {
     }
 
     fn friends_snapshot(profile: &ToxState) -> Result<Value, String> {
-        let (last_events_by_key, last_events_by_number) =
-            crate::last_event_maps_for_state(profile)?;
+        let last_events_by_key = crate::last_events_for_state(profile)?;
         let avatar_sources = crate::latest_friend_avatar_sources(&profile.avatars_dir);
         let cached_profiles = profile
             .friend_cache
@@ -8023,33 +9089,18 @@ impl WebWorkspaceRuntime {
             .lock()
             .map_err(|_| "Could not access the Tox profile".to_string())?;
         let handle = guard.as_ref().ok_or("TOX_NOT_INITIALIZED")?;
-        let count = unsafe { crate::tox_self_get_friend_list_size(handle.instance.as_ptr()) };
-        let mut numbers = vec![0_u32; count];
-        unsafe { crate::tox_self_get_friend_list(handle.instance.as_ptr(), numbers.as_mut_ptr()) };
-        let mut result = Vec::with_capacity(count);
+        let tox = handle.native();
+        let numbers = tox.friend_numbers();
+        let mut result = Vec::with_capacity(numbers.len());
         for number in numbers {
-            let mut error = 0_i32;
-            let mut key = [0_u8; 32];
-            if !unsafe {
-                crate::tox_friend_get_public_key(
-                    handle.instance.as_ptr(),
-                    number,
-                    key.as_mut_ptr(),
-                    &mut error,
-                )
-            } {
+            let mut error = 0;
+            let Some(key) = tox.friend_public_key(number, &mut error) else {
                 continue;
-            }
+            };
             // Suspending iteration leaves toxcore's last friend state intact.
             // Only a usable local transport can make that state live presence.
             let connection = if crate::local_transport_ready(profile)
-                && unsafe {
-                    crate::tox_friend_get_connection_status(
-                        handle.instance.as_ptr(),
-                        number,
-                        &mut error,
-                    )
-                } != 0
+                && tox.friend_connection_status(number, &mut error) != 0
             {
                 "online"
             } else {
@@ -8060,21 +9111,9 @@ impl WebWorkspaceRuntime {
                 .get(&public_key)
                 .cloned()
                 .unwrap_or_default();
-            let received_name = read_friend_text(
-                handle.instance.as_ptr(),
-                number,
-                crate::tox_friend_get_name_size,
-                crate::tox_friend_get_name,
-            );
-            let received_status_message = read_friend_text(
-                handle.instance.as_ptr(),
-                number,
-                crate::tox_friend_get_status_message_size,
-                crate::tox_friend_get_status_message,
-            );
-            let raw_status = unsafe {
-                crate::tox_friend_get_status(handle.instance.as_ptr(), number, &mut error)
-            };
+            let received_name = tox.friend_name(number);
+            let received_status_message = tox.friend_status_text(number);
+            let raw_status = tox.friend_status(number, &mut error);
             let status = if connection == "offline" {
                 "offline"
             } else {
@@ -8101,12 +9140,7 @@ impl WebWorkspaceRuntime {
                 .unwrap_or_else(|| public_key.clone());
             let authorized =
                 cached.authorized || (connection == "online" && !cached.pending_authorization);
-            let last_event = last_events_by_key
-                .get(&public_key)
-                .copied()
-                .into_iter()
-                .chain(last_events_by_number.get(&number).copied())
-                .max();
+            let last_event = last_events_by_key.get(&public_key).copied();
             result.push(serde_json::json!({
                 "number": number,
                 "public_key": public_key,
@@ -8332,6 +9366,7 @@ impl WebWorkspaceRuntime {
             quote,
             formatting,
             args.get("expectedPublicKey").and_then(Value::as_str),
+            args.get("expectedContactIncarnation").and_then(Value::as_u64),
         )?;
         serde_json::to_value(result).map_err(|error| error.to_string())
     }
@@ -8445,19 +9480,16 @@ impl WebWorkspaceRuntime {
             .lock()
             .map_err(|_| "Could not access the Tox profile".to_string())?;
         let handle = guard.as_ref().ok_or("TOX_NOT_INITIALIZED")?;
+        if !crate::installed_route_matches_settings(profile) {
+            return Err("SHARED_ROUTE_RESTART_REQUIRED".to_string());
+        }
         let mut error = 0_i32;
-        let friend = unsafe {
-            crate::tox_friend_add(
-                handle.instance.as_ptr(),
-                address.as_ptr(),
-                message.as_bytes().as_ptr(),
-                message.len(),
-                &mut error,
-            )
-        };
+        let friend = handle
+            .native()
+            .friend_add(&address, message.as_bytes(), &mut error);
         let public_key = crate::hex_upper(&address[..32]);
         let friend = match crate::resolve_native_friend_add_result(
-            handle.instance.as_ptr(),
+            handle.native(),
             &public_key,
             friend,
             error,
@@ -8506,16 +9538,119 @@ impl WebWorkspaceRuntime {
             completed
         };
         crate::wait_for_atomic_write(friend_cache_write)?;
+        crate::pending_contact::persist_outgoing_requests(profile, handle)?;
         ToxState::save(handle)?;
         if error == 0 {
             profile.pq.bind_contact(
                 friend,
                 &public_key,
-                &crate::pq_tox_owner(handle.instance.as_ptr()),
+                &crate::pq_tox_owner(handle.native()),
                 false,
             )?;
         }
         Ok(serde_json::json!(friend))
+    }
+
+    fn purge_pending_transfer_payloads(
+        &self,
+        profile: &ToxState,
+        friend: u32,
+        public_key: &str,
+    ) -> Result<Vec<String>, String> {
+        // The caller holds the profile handle across this entire purge.
+        let contact_incarnation = crate::pending_contact::current_incarnation(profile, public_key)?;
+        let profile_id = profile.web_profile_id.as_deref().unwrap_or_default();
+        let message_keys = profile
+            .messages
+            .lock()
+            .map_err(|_| "HISTORY_UNAVAILABLE")?
+            .iter()
+            .map(|message| (message.id.clone(), message.friend_public_key.clone()))
+            .collect::<HashMap<_, _>>();
+        let mut legacy_candidates = Vec::new();
+        {
+            let inner = self
+                .file_bridge
+                .inner
+                .lock()
+                .map_err(|_| "TRANSFER_STATE_UNAVAILABLE")?;
+            for transfer in inner.transfers.values().filter(|transfer| {
+                transfer.profile_id == profile_id && transfer.friend_number == friend
+            }) {
+                let key = transfer
+                    .storage
+                    .as_ref()
+                    .map(|stored| &stored.spec.friend_public_key)
+                    .or_else(|| {
+                        inner.native_identities.get(&transfer.id).map(|identity| &identity.peer_key)
+                    })
+                    .or_else(|| message_keys.get(&transfer.message_id));
+                if !key.is_some_and(|key| key.eq_ignore_ascii_case(public_key)) {
+                    return Err("TRANSFER_CONTACT_IDENTITY_CHANGED".into());
+                }
+                if let Some(stored) = &transfer.storage {
+                    legacy_candidates.push(stored.clone());
+                }
+            }
+        }
+        let mut ids = self
+            .file_bridge
+            .friend_message_ids(profile_id, friend, public_key, Some(contact_incarnation))?;
+        for id in &ids {
+            self.file_bridge
+                .purge_message(profile_id, friend, public_key, id, contact_incarnation)?;
+        }
+        // Cleanup custody survives profile lock/unlock independently of bridge
+        // RAM. These identities were already admitted for purge; finishing their
+        // captured epochs does not select a new recovery object for deletion.
+        if let Some(store) = self.file_bridge.store.get() {
+            for spec in store.pending_purges().map_err(|error| error.code().to_string())? {
+                if spec.profile_id == profile_id
+                    && spec.friend_public_key.eq_ignore_ascii_case(public_key)
+                {
+                    self.file_bridge.purge_message(
+                        profile_id, friend, public_key, &spec.message_id, spec.contact_incarnation,
+                    )?;
+                    ids.push(spec.message_id);
+                }
+            }
+        }
+        // R9 could create a new pending upload after re-adding a retired key,
+        // before manifests carried generations. Never restamp/admit it. Ordinary
+        // accepted deletion retired all bridge IDs; preserve those recovery
+        // objects and durable delivery receipts. Ambiguous legacy retired
+        // metadata remains retained rather than being guessed safe to erase.
+        if contact_incarnation != 0 {
+            if let Some(store) = self.file_bridge.store.get() {
+                legacy_candidates.extend(store.try_snapshot().map_err(|error| error.code().to_string())?);
+            }
+            let mut legacy_ids = Vec::new();
+            for stored in legacy_candidates {
+                if stored.spec.profile_id == profile_id
+                    && stored.spec.friend_public_key.eq_ignore_ascii_case(public_key)
+                    && stored.spec.contact_incarnation == 0
+                    && stored.spec.direction == StoreDirection::Outgoing
+                    && !stored.delivery_confirmed()
+                    && !stored.payload_released
+                    && !stored.is_identity_tombstone()
+                    && !profile.chat_protocol.message_cancelled(
+                        0, public_key, &stored.spec.message_id,
+                    )?
+                {
+                    legacy_ids.push(stored.spec.message_id);
+                }
+            }
+            legacy_ids.sort();
+            legacy_ids.dedup();
+            for id in &legacy_ids {
+                self.file_bridge.purge_message(profile_id, friend, public_key, id, 0)?;
+            }
+            ids.extend(legacy_ids);
+        }
+        self.file_bridge.forget_friend(profile_id, friend)?;
+        ids.sort();
+        ids.dedup();
+        Ok(ids)
     }
 
     fn delete_friend(&self, profile: &ToxState, args: &Value) -> Result<Value, String> {
@@ -8525,7 +9660,17 @@ impl WebWorkspaceRuntime {
             .lock()
             .map_err(|_| "Could not access the Tox profile".to_string())?;
         let handle = guard.as_ref().ok_or("TOX_NOT_INITIALIZED")?;
-        let friend_key = crate::tox_friend_public_key(handle.instance.as_ptr(), friend)
+        if !crate::installed_route_matches_settings(profile) {
+            return Err("SHARED_ROUTE_RESTART_REQUIRED".to_string());
+        }
+        if let Some(expected) = args.get("expectedPublicKey").and_then(Value::as_str) {
+            if crate::pending_contact::finish_absent_with_handle(profile, handle, Some(expected))? {
+                drop(guard);
+                crate::recover_local_message_deletions(profile)?;
+                return Ok(Value::Null);
+            }
+        }
+        let friend_key = crate::tox_friend_public_key(Some(handle.native()), friend)
             .ok_or("CHAT_CONTACT_NOT_FOUND")?;
         if args
             .get("expectedPublicKey")
@@ -8533,6 +9678,15 @@ impl WebWorkspaceRuntime {
             .is_some_and(|expected| !expected.eq_ignore_ascii_case(&friend_key))
         {
             return Err("CHAT_CONTACT_IDENTITY_CHANGED".to_string());
+        }
+        crate::pending_contact::require_incarnation(
+            profile, &friend_key,
+            args.get("expectedContactIncarnation").and_then(Value::as_u64),
+        )?;
+        if crate::pending_contact::purge_with_handle(profile, handle, friend, &friend_key, || {
+            self.purge_pending_transfer_payloads(profile, friend, &friend_key)
+        })? {
+            return Ok(Value::Null);
         }
         // Match the native callback's handle -> transaction lock order and
         // bind the numeric slot to both stable identities before detaching it.
@@ -8546,7 +9700,7 @@ impl WebWorkspaceRuntime {
             &profile.history_path,
             friend,
             &friend_key,
-            &crate::pq_tox_owner(handle.instance.as_ptr()),
+            &crate::pq_tox_owner(handle.native()),
         )?;
         let local_state_path = crate::profile_local_state_path(profile)?;
         let local_operation_ids = {
@@ -8555,7 +9709,10 @@ impl WebWorkspaceRuntime {
                 .lock()
                 .map_err(|_| "PROFILE_LOCAL_STATE_UNAVAILABLE".to_string())?;
             let saved = crate::read_profile_local_state(&local_state_path)?;
-            crate::deleted_contact_local_operation_ids(saved.as_ref(), friend, &friend_key)
+            if let Some(saved) = &saved {
+                crate::validate_pending_send_owners(saved, profile.owner_profile_id.as_deref())?;
+            }
+            crate::deleted_contact_local_operation_ids(saved.as_ref(), &friend_key)
         };
         let mut pending_messages = profile
             .pending_messages
@@ -8628,6 +9785,7 @@ impl WebWorkspaceRuntime {
             bridge_profile_id,
             friend,
             &friend_key,
+            None,
         )?);
         let recovery_path = if recovery.pending_messages.is_empty()
             && recovery.pending_pq_messages.is_empty()
@@ -8664,9 +9822,10 @@ impl WebWorkspaceRuntime {
             .retire_friend_message_ids(friend, &friend_key, &retired_ids)?;
         profile.chat_transport_ready.store(false, Ordering::Release);
         crate::commit_chat_transaction(&profile.history_path)?;
-        profile.pq.remove_friend(friend, Some(&friend_key))?;
+        profile.pq.remove_friend(friend)?;
+        crate::pending_contact::retire_local_incarnation(profile, &friend_key)?;
         let mut error = 0_i32;
-        if !unsafe { crate::tox_friend_delete(handle.instance.as_ptr(), friend, &mut error) } {
+        if !handle.native().friend_delete(friend, &mut error) {
             return Err(format!("TOX_FRIEND_DELETE_FAILED_{error}"));
         }
         pending_messages.retain(|item| {
@@ -8701,7 +9860,7 @@ impl WebWorkspaceRuntime {
                 let mut next = current
                     .cloned()
                     .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
-                crate::remove_deleted_contact_from_local_state(&mut next, friend, &friend_key)?;
+                crate::remove_deleted_contact_from_local_state(&mut next, &friend_key)?;
                 Ok(next)
             },
         );
@@ -8734,9 +9893,6 @@ impl WebWorkspaceRuntime {
             if let Ok(mut progress) = profile.receipt_progress.lock() {
                 progress.retain(|id, _| !removed.contains(id));
             }
-        }
-        if let Ok(mut receipts) = profile.pq_receipts.lock() {
-            receipts.retain(|(receipt_friend, _), _| *receipt_friend != friend);
         }
         if let Ok(mut files) = profile.incoming_files.lock() {
             files.retain(|(file_friend, _), _| *file_friend != friend);
@@ -8811,17 +9967,16 @@ impl WebWorkspaceRuntime {
             .lock()
             .map_err(|_| "Could not access the Tox profile".to_string())?;
         let handle = guard.as_ref().ok_or("TOX_NOT_INITIALIZED")?;
+        if !crate::installed_route_matches_settings(profile) {
+            return Err("SHARED_ROUTE_RESTART_REQUIRED".to_string());
+        }
         let mut error = 0_i32;
-        let number = unsafe {
-            crate::tox_friend_add_norequest(
-                handle.instance.as_ptr(),
-                public_key.as_ptr(),
-                &mut error,
-            )
-        };
+        let number = handle
+            .native()
+            .friend_add_norequest(&public_key, &mut error);
         let public_key_hex = crate::hex_upper(&public_key);
         let number = crate::resolve_native_friend_add_result(
-            handle.instance.as_ptr(),
+            handle.native(),
             &public_key_hex,
             number,
             error,
@@ -8857,7 +10012,7 @@ impl WebWorkspaceRuntime {
             profile.pq.bind_contact(
                 number,
                 &public_key_hex,
-                &crate::pq_tox_owner(handle.instance.as_ptr()),
+                &crate::pq_tox_owner(handle.native()),
                 false,
             )?;
         }
@@ -8870,23 +10025,10 @@ impl WebWorkspaceRuntime {
             .lock()
             .map_err(|_| "Could not access the Tox profile".to_string())?;
         let handle = guard.as_ref().ok_or("TOX_NOT_INITIALIZED")?;
-        let mut error = 0_i32;
-        let size = unsafe {
-            crate::tox_self_get_status_message_size(handle.instance.as_ptr(), &mut error)
-        };
-        let mut bytes = vec![0_u8; size];
-        if error != 0
-            || (size > 0
-                && !unsafe {
-                    crate::tox_self_get_status_message(
-                        handle.instance.as_ptr(),
-                        bytes.as_mut_ptr(),
-                        &mut error,
-                    )
-                })
-        {
-            return Err("TOX_STATUS_MESSAGE_READ_FAILED".to_string());
-        }
+        let bytes = handle
+            .native()
+            .self_status_message(&mut 0)
+            .ok_or("TOX_STATUS_MESSAGE_READ_FAILED")?;
         Ok(crate::normalize_status_message(&String::from_utf8_lossy(
             &bytes,
         )))
@@ -8903,14 +10045,10 @@ impl WebWorkspaceRuntime {
             .map_err(|_| "Could not access the Tox profile".to_string())?;
         let handle = guard.as_ref().ok_or("TOX_NOT_INITIALIZED")?;
         let mut error = 0_i32;
-        if !unsafe {
-            crate::tox_self_set_status_message(
-                handle.instance.as_ptr(),
-                message.as_bytes().as_ptr(),
-                message.len(),
-                &mut error,
-            )
-        } {
+        if !handle
+            .native()
+            .self_set_status_message(message.as_bytes(), &mut error)
+        {
             return Err(format!("TOX_STATUS_MESSAGE_WRITE_FAILED_{error}"));
         }
         ToxState::save(handle)?;
@@ -8930,14 +10068,7 @@ impl WebWorkspaceRuntime {
             .map_err(|_| "Could not access the Tox profile".to_string())?;
         let handle = guard.as_ref().ok_or("TOX_NOT_INITIALIZED")?;
         let mut error = 0_i32;
-        if !unsafe {
-            crate::tox_self_set_name(
-                handle.instance.as_ptr(),
-                name.as_bytes().as_ptr(),
-                name.len(),
-                &mut error,
-            )
-        } {
+        if !handle.native().self_set_name(name.as_bytes(), &mut error) {
             return Err(format!("TOX_NICKNAME_WRITE_FAILED_{error}"));
         }
         ToxState::save(handle)?;
@@ -9005,7 +10136,7 @@ fn restore_profile_data(
                     .map_err(|_| "PROFILE_PACKAGE_STORAGE_UNAVAILABLE".to_string())?;
                 let result = profiles::write_file(&destination, &bytes)
                     .map_err(|_| "PROFILE_PACKAGE_STORAGE_UNAVAILABLE".to_string());
-                crate::wipe_sensitive_bytes(&mut bytes);
+                crate::wipe_secret_bytes(&mut bytes);
                 result?;
             }
         }
@@ -9021,9 +10152,6 @@ impl Drop for WebWorkspaceRuntime {
     }
 }
 
-type FriendTextSize = unsafe extern "C" fn(*const std::ffi::c_void, u32, *mut i32) -> usize;
-type FriendTextGet = unsafe extern "C" fn(*const std::ffi::c_void, u32, *mut u8, *mut i32) -> bool;
-
 fn load_optional_json(path: &Path) -> Result<Value, String> {
     if !profiles::file_exists(path) {
         return Ok(Value::Null);
@@ -9035,26 +10163,6 @@ fn load_optional_json(path: &Path) -> Result<Value, String> {
 fn save_json_value(path: &Path, value: &Value) -> Result<(), String> {
     let encoded = serde_json::to_vec(value).map_err(|_| "STATE_DATA_INVALID".to_string())?;
     profiles::atomic_write(path, &encoded)
-}
-
-fn read_friend_text(
-    tox: *const std::ffi::c_void,
-    friend: u32,
-    size_fn: FriendTextSize,
-    get_fn: FriendTextGet,
-) -> String {
-    let mut error = 0_i32;
-    let size = unsafe { size_fn(tox, friend, &mut error) };
-    if error != 0 || size == 0 {
-        return String::new();
-    }
-    let mut bytes = vec![0_u8; size];
-    if !unsafe { get_fn(tox, friend, bytes.as_mut_ptr(), &mut error) } || error != 0 {
-        return String::new();
-    }
-    sanitize_untrusted_text(&String::from_utf8_lossy(&bytes))
-        .trim()
-        .to_string()
 }
 
 fn parse_tox_id(value: &str) -> Result<[u8; 38], String> {
@@ -9131,8 +10239,11 @@ mod tests {
         fn try_result(&self, _ticket: u64) -> Option<Result<StoreReply, StoreError>> {
             self.reply.lock().unwrap().clone()
         }
-        fn snapshot(&self) -> Vec<StoreObjectStatus> {
-            self.published.lock().unwrap().clone()
+        fn try_snapshot(&self) -> Result<Vec<StoreObjectStatus>, StoreError> {
+            if !self.is_ready() {
+                return Err(StoreError::Busy);
+            }
+            self.published.try_lock().map(|snapshot| snapshot.clone()).map_err(|_| StoreError::Busy)
         }
     }
 
@@ -9149,6 +10260,7 @@ mod tests {
                 profile_id: "profile".into(),
                 message_id: "message".into(),
                 friend_public_key: "AB".repeat(32),
+                contact_incarnation: 0,
                 direction,
                 name: "test.bin".into(),
                 mime: "application/octet-stream".into(),
@@ -9488,12 +10600,8 @@ mod tests {
         retained.committed_sha256 = Some([4; 32]);
         bridge.restore_storage(retained, 1, false).unwrap();
 
-        assert!(bridge
-            .cancel_incoming_for_policy("profile", std::ptr::null_mut())
-            .unwrap());
-        assert!(!bridge
-            .cancel_incoming_for_policy("profile", std::ptr::null_mut())
-            .unwrap());
+        assert!(bridge.cancel_incoming_for_policy("profile").unwrap());
+        assert!(!bridge.cancel_incoming_for_policy("profile").unwrap());
         for (index, id) in incoming.iter().enumerate() {
             assert_eq!(bridge.view(id, 0).unwrap().state, "cancelled");
             assert_eq!(bridge.view(id, 0).unwrap().buffered_bytes, 0);
@@ -9542,9 +10650,7 @@ mod tests {
             .unwrap_err(),
             "FILE_RECEIVE_DENIED"
         );
-        bridge
-            .cancel_incoming_for_policy("profile", std::ptr::null_mut())
-            .unwrap();
+        bridge.cancel_incoming_for_policy("profile").unwrap();
         assert_eq!(
             resume_web_transfer_with_native_control(
                 &handle,
@@ -9580,9 +10686,7 @@ mod tests {
         let mut status = test_store_status(&id, StoreDirection::Incoming, 4);
         bridge.bind_storage(&id, status.spec.clone()).unwrap();
         bridge.control_id(&id, "resume").unwrap();
-        bridge
-            .cancel_incoming_for_policy("profile", std::ptr::null_mut())
-            .unwrap();
+        bridge.cancel_incoming_for_policy("profile").unwrap();
         status.phase = StorePhase::Committed;
         status.durable_bytes = 4;
         status.committed_sha256 = Some([4; 32]);
@@ -9752,6 +10856,32 @@ mod tests {
             store.operations.lock().unwrap().last(),
             Some(StoreOperation::Remove { .. })
         ));
+    }
+
+    #[test]
+    fn pending_transfer_cleanup_distinguishes_contended_index_from_empty_index() {
+        let bridge = WebFileBridge::default();
+        let store = Arc::new(DeferredTransferStore::default());
+        store.ready.store(true, Ordering::Release);
+        bridge.install_store(store.clone()).unwrap();
+        let status = test_store_status("queued", StoreDirection::Outgoing, 4);
+        let key = status.spec.friend_public_key.clone();
+        let mut published = store.published.lock().unwrap();
+        published.push(status);
+        assert_eq!(
+            bridge.friend_message_ids("profile", 1, &key, Some(0)).unwrap_err(),
+            "TRANSFER_STORAGE_BUSY"
+        );
+        assert_eq!(
+            bridge.purge_message("profile", 1, &key, "message", 0).unwrap_err(),
+            "TRANSFER_STORAGE_BUSY"
+        );
+        assert!(store.operations.lock().unwrap().is_empty());
+        drop(published);
+        assert_eq!(
+            bridge.friend_message_ids("profile", 1, &key, Some(0)).unwrap(),
+            vec!["message".to_string()]
+        );
     }
 
     #[test]
@@ -10087,9 +11217,7 @@ mod tests {
         }
         impl Drop for Fixture {
             fn drop(&mut self) {
-                if let Some(handle) = self.handle.get_mut().unwrap().take() {
-                    unsafe { crate::tox_kill(handle.instance.as_ptr()) };
-                }
+                drop(self.handle.get_mut().unwrap().take());
                 let _ = crate::flush_deferred_profile_writes();
                 crate::chat_history_store::unregister(&self.history_path);
                 let _ = fs::remove_dir_all(&self.root);
@@ -10136,6 +11264,7 @@ mod tests {
         let mut route = bridge.next_to_start().unwrap();
         assert_eq!(route.id, id);
         if boundary != "offer" {
+            bridge.bind_native_generation(&id, 1).unwrap();
             bridge.outgoing_started(&id, 7).unwrap();
             route = bridge.routing(&id).unwrap();
         }
@@ -10189,14 +11318,21 @@ mod tests {
             })),
             downloads_dir: fixture.root.join("downloads"),
             avatars_dir: fixture.root.join("avatars"),
-            transfer_log_path: fixture.root.join("transfer.log"),
-            network_log_path: fixture.root.join("network.log"),
+            transfer_log_path: crate::ProfileLogPath::new(
+                fixture.root.join("transfer.log"),
+                fixture.root.clone(),
+            )
+            .unwrap(),
+            network_log_path: crate::ProfileLogPath::new(
+                fixture.root.join("network.log"),
+                fixture.root.clone(),
+            )
+            .unwrap(),
             friend_cache: Arc::default(),
             friend_cache_path: fixture.root.join("friends.json"),
             pq: Arc::new(crate::PqEngine::new(&fixture.root).unwrap()),
             chat_protocol: Arc::new(crate::ChatProtocolEngine::new(&fixture.root).unwrap()),
             file_card_protocol: Arc::new(crate::FileCardEngine::new(&fixture.root).unwrap()),
-            pq_receipts: Arc::default(),
             file_receive_settings: Arc::default(),
             unread_state: Arc::default(),
             unread_state_path: fixture.root.join("unread.json"),
@@ -10205,20 +11341,18 @@ mod tests {
             network_enabled: Arc::new(AtomicBool::new(false)),
             chat_transaction_gate: Arc::default(),
             chat_transport_ready: Arc::new(AtomicBool::new(false)),
+            handle_generation: Arc::new(AtomicU64::new(1)),
             web_profile_id: Some("profile".into()),
             web_file_bridge: Some(Arc::clone(&bridge)),
         };
         let callback_ran = std::cell::Cell::new(false);
         let native_send_returned = std::cell::Cell::new(None);
         let outgoing_files = Arc::clone(&context.outgoing_files);
-        let mut callback = |tox| {
-            let user_data = (&mut context as *mut crate::CallbackContext).cast();
-            unsafe {
-                if boundary == "offer" {
-                    crate::on_file_recv_control(tox, 1, 7, 2, user_data);
-                } else {
-                    crate::on_file_chunk_request(tox, 1, 7, 4, 0, user_data);
-                }
+        let mut callback = |tox: ToxRef<'_>| {
+            if boundary == "offer" {
+                tox.test_file_control(&mut context, 1, 7, 2);
+            } else {
+                tox.test_file_chunk_request(&mut context, 1, 7, 4, 0);
             }
             callback_ran.set(true);
         };
@@ -10227,7 +11361,7 @@ mod tests {
             // the same late accepted-progress publisher used by drain.
             {
                 let handle = fixture.handle.lock().unwrap();
-                callback(handle.as_ref().unwrap().instance.as_ptr());
+                callback(handle.as_ref().unwrap().native());
             }
             assert!(outgoing_files.lock().unwrap().is_empty());
             assert_eq!(bridge.view(&id, 0).unwrap().state, "complete");
@@ -10253,7 +11387,7 @@ mod tests {
             // defers the real callback until the production helper returns.
             let mut before_publish = || {
                 if let Ok(handle) = fixture.handle.try_lock() {
-                    callback(handle.as_ref().unwrap().instance.as_ptr());
+                    callback(handle.as_ref().unwrap().native());
                 }
             };
             match boundary {
@@ -10280,6 +11414,7 @@ mod tests {
                     outgoing,
                     |_, _| {
                         native_send_returned.set(Some(Instant::now()));
+                        bridge.bind_native_generation(&id, 1).unwrap();
                         (7, 0)
                     },
                     &mut before_publish,
@@ -10297,7 +11432,7 @@ mod tests {
         }
         if !callback_ran.get() {
             let handle = fixture.handle.lock().unwrap();
-            callback(handle.as_ref().unwrap().instance.as_ptr());
+            callback(handle.as_ref().unwrap().native());
         }
         if boundary == "offer" {
             assert_eq!(
@@ -11217,6 +12352,7 @@ mod tests {
                         profile_id: profile_id.to_string(),
                         message_id: message_id.to_string(),
                         friend_public_key: "AB".repeat(32),
+                        contact_incarnation: 0,
                         direction: if transfer.outgoing {
                             StoreDirection::Outgoing
                         } else {
@@ -12541,8 +13677,8 @@ mod tests {
                 fresh.then_some("Disposable delivery fixture"),
             )
             .unwrap();
-            profile.transfer_log_path = PathBuf::new();
-            profile.network_log_path = PathBuf::new();
+            profile.transfer_log_path = crate::ProfileLogPath::disabled();
+            profile.network_log_path = crate::ProfileLogPath::disabled();
             profile.web_profile_id = Some(PROFILE.into());
             profile.web_file_bridge = Some(Arc::clone(&runtime.file_bridge));
             profile
@@ -12575,14 +13711,13 @@ mod tests {
                 outgoing_files: Arc::clone(&profile.outgoing_files),
                 downloads_dir: profile.downloads_dir.clone(),
                 avatars_dir: profile.avatars_dir.clone(),
-                transfer_log_path: PathBuf::new(),
-                network_log_path: PathBuf::new(),
+                transfer_log_path: crate::ProfileLogPath::disabled(),
+                network_log_path: crate::ProfileLogPath::disabled(),
                 friend_cache: Arc::clone(&profile.friend_cache),
                 friend_cache_path: profile.friend_cache_path.clone(),
                 pq: Arc::clone(&profile.pq),
                 chat_protocol: Arc::clone(&profile.chat_protocol),
                 file_card_protocol: Arc::clone(&profile.file_card_protocol),
-                pq_receipts: Arc::clone(&profile.pq_receipts),
                 file_receive_settings: Arc::clone(&profile.file_receive_settings),
                 unread_state: Arc::clone(&profile.unread_state),
                 unread_state_path: profile.unread_state_path.clone(),
@@ -12591,6 +13726,7 @@ mod tests {
                 network_enabled: Arc::clone(&profile.network_enabled),
                 chat_transaction_gate: Arc::clone(&profile.chat_transaction_gate),
                 chat_transport_ready: Arc::clone(&profile.chat_transport_ready),
+                handle_generation: Arc::clone(&profile.handle_generation),
                 web_profile_id: profile.web_profile_id.clone(),
                 web_file_bridge: profile.web_file_bridge.clone(),
             }
@@ -12599,16 +13735,13 @@ mod tests {
         fn eof(profile: &ToxState, friend: u32) {
             let mut context = callback_context(profile);
             let guard = profile.handle.lock().unwrap();
-            unsafe {
-                crate::on_file_chunk_request(
-                    guard.as_ref().unwrap().instance.as_ptr(),
-                    friend,
-                    7,
-                    BYTES.len() as u64,
-                    0,
-                    (&mut context as *mut crate::CallbackContext).cast(),
-                );
-            }
+            guard.as_ref().unwrap().native().test_file_chunk_request(
+                &mut context,
+                friend,
+                7,
+                BYTES.len() as u64,
+                0,
+            );
         }
 
         fn assert_pending(runtime: &WebWorkspaceRuntime, profile: &ToxState, id: &str) {
@@ -12734,15 +13867,11 @@ mod tests {
             let mut context = callback_context(profile);
             {
                 let handle = profile.handle.lock().unwrap();
-                unsafe {
-                    crate::on_file_recv_control(
-                        handle.as_ref().unwrap().instance.as_ptr(),
-                        friend,
-                        7,
-                        0,
-                        (&mut context as *mut crate::CallbackContext).cast(),
-                    );
-                }
+                handle
+                    .as_ref()
+                    .unwrap()
+                    .native()
+                    .test_file_control(&mut context, friend, 7, 0);
             }
             assert_paused_zero();
             assert!(
@@ -12770,11 +13899,8 @@ mod tests {
                 None,
             )
             .unwrap();
-            let mut address = [0_u8; 38];
-            unsafe {
-                crate::tox_self_get_address(peer.instance.as_ptr(), address.as_mut_ptr());
-                crate::tox_kill(peer.instance.as_ptr());
-            }
+            let address = peer.address();
+            drop(peer);
             let mut public_key = [0_u8; 32];
             public_key.copy_from_slice(&address[..32]);
             assert!(public_key[31] < 128);
@@ -12795,15 +13921,11 @@ mod tests {
             let mut context = callback_context(&profile);
             for key in [[0xab_u8; 32], [0xcd_u8; 32]] {
                 let handle = profile.handle.lock().unwrap();
-                unsafe {
-                    crate::on_friend_request(
-                        handle.as_ref().unwrap().instance.as_ptr(),
-                        key.as_ptr(),
-                        b"synthetic request".as_ptr(),
-                        17,
-                        (&mut context as *mut crate::CallbackContext).cast(),
-                    );
-                }
+                handle.as_ref().unwrap().native().test_friend_request(
+                    &mut context,
+                    &key,
+                    b"synthetic request",
+                );
             }
             drop(context);
             let args = serde_json::json!({ "publicKey": "ab".repeat(32) });
@@ -12863,6 +13985,7 @@ mod tests {
                 restored_profile.unread_state.lock().unwrap().requests,
                 ["CD".repeat(32)].into_iter().collect()
             );
+            drop(restored_profile);
             restored.stop().unwrap();
         }
 
@@ -12901,13 +14024,11 @@ mod tests {
             let friend = {
                 let guard = profile.handle.lock().unwrap();
                 let mut error = 0;
-                let friend = unsafe {
-                    crate::tox_friend_add_norequest(
-                        guard.as_ref().unwrap().instance.as_ptr(),
-                        peer_public_key.as_ptr(),
-                        &mut error,
-                    )
-                };
+                let friend = guard
+                    .as_ref()
+                    .unwrap()
+                    .native()
+                    .friend_add_norequest(&peer_public_key, &mut error);
                 assert_eq!(error, 0);
                 friend
             };
@@ -12921,6 +14042,8 @@ mod tests {
                     &mut domain,
                     PROFILE,
                     friend,
+                    &expected_key,
+                    None,
                     "activity.bin",
                     "application/octet-stream",
                     BYTES.len() as u64,
@@ -12955,6 +14078,7 @@ mod tests {
                 .unwrap();
             assert_eq!(row["last_event"].as_u64(), Some(expected_timestamp));
             assert_eq!(row["lastEventSequence"].as_u64(), Some(persisted_sequence));
+            drop(profile);
             live.stop().unwrap();
         }
 
@@ -12971,13 +14095,11 @@ mod tests {
             let friend = {
                 let guard = profile.handle.lock().unwrap();
                 let mut error = 0;
-                let friend = unsafe {
-                    crate::tox_friend_add_norequest(
-                        guard.as_ref().unwrap().instance.as_ptr(),
-                        peer_public_key.as_ptr(),
-                        &mut error,
-                    )
-                };
+                let friend = guard
+                    .as_ref()
+                    .unwrap()
+                    .native()
+                    .friend_add_norequest(&peer_public_key, &mut error);
                 assert_eq!(error, 0);
                 friend
             };
@@ -12987,18 +14109,14 @@ mod tests {
             let mut context = callback_context(&profile);
             {
                 let guard = profile.handle.lock().unwrap();
-                unsafe {
-                    crate::on_file_recv(
-                        guard.as_ref().unwrap().instance.as_ptr(),
-                        friend,
-                        13,
-                        0,
-                        BYTES.len() as u64,
-                        name.as_ptr(),
-                        name.len(),
-                        (&mut context as *mut crate::CallbackContext).cast(),
-                    );
-                }
+                guard.as_ref().unwrap().native().test_file_recv(
+                    &mut context,
+                    friend,
+                    13,
+                    0,
+                    BYTES.len() as u64,
+                    name,
+                );
             }
 
             let message_id = profile.messages.lock().unwrap()[0].id.clone();
@@ -13015,6 +14133,8 @@ mod tests {
                 profile.friend_cache.lock().unwrap()[&expected_key].added_event_sequence,
                 persisted_sequence
             );
+            drop(context);
+            drop(profile);
             live.stop().unwrap();
         }
 
@@ -13031,22 +14151,18 @@ mod tests {
             assert_ne!(peer_public_key, second_peer_public_key);
             let guard = profile.handle.lock().unwrap();
             let mut error = 0;
-            let friend = unsafe {
-                crate::tox_friend_add_norequest(
-                    guard.as_ref().unwrap().instance.as_ptr(),
-                    peer_public_key.as_ptr(),
-                    &mut error,
-                )
-            };
+            let friend = guard
+                .as_ref()
+                .unwrap()
+                .native()
+                .friend_add_norequest(&peer_public_key, &mut error);
             assert_eq!(error, 0);
             let mut second_error = 0;
-            let second_friend = unsafe {
-                crate::tox_friend_add_norequest(
-                    guard.as_ref().unwrap().instance.as_ptr(),
-                    second_peer_public_key.as_ptr(),
-                    &mut second_error,
-                )
-            };
+            let second_friend = guard
+                .as_ref()
+                .unwrap()
+                .native()
+                .friend_add_norequest(&second_peer_public_key, &mut second_error);
             assert_eq!(second_error, 0);
             let expected_key = crate::hex_upper(&peer_public_key);
             let second_expected_key = crate::hex_upper(&second_peer_public_key);
@@ -13119,17 +14235,15 @@ mod tests {
             profile.messages.lock().unwrap().clear();
 
             profile.history_enabled.store(false, Ordering::Release);
-            let (disabled_by_key, disabled_by_number) =
-                crate::last_event_maps_for_state(&profile).unwrap();
+            let disabled_by_key = crate::last_events_for_state(&profile).unwrap();
             assert!(disabled_by_key.is_empty());
-            assert!(disabled_by_number.is_empty());
             profile.history_enabled.store(true, Ordering::Release);
 
             let resident_last_event = persisted_last_event + 1;
             profile.messages.lock().unwrap().push(crate::ToxMessage {
                 id: "friends-snapshot-resident".into(),
                 friend_number: friend,
-                friend_public_key: String::new(),
+                friend_public_key: expected_key.clone(),
                 text: "newer resident activity".into(),
                 mine: true,
                 timestamp: resident_last_event,
@@ -13189,6 +14303,8 @@ mod tests {
             let snapshot = match result {
                 Ok(snapshot) => snapshot,
                 Err(error) => {
+                    drop(request);
+                    drop(profile);
                     live.stop().unwrap();
                     panic!("contact refresh must wait for native iteration: {error}");
                 }
@@ -13232,6 +14348,7 @@ mod tests {
             assert!(!live.friends_request_is_current(&request));
             live.profiles.remove(PROFILE);
             live.profiles.insert(PROFILE.into(), profile);
+            drop(request);
             live.stop().unwrap();
             replacement.stop().unwrap();
         }
@@ -13246,19 +14363,16 @@ mod tests {
                 KaiProfileVolume::create(live.profile_container_path(PROFILE).unwrap(), None)
                     .unwrap();
             let profile = mount_profile(&mut live, volume, true, true);
+            profile.network_enabled.store(true, Ordering::Release);
             let peer_public_key = native_peer_public_key(&root.0);
             let expected_key = crate::hex_upper(&peer_public_key);
             let friend = {
                 let guard = profile.handle.lock().unwrap();
                 let handle = guard.as_ref().unwrap();
                 let mut error = 0;
-                let friend = unsafe {
-                    crate::tox_friend_add_norequest(
-                        handle.instance.as_ptr(),
-                        peer_public_key.as_ptr(),
-                        &mut error,
-                    )
-                };
+                let friend = handle
+                    .native()
+                    .friend_add_norequest(&peer_public_key, &mut error);
                 assert_eq!(error, 0);
                 friend
             };
@@ -13268,18 +14382,14 @@ mod tests {
             let name = b"incoming.png";
             {
                 let guard = profile.handle.lock().unwrap();
-                unsafe {
-                    crate::on_file_recv(
-                        guard.as_ref().unwrap().instance.as_ptr(),
-                        friend,
-                        7,
-                        0,
-                        BYTES.len() as u64,
-                        name.as_ptr(),
-                        name.len(),
-                        (&mut context as *mut crate::CallbackContext).cast(),
-                    );
-                }
+                guard.as_ref().unwrap().native().test_file_recv(
+                    &mut context,
+                    friend,
+                    7,
+                    0,
+                    BYTES.len() as u64,
+                    name,
+                );
             }
             let message_id = {
                 let rows = profile.messages.lock().unwrap();
@@ -13301,6 +14411,13 @@ mod tests {
                 "offered"
             );
 
+            // A pending card can be visible in durable history even after its
+            // in-memory message row is evicted while another profile is active.
+            profile
+                .messages
+                .lock()
+                .unwrap()
+                .retain(|row| row.id != message_id);
             let mut domain = new_domain();
             eprintln!("KAIGEN_INCOMING_RESUME_ENTERED");
             live.control_web_transfer(&mut domain, PROFILE, &message_id, "resume", 1_000)
@@ -13324,6 +14441,8 @@ mod tests {
                 )
                 .unwrap();
             assert!(history.is_array());
+            drop(context);
+            drop(profile);
             live.stop().unwrap();
         }
 
@@ -13342,13 +14461,11 @@ mod tests {
                 let friend = {
                     let handle = profile.handle.lock().unwrap();
                     let mut error = 0;
-                    let friend = unsafe {
-                        crate::tox_friend_add_norequest(
-                            handle.as_ref().unwrap().instance.as_ptr(),
-                            public_key.as_ptr(),
-                            &mut error,
-                        )
-                    };
+                    let friend = handle
+                        .as_ref()
+                        .unwrap()
+                        .native()
+                        .friend_add_norequest(&public_key, &mut error);
                     assert_eq!(error, 0);
                     friend
                 };
@@ -13358,6 +14475,8 @@ mod tests {
                         &mut domain,
                         PROFILE,
                         friend,
+                        &crate::hex_upper(&public_key),
+                        None,
                         "progress.bin",
                         "application/octet-stream",
                         1024,
@@ -13444,6 +14563,7 @@ mod tests {
                 assert_eq!(returned["messages"][0]["id"], view.message_id);
                 assert_eq!(returned["messages"][0]["attachment"]["transferred"], 768);
                 assert_eq!(returned["messages"][0]["attachment"]["completed"], false);
+                drop(profile);
                 live.stop().unwrap();
             }
         }
@@ -13459,17 +14579,16 @@ mod tests {
                     KaiProfileVolume::create(live.profile_container_path(PROFILE).unwrap(), None)
                         .unwrap();
                 let profile = mount_profile(&mut live, volume, true, history_enabled);
+                profile.network_enabled.store(true, Ordering::Release);
                 let peer_public_key = native_peer_public_key(&root.0);
                 let friend = {
                     let handle = profile.handle.lock().unwrap();
                     let mut error = 0;
-                    let friend = unsafe {
-                        crate::tox_friend_add_norequest(
-                            handle.as_ref().unwrap().instance.as_ptr(),
-                            peer_public_key.as_ptr(),
-                            &mut error,
-                        )
-                    };
+                    let friend = handle
+                        .as_ref()
+                        .unwrap()
+                        .native()
+                        .friend_add_norequest(&peer_public_key, &mut error);
                     assert_eq!(error, 0);
                     friend
                 };
@@ -13479,18 +14598,14 @@ mod tests {
                 let mut context = callback_context(&profile);
                 {
                     let handle = profile.handle.lock().unwrap();
-                    unsafe {
-                        crate::on_file_recv(
-                            handle.as_ref().unwrap().instance.as_ptr(),
-                            friend,
-                            7,
-                            0,
-                            size,
-                            name.as_ptr(),
-                            name.len(),
-                            (&mut context as *mut crate::CallbackContext).cast(),
-                        );
-                    }
+                    handle.as_ref().unwrap().native().test_file_recv(
+                        &mut context,
+                        friend,
+                        7,
+                        0,
+                        size,
+                        name,
+                    );
                 }
                 let message_id = profile.messages.lock().unwrap()[0].id.clone();
                 let transfer_id = live
@@ -13550,17 +14665,13 @@ mod tests {
                 let receive = |position: u64, bytes: &[u8]| {
                     let mut context = callback_context(&profile);
                     let handle = profile.handle.lock().unwrap();
-                    unsafe {
-                        crate::on_file_recv_chunk(
-                            handle.as_ref().unwrap().instance.as_ptr(),
-                            friend,
-                            7,
-                            position,
-                            bytes.as_ptr(),
-                            bytes.len(),
-                            (&mut context as *mut crate::CallbackContext).cast(),
-                        );
-                    }
+                    handle.as_ref().unwrap().native().test_file_recv_chunk(
+                        &mut context,
+                        friend,
+                        7,
+                        position,
+                        bytes,
+                    );
                 };
                 receive(0, &chunk);
                 stored.durable_bytes = chunk.len() as u64;
@@ -13600,6 +14711,8 @@ mod tests {
                     assert_eq!(row["attachment"]["transfer_state"], "complete");
                     assert_eq!(row["attachment"]["completed"], true);
                 }
+                drop(context);
+                drop(profile);
                 live.stop().unwrap();
             }
         }
@@ -13622,13 +14735,9 @@ mod tests {
                 let guard = profile.handle.lock().unwrap();
                 let handle = guard.as_ref().unwrap();
                 let mut error = 0;
-                let friend = unsafe {
-                    crate::tox_friend_add_norequest(
-                        handle.instance.as_ptr(),
-                        peer_public_key.as_ptr(),
-                        &mut error,
-                    )
-                };
+                let friend = handle
+                    .native()
+                    .friend_add_norequest(&peer_public_key, &mut error);
                 assert_eq!(error, 0);
                 ToxState::save(handle).unwrap();
                 friend
@@ -13639,6 +14748,8 @@ mod tests {
                     &mut domain,
                     PROFILE,
                     friend,
+                    &crate::hex_upper(&peer_public_key),
+                    None,
                     "test.bin",
                     "application/octet-stream",
                     BYTES.len() as u64,
@@ -13686,12 +14797,23 @@ mod tests {
                 &route,
                 &view.message_id,
                 outgoing,
-                |_, _| (7, 0),
+                |_, _| {
+                    // The mock successful offer owns the handle at the same boundary
+                    // where the production send stamps native binding provenance.
+                    live.file_bridge
+                        .bind_native_generation(
+                            &route.id,
+                            profile.handle_generation.load(Ordering::Acquire),
+                        )
+                        .unwrap();
+                    (7, 0)
+                },
                 || {},
             )
             .unwrap();
 
             if let Some(native_error) = pause_case {
+                profile.network_enabled.store(true, Ordering::Release);
                 assert!(history_enabled);
                 exercise_pause_before_peer_acceptance(
                     &mut live,
@@ -13711,16 +14833,13 @@ mod tests {
             {
                 let mut context = callback_context(&profile);
                 let guard = profile.handle.lock().unwrap();
-                unsafe {
-                    crate::on_file_chunk_request(
-                        guard.as_ref().unwrap().instance.as_ptr(),
-                        friend,
-                        7,
-                        0,
-                        BYTES.len(),
-                        (&mut context as *mut crate::CallbackContext).cast(),
-                    );
-                }
+                guard.as_ref().unwrap().native().test_file_chunk_request(
+                    &mut context,
+                    friend,
+                    7,
+                    0,
+                    BYTES.len(),
+                );
             }
             *store.reply.lock().unwrap() = Some(Ok(StoreReply::Range {
                 status: status.clone(),
@@ -14019,7 +15138,7 @@ mod tests {
             exercise_case(true, false, Some(2));
         }
 
-        fn legacy_retained_row(status: &StoreObjectStatus, path: String) -> crate::ToxMessage {
+        fn retained_row(status: &StoreObjectStatus, path: String) -> crate::ToxMessage {
             serde_json::from_value(serde_json::json!({
                 "id": status.spec.message_id,
                 "friend_number": 1,
@@ -14038,8 +15157,8 @@ mod tests {
         }
 
         #[test]
-        fn retained_legacy_paths_relink_both_directions_without_inventing_delivery() {
-            let root = OwnedRoot::new("legacy-paths");
+        fn retained_paths_require_browser_stream_without_inventing_delivery() {
+            let root = OwnedRoot::new("retained-paths");
             let store = Arc::new(DeferredTransferStore::default());
             store.ready.store(true, Ordering::Release);
             let mut live = runtime(&root.0, Arc::clone(&store));
@@ -14073,11 +15192,14 @@ mod tests {
                         format!(r"C:\owned\profile\{directory}\retained"),
                         "browser-stream://retained".into(),
                     ] {
-                        let mut rows = vec![legacy_retained_row(&status, path)];
+                        let canonical = path == "browser-stream://retained";
+                        let mut rows = vec![retained_row(&status, path)];
                         let mut expected = rows[0].clone();
                         let attachment = expected.attachment.as_mut().unwrap();
-                        attachment.path = "browser-stream://retained".into();
-                        if direction == StoreDirection::Outgoing && marker == Some(true) {
+                        if canonical
+                            && direction == StoreDirection::Outgoing
+                            && marker == Some(true)
+                        {
                             attachment.completed = true;
                             attachment.transfer_state = "complete".into();
                             attachment.transferred = 4;
@@ -14085,7 +15207,7 @@ mod tests {
                             attachment.eta_seconds = None;
                             attachment.transfer_error = None;
                             expected.delivery = "delivered".into();
-                        } else if direction == StoreDirection::Outgoing {
+                        } else if canonical && direction == StoreDirection::Outgoing {
                             attachment.transfer_state = "failed".into();
                             attachment.speed_bytes_per_sec = 0;
                             attachment.eta_seconds = None;
@@ -14151,7 +15273,7 @@ mod tests {
                     transfer.state = state.into();
                     transfer.locally_paused = state == "paused";
                 }
-                let mut row = legacy_retained_row(&status, "browser-stream://retained".into());
+                let mut row = retained_row(&status, "browser-stream://retained".into());
                 row.attachment.as_mut().unwrap().transfer_state = row_state.into();
                 let before = serde_json::to_value(&row).unwrap();
                 let mut rows = vec![row];
@@ -14164,7 +15286,7 @@ mod tests {
             let bridge = WebFileBridge::default();
             bridge.restore_storage(status.clone(), 1, true).unwrap();
             assert_eq!(bridge.view("retained", 1).unwrap().state, "complete");
-            let mut row = legacy_retained_row(&status, "browser-stream://retained".into());
+            let mut row = retained_row(&status, "browser-stream://retained".into());
             let attachment = row.attachment.as_mut().unwrap();
             attachment.transfer_state = "complete".into();
             attachment.completed = true;
@@ -14198,8 +15320,8 @@ mod tests {
         }
 
         #[test]
-        fn retained_legacy_paths_reject_mismatched_bindings_and_lookalike_paths() {
-            let root = OwnedRoot::new("legacy-path-rejection");
+        fn retained_paths_reject_mismatched_bindings_and_lookalike_paths() {
+            let root = OwnedRoot::new("retained-path-rejection");
             let store = Arc::new(DeferredTransferStore::default());
             store.ready.store(true, Ordering::Release);
             let mut live = runtime(&root.0, Arc::clone(&store));
@@ -14245,10 +15367,7 @@ mod tests {
                     status.native_delivery_confirmed = marker;
                     let bridge = WebFileBridge::default();
                     bridge.restore_storage(status.clone(), 1, false).unwrap();
-                    let mut rows = vec![legacy_retained_row(
-                        &status,
-                        format!("/owned/profile/{directory}/retained"),
-                    )];
+                    let mut rows = vec![retained_row(&status, "browser-stream://retained".into())];
                     let attachment = rows[0].attachment.as_mut().unwrap();
                     match mismatch {
                         "message-id" => rows[0].id = "other-message".into(),

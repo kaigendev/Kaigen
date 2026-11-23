@@ -48,7 +48,7 @@ case "$distribution_mode" in
     ;;
 esac
 
-for command in cargo npm rustup cmake ninja lipo otool install_name_tool codesign hdiutil ditto find grep sort cmp diff mktemp readlink shasum; do
+for command in cargo node npm rustup cmake ninja lipo otool install_name_tool codesign hdiutil ditto find grep sort cmp diff mktemp readlink shasum; do
   if ! command -v "$command" >/dev/null 2>&1; then
     echo "Required command is missing: $command" >&2
     exit 1
@@ -83,6 +83,15 @@ write_source_byte_manifest() {
     done > "$destination"
 }
 
+for rust_target in aarch64-apple-darwin x86_64-apple-darwin; do
+  if ! rustup target list --installed | grep -Fxq "$rust_target"; then
+    echo "Required local Rust target is missing: $rust_target. Network installation is disabled outside the explicit Kaigen component-update route." >&2
+    exit 1
+  fi
+done
+
+# Materialize Cargo's pinned path patches before hashing the build inputs.
+node "$project_root/scripts/prepare-windows-core.mjs"
 source_manifest_before="$(mktemp "${TMPDIR:-/tmp}/kaigen-source-before.XXXXXX")"
 source_manifest_after="$(mktemp "${TMPDIR:-/tmp}/kaigen-source-after.XXXXXX")"
 cleanup_source_manifests() {
@@ -91,17 +100,10 @@ cleanup_source_manifests() {
 trap cleanup_source_manifests EXIT
 write_source_byte_manifest "$source_manifest_before"
 
-for rust_target in aarch64-apple-darwin x86_64-apple-darwin; do
-  if ! rustup target list --installed | grep -Fxq "$rust_target"; then
-    echo "Required local Rust target is missing: $rust_target. Network installation is disabled outside the explicit Kaigen component-update route." >&2
-    exit 1
-  fi
-done
 export NPM_CONFIG_OFFLINE=true
 export CARGO_NET_OFFLINE=true
 cd "$project_root"
 npm ci --offline
-node "$project_root/scripts/prepare-windows-core.mjs"
 cargo metadata --offline --locked --format-version 1 --manifest-path src-tauri/Cargo.toml >/dev/null
 
 bash "$project_root/scripts/prepare-unix-dependencies.sh" macos
@@ -147,6 +149,10 @@ npm run tauri -- build \
   --target universal-apple-darwin \
   --config src-tauri/tauri.macos.conf.json \
   --bundles app
+
+for target in x86_64-apple-darwin aarch64-apple-darwin; do
+  cargo build --locked --release --manifest-path src-tauri/Cargo.toml --bin kaigen-updater --target "$target"
+done
 
 write_source_byte_manifest "$source_manifest_after"
 if ! cmp -s "$source_manifest_before" "$source_manifest_after"; then
@@ -201,6 +207,12 @@ tor_resources="$app/Contents/Resources/TorExpertBundle/tor"
 transport_resources="$tor_resources/pluggable_transports"
 helpers="$app/Contents/Helpers"
 mkdir -p "$helpers"
+updater_helper="$helpers/kaigen-updater"
+lipo -create \
+  "$project_root/src-tauri/target/x86_64-apple-darwin/release/kaigen-updater" \
+  "$project_root/src-tauri/target/aarch64-apple-darwin/release/kaigen-updater" \
+  -output "$updater_helper"
+chmod 0755 "$updater_helper"
 tor_helper="$helpers/kaigen-tor"
 lyrebird_helper="$helpers/kaigen-lyrebird"
 conjure_helper="$helpers/kaigen-conjure-client"
@@ -229,6 +241,7 @@ for required in \
   Contents/Resources/TorExpertBundle/tor/pluggable_transports/lyrebird \
   Contents/Resources/TorExpertBundle/tor/pluggable_transports/conjure-client \
   Contents/Helpers/kaigen-tor \
+  Contents/Helpers/kaigen-updater \
   Contents/Helpers/kaigen-lyrebird \
   Contents/Helpers/kaigen-conjure-client \
   Contents/Frameworks/libevent-2.1.7.dylib \
@@ -240,6 +253,7 @@ for required in \
 done
 for binary in \
   "$executable" \
+  "$updater_helper" \
   "$frameworks/libtoxcore.dylib" \
   "$event_library" \
   "$tor_helper" \
@@ -264,6 +278,7 @@ sign_component() {
 # Sign nested code explicitly from the inside out. `--deep` remains a
 # verification option only; Apple does not recommend it for signing.
 for component in \
+  "$updater_helper" \
   "$frameworks/libtoxcore.dylib" \
   "$event_library" \
   "$tor_helper" \

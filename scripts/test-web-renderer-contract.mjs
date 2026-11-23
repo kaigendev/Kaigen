@@ -24,7 +24,10 @@ assert.match(main, /import ProductRoot from "@kaigen\/root"/u);
 assert.match(vite, /"@kaigen\/root"[^]*WebRoot\.tsx[^]*RootApp\.tsx/u);
 assert.match(webRoot, /import RootApp from "\.\.\/RootApp"/u);
 assert.doesNotMatch(webRoot, /(?:\.\.\/|\.\/)App(?:\.tsx)?["']/u);
-assert.equal([...webRoot.matchAll(/<RootApp onLanguageChange=\{setLanguage\} \/>/gu)].length, 1);
+assert.equal([...webRoot.matchAll(/<RootApp\b/gu)].length, 1,
+  "Web still mounts exactly one shared product renderer");
+assert.match(webRoot, /<RootApp onLanguageChange=\{setLanguage\} registerBeforeWorkspaceLock=\{registerBeforeWorkspaceLock\} \/>/u,
+  "the sole renderer keeps language propagation and adds its awaited workspace-lock persistence callback");
 assert.match(webRoot, /await webSession\.verifyBuildIdentity\(\)[^]*setStage\("ready"\)/u);
 assert.match(webRoot, /stage === "upgrade"[^]*location\.reload\(\)/u);
 assert.doesNotMatch(webRoot, /smallViewport|minimumViewport|innerWidth\s*<\s*900|innerHeight\s*<\s*660/u);
@@ -58,8 +61,8 @@ assert.match(session, /headers\.set\(WEB_BUILD_HEADER, WEB_BUILD_ID\)/u);
 assert.match(session, /"\/api\/v1\/build-identity"/u);
 assert.match(session, /response\.status === 426[^]*this\.requireUpgrade\(\)/u);
 assert.match(session, /if \(this\.upgradeRequired\) throw new Error\("UPGRADE_REQUIRED"\)/u);
-assert.match(session, /this\.fetchResponse\("\/api\/v1\/workspaces\/import\/upload"/u);
-assert.match(session, /body\?\.code === "UPGRADE_REQUIRED"[^]*this\.requireUpgrade\(\)[^]*throw new Error\("UPGRADE_REQUIRED"\)/u);
+assert.match(session, /this\.fetchResponse\("\/api\/v1\/profiles\/import\/upload"/u);
+assert.match(session, /error\.code === "UPGRADE_REQUIRED"\) this\.requireUpgrade\(\);\s*throw new Error/u);
 assert.equal([...session.matchAll(/\bfetch\(/gu)].length, 1, "all Web requests must share the terminal upgrade gate");
 assert.match(session, /ws\/v1\?build=\$\{encodeURIComponent\(WEB_BUILD_ID\)\}/u);
 assert.match(session, /const scheduleReconnect = \(\) => \{[^]*!this\.upgradeRequired && this\.realtimeActive[^]*\.then\(scheduleReconnect, scheduleReconnect\)/u);

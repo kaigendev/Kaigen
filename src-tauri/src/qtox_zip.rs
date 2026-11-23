@@ -7,9 +7,7 @@ pub struct ZipEntry {
 
 impl Drop for ZipEntry {
     fn drop(&mut self) {
-        for byte in &mut self.bytes {
-            unsafe { std::ptr::write_volatile(byte, 0) };
-        }
+        crate::wipe_secret_bytes(&mut self.bytes);
     }
 }
 

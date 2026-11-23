@@ -97,16 +97,14 @@ function scrollFixture({
   assert.equal(fixture.calls.length, 0, "non-finite layout metrics cannot corrupt scroll state");
 }
 assert.deepEqual(navigation.DEFAULT_NOTIFICATION_SETTINGS, { messages: false, requests: false });
-assert.equal(navigation.MAX_RENDERED_CHAT_MESSAGES, 500);
-assert.equal(navigation.NOTIFICATION_TAIL_MESSAGES, 32);
 assert.equal(navigation.normalizeHistoryMessageLimit("all"), "all", "the all-history setting must survive restoration");
 assert.equal(navigation.normalizeHistoryMessageLimit(500), 500);
 assert.equal(navigation.normalizeHistoryMessageLimit(1000), 1000);
 assert.equal(navigation.normalizeHistoryMessageLimit(999), 500, "invalid history settings restore the 500-message default");
-assert.equal(navigation.boundedHistoryRequestLimit(20, 250), 20, "unread state cannot enlarge the configured opening window");
-assert.equal(navigation.boundedHistoryRequestLimit(100, 4_000), 100, "large unread counts cannot enlarge the configured opening window");
-assert.equal(navigation.boundedHistoryRequestLimit(500, Number.NaN), 500);
-assert.equal(navigation.boundedHistoryRequestLimit("all", 4_000), 0, "zero is the explicit all-history backend request");
+assert.equal(navigation.boundedHistoryRequestLimit(20), 20, "the configured opening window reaches the backend");
+assert.equal(navigation.boundedHistoryRequestLimit(100), 100);
+assert.equal(navigation.boundedHistoryRequestLimit(500), 500);
+assert.equal(navigation.boundedHistoryRequestLimit("all"), 0, "zero is the explicit all-history backend request");
 assert.equal(navigation.nextHistoryMessageLimit(20), 500);
 assert.equal(navigation.nextHistoryMessageLimit(50), 500);
 assert.equal(navigation.nextHistoryMessageLimit(100), 500);
@@ -222,5 +220,5 @@ assert.equal(navigation.incomingContextMetrics({
   incoming: [{ key: "short", bottom: 300 }],
 }).long, false);
 
-baseAssert.equal(assertionCount, 87, "update the declared assertion count when chat-navigation coverage changes");
+baseAssert.equal(assertionCount, 85, "update the declared assertion count when chat-navigation coverage changes");
 console.log(`chat navigation rules: ${assertionCount} assertions passed`);

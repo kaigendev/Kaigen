@@ -10,9 +10,16 @@ async function waitFor<T>(read: () => T | undefined, label: string): Promise<T> 
   throw new Error(label + " timed out");
 }
 const button = (text: string, selector = ".welcome-screen button") => [...document.querySelectorAll<HTMLButtonElement>(selector)].find((item) => item.textContent?.replace(/[›‹]/g, "").trim() === text);
-function input(field: HTMLInputElement, value: string) {
+function input(field: HTMLInputElement | null | undefined, value: string) {
+  if (!(field instanceof HTMLInputElement) || !field.isConnected) throw new Error("Expected a connected onboarding input before setting its value");
   Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(field, value);
   field.dispatchEvent(new Event("input", { bubbles: true }));
+}
+function protectionCheckbox(scope: ParentNode): HTMLInputElement {
+  const label = [...scope.querySelectorAll<HTMLLabelElement>("label.startup-check")].find((item) => item.textContent?.trim() === "Защитить профиль паролем");
+  const field = label?.querySelector<HTMLInputElement>('input[type="checkbox"]');
+  if (!(field instanceof HTMLInputElement)) throw new Error("Expected the native profile password-protection checkbox");
+  return field;
 }
 const passwords = (scope = document) => [...scope.querySelectorAll<HTMLInputElement>('input[type="password"]')];
 const calls = (command: string) => onboardingCalls.map((call, index) => ({...call,index})).filter((call) => call.command === command);
@@ -34,14 +41,14 @@ export const runActualOnboardingCreateScenario = () => run(async (check) => {
   await welcome(); button("Создать профиль")!.click(); await frames();
   const form = document.querySelector<HTMLFormElement>(".create-flow")!;
   input(form.querySelector<HTMLInputElement>('input[type="text"],input:not([type])')!,"Synthetic Created");
-  form.querySelector<HTMLInputElement>('input[type="checkbox"]')!.click(); await frames();
+  protectionCheckbox(form).click(); await frames();
   input(passwords(form)[0],"synthetic-create-key"); input(passwords(form)[1],"different"); await frames();
   form.querySelector<HTMLButtonElement>(".startup-primary")!.click(); await frames();
   check(calls("create_profile").length === 0 && document.querySelector(".startup-error")?.textContent?.includes("совпадают"),"create mismatch is rejected before invoke");
   form.querySelector<HTMLButtonElement>(".startup-back")!.click(); await frames(); button("Создать профиль")!.click(); await frames();
   check(passwords().every((field) => !field.value),"leaving and reentering create removes secrets");
   const current = document.querySelector<HTMLFormElement>(".create-flow")!;
-  if (!current.querySelector<HTMLInputElement>('input[type="checkbox"]')!.checked) { current.querySelector<HTMLInputElement>('input[type="checkbox"]')!.click(); await frames(); }
+  if (!protectionCheckbox(current).checked) { protectionCheckbox(current).click(); await frames(); }
   input(passwords(current)[0],"synthetic-create-key"); input(passwords(current)[1],"synthetic-create-key"); await frames();
   current.querySelector<HTMLButtonElement>(".startup-primary")!.click(); await pending("create_profile",1);
   check(current.querySelector<HTMLButtonElement>(".startup-primary")!.disabled,"create pending disables submission");

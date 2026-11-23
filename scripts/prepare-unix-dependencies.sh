@@ -63,10 +63,10 @@ if [[ ! -d "$component_cache_root" ]]; then
 fi
 component_cache_root="$(cd "$component_cache_root" && pwd -P)"
 
-toxcore_commit="ec7bd2cce618ed6542fbc55b84574704eb380ef2"
+toxcore_commit="d34d16e6473f61545fed9d8cb59bb1e86da993f1"
 toxcore_url="https://codeload.github.com/kaigendev/kaigen-toxcore/zip/$toxcore_commit"
-toxcore_sha="8aebf2e3ef3a4c1b3b4afb367e717307eea170e510a0dc53bf0536f57dda003e"
-toxcore_size='1405890'
+toxcore_sha="376182c5aef175fd03362d46333344facc751e9a00427a3b467d86d3301e5ec4"
+toxcore_size='1406655'
 sodium_url="https://download.libsodium.org/libsodium/releases/libsodium-1.0.22-stable.tar.gz"
 sodium_sha="eb9873cc5ccd7b26ef058394264663c99e9c047b423be1ffd484071774198f26"
 sodium_size='2099899'
@@ -378,6 +378,8 @@ else
     echo "The pinned Kaigen toxcore archive has an unexpected layout." >&2
     exit 1
   fi
+  node "$project_root/scripts/prepared-native-cache.mjs" verify-toxcore-source \
+    --project-root "$project_root" --source "$tox_source"
 
   rm -rf "$tox_build" "$tox_prefix"
   mkdir -p "$tox_build" "$tox_prefix/lib"

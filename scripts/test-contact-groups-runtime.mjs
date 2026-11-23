@@ -10,6 +10,7 @@ const repository = path.resolve(import.meta.dirname, "..");
 const manyOnly = process.argv.includes("--many-only");
 const keyboardOnly = process.argv.includes("--keyboard-only");
 const geometryOnly = process.argv.includes("--geometry-only");
+const contactSortOnly = process.argv.includes("--contact-sort-only");
 const requestedGeometry = process.argv.find(argument => argument.startsWith("--geometry-case="))?.slice("--geometry-case=".length);
 const geometryCases = [80,100,125].flatMap(scale => [[scale,1280,720],[scale,640,420]])
   .filter(([scale,,height]) => !requestedGeometry || requestedGeometry === String(scale) || requestedGeometry === scale + "-" + height);
@@ -18,7 +19,7 @@ const evidenceDirectory = process.env.KAIGEN_CONTACT_GROUPS_EVIDENCE_DIR
   ? path.resolve(process.env.KAIGEN_CONTACT_GROUPS_EVIDENCE_DIR)
   : path.resolve(repository, "../outputs/contact-groups-runtime-20261007", "run-" + Date.now());
 const require = createRequire(path.join(repository, "package.json"));
-const original = await readFile(path.join(repository, "scripts/test-chat-geometry-runtime.mjs"), "utf8");
+const original = (await readFile(path.join(repository, "scripts/test-chat-geometry-runtime.mjs"), "utf8")).replaceAll("\r\n", "\n");
 const marker = "  if (imageReactionsOnly) {";
 assert.ok(original.includes(marker), "existing geometry runner setup marker is available");
 let driver = original.slice(0, original.indexOf(marker));
@@ -34,7 +35,7 @@ const moduleEnd = driver.indexOf("  await within((async () => {", moduleStart);
 assert.ok(moduleStart > 0 && moduleEnd > moduleStart);
 driver = driver.slice(0, moduleStart) + '  const fixtureModules = ["/app-entry.tsx","/app-contact-groups-scenario.ts"];\n' + driver.slice(moduleEnd);
 driver += String.raw`
-  const scenarioUrl = origin + '/app.html';
+  const scenarioUrl = origin + '/app.html' + (CONTACT_SORT_ONLY ? '?contactSort=1' : '');
   const run = async(method,name,args=[]) => {
     let finished = false;
     const evaluation = cdp.send('Runtime.evaluate', {
@@ -91,7 +92,14 @@ driver += String.raw`
     await waitForDocument(scenarioUrl,next,'many group submenu');
     await run('runContactGroupsManyScenario','contact-groups-many-125-420');
   };
-  if(MANY_ONLY) { await runMany(); } else if(KEYBOARD_ONLY) {
+  if(CONTACT_SORT_ONLY) {
+    const confirmed = await run('runContactSortScenario','contact-sort-save');
+    const next = await cdp.send('Page.navigate',{url:scenarioUrl});
+    await waitForDocument(scenarioUrl,next,'contact sort restart');
+    const restored = await run('runContactSortReloadScenario','contact-sort-reload');
+    const restartDelayMs = restored.reloadDocumentStartedAt - confirmed.visibleAt;
+    assert(restartDelayMs >= 0 && restartDelayMs < 1000, 'reload started immediately after the confirmed sort');
+  } else if(MANY_ONLY) { await runMany(); } else if(KEYBOARD_ONLY) {
     await cdp.send('Runtime.evaluate',{expression:"import('/app-contact-groups-platform.ts').then(module=>module.invoke('save_local_state',{profileId:'qa-profile-a',state:{activeChat:'tox-'+ 'A'.repeat(64),drafts:{},spellcheckEnabled:false,contactGroups:{version:1,enabled:true,groups:[{id:'keyboard',name:'Keyboard'}],assignments:{['B'.repeat(64)]:'keyboard'},order:['__ungrouped__','keyboard'],collapsed:[]}}}))",awaitPromise:true});
     const next=await cdp.send('Page.navigate',{url:scenarioUrl});
     await waitForDocument(scenarioUrl,next,'keyboard-only fixture');
@@ -116,6 +124,7 @@ driver += String.raw`
   }
 `;
 driver = driver.replace("if(MANY_ONLY)", "if(" + JSON.stringify(manyOnly) + ")");
+driver = driver.replaceAll("CONTACT_SORT_ONLY", JSON.stringify(contactSortOnly));
 driver = driver.replace("if(KEYBOARD_ONLY)", "if(" + JSON.stringify(keyboardOnly) + ")");
 driver = driver.replaceAll("if(!GEOMETRY_ONLY)", "if(!" + JSON.stringify(geometryOnly) + ")");
 driver = driver.replace("of GEOMETRY_CASES", "of " + JSON.stringify(geometryCases));

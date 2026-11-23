@@ -6,7 +6,14 @@ export type AppShellScaleStyle = {
   transformOrigin?: string;
 };
 
-export function appShellScaleStyle(interfaceScale: number, containerRelativeLayout: boolean): AppShellScaleStyle {
+type RuntimePlatform = "windows" | "macos" | "linux" | "web";
+declare const __KAIGEN_RUNTIME_PLATFORM__: RuntimePlatform;
+
+export function appShellScaleStyle(
+  interfaceScale: number,
+  containerRelativeLayout: boolean,
+  platform = typeof __KAIGEN_RUNTIME_PLATFORM__ === "undefined" ? undefined : __KAIGEN_RUNTIME_PLATFORM__,
+): AppShellScaleStyle {
   const normalized = Number.isFinite(interfaceScale) && interfaceScale > 0 ? interfaceScale : 100;
   const scale = normalized / 100;
   const widthUnit = containerRelativeLayout ? "%" : "vw";
@@ -15,10 +22,10 @@ export function appShellScaleStyle(interfaceScale: number, containerRelativeLayo
     width: `${100 / scale}${widthUnit}`,
     height: `${100 / scale}${heightUnit}`,
   };
-  // Chromium resolves percentage heights incorrectly for a zoomed child of
-  // the clipped Web grid surface. A top-left transform keeps the scaled shell
-  // inside that surface at 80/90% without changing desktop WebView behavior.
-  return containerRelativeLayout
+  // The Web grid needs a transform for percentage heights. Older native
+  // WebKit also mismeasures viewport units and hit coordinates under CSS zoom.
+  const scaledNativeWebKit = scale !== 1 && (platform === "macos" || platform === "linux");
+  return containerRelativeLayout || scaledNativeWebKit
     ? { ...shared, transform: `scale(${scale})`, transformOrigin: "top left" }
     : { ...shared, zoom: scale };
 }

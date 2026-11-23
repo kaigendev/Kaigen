@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { stat } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -149,24 +149,42 @@ function validateOptions(options) {
   check(options.faultStages !== true, "--fault-stages belongs to test-pq-two-instances.mjs and is not supported by the entropy driver");
 }
 
-async function prepareVisibleChat(client, timeoutMs) {
+async function prepareVisibleChat(client, expectedPeerName, expectedPeerPublicKey, timeoutMs) {
+  check(typeof expectedPeerName === "string" && expectedPeerName.length > 0, "expected synthetic peer name is required");
+  check(typeof expectedPeerPublicKey === "string" && /^[0-9a-f]{64}$/i.test(expectedPeerPublicKey), "expected synthetic peer identity is required");
+  const expectedEntityKey = `e-${createHash("sha256").update("contact\u0000" + expectedPeerPublicKey).digest("hex").slice(0, 32)}`;
   await client.cdp.send("Page.bringToFront");
   await waitUntil(async () => {
     const ready = await client.evaluate(`(() => {
       window.focus();
       const splash = document.querySelector(".splash-screen");
       if (splash && splash.getBoundingClientRect().width > 0) return false;
-      const chats = [...document.querySelectorAll(".chat-item")].filter((element) => {
+      const expectedEntityKey = ${JSON.stringify(expectedEntityKey)};
+      const expectedPeerName = ${JSON.stringify(expectedPeerName)};
+      const targets = [...document.querySelectorAll(".chat-item")].filter((element) =>
+        element.getAttribute("data-kaigen-ui-entity-key") === expectedEntityKey);
+      if (targets.length !== 1) return false;
+      const target = targets[0];
+      const visible = (element) => {
+        if (!(element instanceof HTMLElement)) return false;
         const bounds = element.getBoundingClientRect();
-        return bounds.width > 0 && bounds.height > 0;
-      });
-      if (chats.length !== 1) return false;
-      const area = document.querySelector("[data-kaigen-composer-editor]");
-      if (!(area instanceof HTMLElement) || !area.isContentEditable || area.getBoundingClientRect().width <= 0) chats[0].click();
-      const selectedArea = document.querySelector("[data-kaigen-composer-editor]");
-      if (!(selectedArea instanceof HTMLElement) || !selectedArea.isContentEditable) return false;
-      const bounds = selectedArea.getBoundingClientRect();
-      return bounds.width > 0 && bounds.height > 0 && document.visibilityState === "visible";
+        const style = getComputedStyle(element);
+        return bounds.width > 0 && bounds.height > 0 && style.display !== "none" && style.visibility === "visible";
+      };
+      const selectedComposerReady = () => {
+        if (!target.classList.contains("selected")) return false;
+        const header = document.querySelector(".conversation-header .header-copy > strong");
+        if (!visible(header)) return false;
+        const headerName = [...header.childNodes].filter((node) => node.nodeType === Node.TEXT_NODE)
+          .map((node) => node.textContent ?? "").join("").trim();
+        if (headerName !== expectedPeerName) return false;
+        const area = document.querySelector("[data-kaigen-composer-editor]");
+        return visible(area) && area.isContentEditable && document.visibilityState === "visible";
+      };
+      if (selectedComposerReady()) return true;
+      if (!visible(target)) return false;
+      target.click();
+      return selectedComposerReady();
     })()`);
     return ready === true ? true : undefined;
   }, timeoutMs, `${client.label} visible synthetic chat`, 50);
@@ -175,7 +193,7 @@ async function prepareVisibleChat(client, timeoutMs) {
 async function installInvokeObservation(client, expectedFriendNumber) {
   const installed = await client.evaluate(`(() => {
     const key = ${JSON.stringify(OBSERVATION_KEY)};
-    if (globalThis[key]) return false;
+    if (globalThis[key] || document.querySelector(".pq-entropy-panel")) return false;
     const descriptor = Object.getOwnPropertyDescriptor(globalThis, "fetch");
     if (!descriptor?.writable || typeof descriptor.value !== "function") return false;
     const original = globalThis.fetch;
@@ -255,7 +273,7 @@ async function installInvokeObservation(client, expectedFriendNumber) {
     globalThis[key] = { original, wrapper, records, leases, visibility };
     return true;
   })()`);
-  check(installed === true, `${client.label} could not install the pass-through Tauri IPC observation`);
+  check(installed === true, `${client.label} could not install the pass-through Tauri IPC observation before the first entropy panel mount`);
 }
 
 async function readInvokeObservation(client) {
@@ -598,21 +616,32 @@ async function run(options) {
       beta.invoke("add_tox_friend", { toxId: alphaToxId, message: "PQ native entropy synthetic authorization" }),
     ]);
     check(Number.isInteger(alphaAdded) && Number.isInteger(betaAdded), "reciprocal friend creation did not return friend numbers");
+    // Observe the real begin/complete IPC before a selected chat can mount its
+    // collector. PQ identity_waiting alone reports readiness intent, not a mount.
+    await Promise.all([
+      installInvokeObservation(alpha, alphaAdded),
+      installInvokeObservation(beta, betaAdded),
+    ]);
     await Promise.all([setUserStatus(alpha, "online"), setUserStatus(beta, "online")]);
     friendNumbers = await waitPairOnline(alpha, beta, alphaPublicKey, betaPublicKey, options.timeoutMs);
     await waitPairPqCapable(alpha, beta, friendNumbers, options.timeoutMs);
 
-    await prepareVisibleChat(alpha, options.startupTimeoutMs);
-    await prepareVisibleChat(beta, options.startupTimeoutMs);
-    const [alphaHistory, betaHistory, alphaBeforeRaw, betaBeforeRaw] = await Promise.all([
+    check(friendNumbers.alphaFriendNumber === alphaAdded && friendNumbers.betaFriendNumber === betaAdded, "entropy observations were bound to different synthetic contacts");
+    const [alphaHistory, betaHistory, alphaBeforeRaw, betaBeforeRaw, alphaLeasesBefore, betaLeasesBefore, alphaRecordsBefore, betaRecordsBefore] = await Promise.all([
       messagesFor(alpha, friendNumbers.alphaFriendNumber),
       messagesFor(beta, friendNumbers.betaFriendNumber),
       alpha.invoke("get_pq_status", { friendNumber: friendNumbers.alphaFriendNumber }),
       beta.invoke("get_pq_status", { friendNumber: friendNumbers.betaFriendNumber }),
+      readLeaseObservation(alpha),
+      readLeaseObservation(beta),
+      readInvokeObservation(alpha),
+      readInvokeObservation(beta),
     ]);
     check(plainMessageCount(alphaHistory) === 0 && plainMessageCount(betaHistory) === 0, "synthetic chat was not empty before the lifetime-first messages");
     check(alphaBeforeRaw.identity_needs_entropy === true && betaBeforeRaw.identity_needs_entropy === true, "a synthetic profile already had a long-term PQ identity");
-    check(alphaBeforeRaw.identity_waiting === false && betaBeforeRaw.identity_waiting === false, "PQ identity collection started before the first message");
+    check(alphaLeasesBefore.length === 0 && betaLeasesBefore.length === 0
+      && alphaRecordsBefore.length === 0 && betaRecordsBefore.length === 0,
+    "PQ identity collection began before the observed chat was opened");
     check(alphaBeforeRaw.protocol_version === EXPECTED_PQ_PROTOCOL_VERSION && betaBeforeRaw.protocol_version === EXPECTED_PQ_PROTOCOL_VERSION, "pre-send status was not PQv2");
     receipt.setup = {
       processes: 2,
@@ -621,13 +650,13 @@ async function run(options) {
       reciprocalFriendsOnline: true,
       plaintextRowsBeforeFirstSend: { alpha: 0, beta: 0 },
       pqBeforeFirstSend: { alpha: safePqStatus(alphaBeforeRaw), beta: safePqStatus(betaBeforeRaw) },
+      identityCollectionBeforeChatOpen: {
+        alpha: { beginCalls: alphaLeasesBefore.length, completeCalls: alphaRecordsBefore.length },
+        beta: { beginCalls: betaLeasesBefore.length, completeCalls: betaRecordsBefore.length },
+      },
     };
 
-    await Promise.all([
-      installInvokeObservation(alpha, friendNumbers.alphaFriendNumber),
-      installInvokeObservation(beta, friendNumbers.betaFriendNumber),
-    ]);
-
+    await prepareVisibleChat(beta, "PQ Entropy Alpha", alphaPublicKey, options.startupTimeoutMs);
     await focusClient(beta, 2_000);
     const betaSend = sendDurably(beta, friendNumbers.betaFriendNumber, betaText, options.timeoutMs);
     void betaSend.catch(() => {});
@@ -638,7 +667,8 @@ async function run(options) {
 
     // Only one real window can own foreground pointer input. Start the second
     // collector after the explicit OS-only choice and keep it focused through
-    // its automatic eight-second completion.
+    // its automatic fifteen-second completion.
+    await prepareVisibleChat(alpha, "PQ Entropy Beta", betaPublicKey, options.startupTimeoutMs);
     await focusClient(alpha, 2_000);
     const alphaSend = sendDurably(alpha, friendNumbers.alphaFriendNumber, alphaText, options.timeoutMs);
     void alphaSend.catch(() => {});

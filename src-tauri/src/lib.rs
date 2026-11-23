@@ -1,3 +1,5 @@
+#![deny(unsafe_op_in_unsafe_fn)]
+
 #![cfg_attr(
     all(feature = "web-core", not(feature = "desktop")),
     allow(dead_code, unused_imports)
@@ -13,8 +15,8 @@ use std::{
     path::{Path, PathBuf},
     ptr::NonNull,
     sync::{
-        atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering},
-        mpsc::{self, RecvTimeoutError, Sender, SyncSender},
+        atomic::{AtomicBool, AtomicU16, AtomicU64, AtomicU8, Ordering},
+        mpsc::{self, RecvTimeoutError, SyncSender},
         Arc, Mutex, OnceLock,
     },
     thread,
@@ -31,7 +33,12 @@ use sha2::{Digest, Sha256};
 #[cfg(feature = "desktop")]
 use tauri::{Emitter, Manager};
 
+mod bootstrap_nodes;
+#[cfg(feature = "desktop")]
+mod attachment_copy;
 mod chat_history_store;
+#[cfg(feature = "web-core")]
+pub use bootstrap_nodes::Probe as WebBootstrapProbe;
 mod message_deletion;
 use message_deletion::{
     delete_chat_message_for_state, recover_local_message_deletions, DeleteMessageResult,
@@ -41,6 +48,8 @@ mod chat_protocol;
 mod chat_transport_loopback;
 #[cfg(feature = "desktop")]
 mod desktop_notifications;
+#[cfg(feature = "desktop")]
+mod desktop_update;
 mod file_card_protocol;
 #[cfg(feature = "desktop")]
 mod instance;
@@ -48,7 +57,20 @@ mod kai;
 #[cfg(feature = "desktop")]
 mod native_file_grants;
 mod pq;
+mod pending_contact;
 pub mod product;
+pub mod webgate;
+pub mod webgate_notifications;
+pub mod webgate_host;
+pub mod webgate_persistence;
+#[cfg(feature = "desktop")]
+mod webgate_store;
+#[cfg(feature = "desktop")]
+mod webgate_desktop;
+#[cfg(feature = "desktop")]
+mod webgate_downloads;
+#[cfg(feature = "desktop")]
+mod webgate_download_receipts;
 #[cfg(all(feature = "web-core", not(feature = "desktop")))]
 mod profile_identity;
 mod profiles;
@@ -59,6 +81,8 @@ mod qtox_zip;
 #[cfg(any(feature = "desktop", feature = "web-core"))]
 mod qtox_zip_import;
 mod tor;
+mod tox_native;
+use tox_native::ToxRef;
 #[cfg(feature = "web-core")]
 pub mod web_core;
 #[cfg(feature = "web-core")]
@@ -148,6 +172,7 @@ where
     }
 }
 
+#[cfg(test)]
 /// Resolve every handle-backed recipient identity before taking the durable
 /// chat transaction gate. The network loop uses the opposite side of this
 /// boundary while it already owns the tox handle, so keeping this order
@@ -185,14 +210,14 @@ fn lock_chat_transaction_for_friend_bound<'a>(
         .lock()
         .map_err(|_| "PROFILE_IDENTITY_UNAVAILABLE")?;
     let instance = handle.as_ref().ok_or("PROFILE_IDENTITY_UNAVAILABLE")?;
-    let friend_public_key = tox_friend_public_key(instance.instance.as_ptr(), friend_number)
+    let friend_public_key = tox_friend_public_key(Some(instance.native()), friend_number)
         .ok_or("FRIEND_NOT_FOUND")?;
     if expected_public_key
         .is_some_and(|expected| !expected.eq_ignore_ascii_case(&friend_public_key))
     {
         return Err("CHAT_CONTACT_IDENTITY_CHANGED".into());
     }
-    let owner = pq_tox_owner(instance.instance.as_ptr());
+    let owner = pq_tox_owner(instance.native());
     let transaction = state
         .chat_transaction_gate
         .lock()
@@ -255,8 +280,23 @@ fn change_protocol_connection_locked(
 }
 
 #[inline]
+fn installed_route_matches_settings(state: &ToxState) -> bool {
+    // Local contact edits stay available in user Offline mode. Native add and
+    // delete may nevertheless write packets: never use an old DIRECT handle
+    // after Tor reconfiguration failed to install its actual proxy route.
+    let installed = state.installed_tor_port.load(Ordering::Acquire);
+    if state.tor.enabled() {
+        installed != 0 && state.tor.proxy_port() == Some(installed)
+    } else {
+        installed == 0
+    }
+}
+
+#[inline]
 fn local_transport_ready(state: &ToxState) -> bool {
-    state.network_enabled.load(Ordering::Acquire) && state.tor.is_ready()
+    state.network_enabled.load(Ordering::Acquire)
+        && state.tor.is_ready()
+        && installed_route_matches_settings(state)
 }
 
 fn pq_status_received_for_key(
@@ -371,10 +411,8 @@ fn pq_contact_has_history(
     })
 }
 
-fn pq_tox_owner(tox: *const c_void) -> String {
-    let mut address = [0u8; 38];
-    unsafe { tox_self_get_address(tox, address.as_mut_ptr()) };
-    hex_upper(&address[..32])
+fn pq_tox_owner(tox: ToxRef<'_>) -> String {
+    hex_upper(&tox.address()[..32])
 }
 
 #[cfg(test)]
@@ -520,12 +558,14 @@ struct PortablePaths {
 
 #[derive(Clone)]
 struct ProfilePaths {
-    legacy_033_profile_id: Option<String>,
+    owner_profile_id: Option<String>,
+    bootstrap_nodes: Option<Arc<bootstrap_nodes::State>>,
     data_dir: PathBuf,
     downloads_dir: PathBuf,
     outgoing_files_dir: PathBuf,
     avatars_dir: PathBuf,
     logs_dir: PathBuf,
+    logs_enabled: bool,
     profile_path: PathBuf,
     volume: Option<Arc<KaiProfileVolume>>,
 }
@@ -534,36 +574,6 @@ fn is_kai_profile_path(path: &Path) -> bool {
     path.extension()
         .and_then(|extension| extension.to_str())
         .is_some_and(|extension| extension.eq_ignore_ascii_case("kai"))
-}
-
-fn copy_directory_into_volume(source: &Path, destination: &Path) -> Result<(), String> {
-    if !source.is_dir() {
-        return Ok(());
-    }
-    profiles::create_dir_all(destination)?;
-    for entry in fs::read_dir(source)
-        .map_err(|error| format!("Could not read legacy profile data: {error}"))?
-    {
-        let entry =
-            entry.map_err(|error| format!("Could not read legacy profile data: {error}"))?;
-        let file_type = entry
-            .file_type()
-            .map_err(|error| format!("Could not inspect legacy profile data: {error}"))?;
-        let target = destination.join(entry.file_name());
-        if file_type.is_symlink() {
-            return Err("LEGACY_PROFILE_SYMLINK_FORBIDDEN".to_string());
-        }
-        if file_type.is_dir() {
-            copy_directory_into_volume(&entry.path(), &target)?;
-        } else if file_type.is_file() {
-            let mut bytes = fs::read(entry.path())
-                .map_err(|error| format!("Could not read legacy profile data: {error}"))?;
-            let result = profiles::write_file(&target, &bytes);
-            wipe_sensitive_bytes(&mut bytes);
-            result?;
-        }
-    }
-    Ok(())
 }
 
 impl PortablePaths {
@@ -595,6 +605,7 @@ impl PortablePaths {
 }
 
 impl ProfilePaths {
+    #[cfg(test)]
     fn new(root_dir: PathBuf, data_dir: PathBuf, profile_path: PathBuf) -> Result<Self, String> {
         Self::new_with_volume(root_dir, data_dir, profile_path, None)
     }
@@ -624,19 +635,26 @@ impl ProfilePaths {
             })?;
         }
         Ok(Self {
-            legacy_033_profile_id: None,
+            owner_profile_id: None,
+            bootstrap_nodes: None,
             data_dir,
             downloads_dir,
             outgoing_files_dir,
             avatars_dir,
             logs_dir,
+            logs_enabled: true,
             profile_path,
             volume,
         })
     }
 
-    fn with_legacy_033_owner(mut self, profile_id: &str) -> Self {
-        self.legacy_033_profile_id = Some(profile_id.to_string());
+    fn with_profile_owner(
+        mut self,
+        profile_id: &str,
+        bootstrap_nodes: Arc<bootstrap_nodes::State>,
+    ) -> Self {
+        self.owner_profile_id = Some(profile_id.to_string());
+        self.bootstrap_nodes = Some(bootstrap_nodes);
         self
     }
 }
@@ -658,7 +676,7 @@ fn grant_webview2_runtime_access(runtime_dir: &Path) {
         .status();
 }
 
-#[cfg(feature = "desktop")]
+#[cfg(all(feature = "desktop", any(target_os = "windows", test)))]
 fn portable_webview_data_dir(paths: &PortablePaths) -> PathBuf {
     paths.data_dir.join("webview2")
 }
@@ -666,7 +684,7 @@ fn portable_webview_data_dir(paths: &PortablePaths) -> PathBuf {
 #[cfg(any(all(feature = "desktop", target_os = "windows"), test))]
 const WEBVIEW2_RUNTIME_PATH_LIMIT_UTF16_UNITS: usize = 260;
 
-#[cfg(any(all(feature = "desktop", target_os = "windows"), test))]
+#[cfg(all(feature = "desktop", target_os = "windows"))]
 const WEBVIEW2_RUNTIME_PATH_MARKER: &str = "KAIGEN_MAX_RELATIVE_PATH_UTF16.txt";
 
 #[cfg(any(all(feature = "desktop", target_os = "windows"), test))]
@@ -743,6 +761,18 @@ fn configure_portable_webview() -> Result<(), String> {
         )
     })?;
     std::env::set_var("WEBVIEW2_USER_DATA_FOLDER", &user_data_dir);
+
+    // Runtime 155 can attempt invalid Windows logons while initializing its
+    // unrelated AI wallet: MicrosoftEdge/WebView2Feedback#5722. Keep this
+    // workaround process-local. WebView2 merges disabled-feature lists and
+    // retains the caller's other additional browser arguments.
+    let mut browser_arguments =
+        std::env::var_os("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS").unwrap_or_default();
+    if !browser_arguments.is_empty() {
+        browser_arguments.push(" ");
+    }
+    browser_arguments.push("--disable-features=AutofillAiWalletPrivatePasses");
+    std::env::set_var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", browser_arguments);
 
     Ok(())
 }
@@ -988,6 +1018,7 @@ fn unique_public_keys_by_friend_number(
     (by_number, ambiguous)
 }
 
+#[cfg(test)]
 fn affected_friend_avatar_numbers(
     previous: &HashMap<String, u32>,
     current: &HashMap<String, u32>,
@@ -1013,6 +1044,7 @@ fn affected_friend_avatar_numbers(
         .collect()
 }
 
+#[cfg(test)]
 fn reconcile_friend_avatar_files(
     directory: &Path,
     previous: &HashMap<String, u32>,
@@ -1090,8 +1122,113 @@ fn reconcile_friend_avatar_files(
 
 struct ToxHandle {
     instance: NonNull<c_void>,
+    tor_proxy_port: u16,
     profile_path: PathBuf,
     cipher: Option<ProfileCipher>,
+}
+
+// SAFETY: the handle has a unique owner. Shared callers serialize access
+// through the profile's Mutex and keep callback execution inside that lock.
+unsafe impl Send for ToxHandle {}
+
+impl ToxHandle {
+    fn register_callbacks(&self) {
+        // SAFETY: only the fixed Kaigen callbacks are installed on the live
+        // instance. iterate supplies their context synchronously.
+        unsafe {
+            tox_callback_friend_request(
+                self.instance.as_ptr(),
+                Some(on_friend_request),
+            );
+            tox_callback_friend_message(
+                self.instance.as_ptr(),
+                Some(on_friend_message),
+            );
+            tox_callback_friend_read_receipt(
+                self.instance.as_ptr(),
+                // c-toxcore keeps the historical API name, but
+                // this callback proves delivery to the peer
+                // client only. Kaigen never exposes it as a
+                // human-read state.
+                Some(on_friend_delivery_receipt),
+            );
+            tox_callback_friend_lossless_packet(
+                self.instance.as_ptr(),
+                Some(on_friend_lossless_packet),
+            );
+            tox_callback_file_chunk_request(
+                self.instance.as_ptr(),
+                Some(on_file_chunk_request),
+            );
+            tox_callback_file_recv(self.instance.as_ptr(), Some(on_file_recv));
+            tox_callback_file_recv_control(
+                self.instance.as_ptr(),
+                Some(on_file_recv_control),
+            );
+            tox_callback_file_recv_chunk(
+                self.instance.as_ptr(),
+                Some(on_file_recv_chunk),
+            );
+            tox_callback_friend_connection_status(
+                self.instance.as_ptr(),
+                Some(on_friend_connection_status),
+            );
+            tox_callback_friend_name(
+                self.instance.as_ptr(),
+                Some(on_friend_name),
+            );
+            tox_callback_friend_status(
+                self.instance.as_ptr(),
+                Some(on_friend_status),
+            );
+            tox_callback_friend_status_message(
+                self.instance.as_ptr(),
+                Some(on_friend_status_message),
+            );
+        }
+    }
+
+    fn iterate(&self, context: &CallbackContext) {
+        // SAFETY: the locked handle and the borrowed context outlive the
+        // synchronous native iteration. The callbacks read the context.
+        unsafe {
+            tox_iterate(self.instance.as_ptr(), std::ptr::from_ref(context).cast_mut().cast());
+        }
+    }
+
+    fn native(&self) -> ToxRef<'_> {
+        ToxRef::from_handle(self)
+    }
+
+    /// Copies the native profile while the caller holds its handle.
+    fn savedata(&self) -> Vec<u8> {
+        // SAFETY: the handle owns a live instance. No other caller can mutate
+        // it between the size query and the write to the correctly sized buffer.
+        unsafe {
+            let size = tox_get_savedata_size(self.instance.as_ptr());
+            let mut bytes = vec![0; size];
+            if !bytes.is_empty() {
+                tox_get_savedata(self.instance.as_ptr(), bytes.as_mut_ptr());
+            }
+            bytes
+        }
+    }
+
+    fn address(&self) -> [u8; 38] {
+        self.native().address()
+    }
+
+    fn friend_numbers(&self) -> Vec<u32> {
+        self.native().friend_numbers()
+    }
+}
+
+impl Drop for ToxHandle {
+    fn drop(&mut self) {
+        // SAFETY: this handle uniquely owns the native instance, and its Rust
+        // borrows have ended before destruction.
+        unsafe { tox_kill(self.instance.as_ptr()) };
+    }
 }
 
 #[derive(Clone)]
@@ -1153,18 +1290,72 @@ impl NetworkSettings {
     }
 }
 
-fn apply_network_options(
-    options: *mut c_void,
-    settings: &NetworkSettings,
-    proxied: bool,
-) -> NetworkSettings {
-    let effective = settings.effective_for_route(proxied);
-    unsafe {
-        tox_options_set_ipv6_enabled(options, effective.ipv6_enabled);
-        tox_options_set_udp_enabled(options, effective.udp_enabled);
-        tox_options_set_local_discovery_enabled(options, effective.local_discovery_enabled);
+/// Owns the options allocation and borrows the inputs retained by ToxCore.
+struct ToxOptions<'a>(NonNull<c_void>, std::marker::PhantomData<&'a [u8]>);
+
+impl<'a> ToxOptions<'a> {
+    fn new(error: &mut i32) -> Option<Self> {
+        // SAFETY: error is writable and a non-null result is uniquely owned.
+        NonNull::new(unsafe { tox_options_new(error) })
+            .map(|options| Self(options, std::marker::PhantomData))
     }
-    effective
+
+    fn as_ptr(&self) -> *mut c_void {
+        self.0.as_ptr()
+    }
+
+    fn apply_network(&mut self, settings: &NetworkSettings, proxied: bool) -> NetworkSettings {
+        let effective = settings.effective_for_route(proxied);
+        // SAFETY: these setters accept booleans and the options allocation is live.
+        unsafe {
+            tox_options_set_ipv6_enabled(self.as_ptr(), effective.ipv6_enabled);
+            tox_options_set_udp_enabled(self.as_ptr(), effective.udp_enabled);
+            tox_options_set_local_discovery_enabled(self.as_ptr(), effective.local_discovery_enabled);
+        }
+        effective
+    }
+
+    fn set_savedata(&mut self, data: &'a [u8]) -> bool {
+        // SAFETY: the data slice is valid for the setter; its owner also
+        // keeps it alive until native construction finishes.
+        unsafe {
+            tox_options_set_savedata_type(self.as_ptr(), 1);
+            tox_options_set_savedata_data(self.as_ptr(), data.as_ptr(), data.len())
+        }
+    }
+
+    fn set_proxy(&mut self, route: &ProxyRoute, host: &'a std::ffi::CStr) -> bool {
+        // SAFETY: options is live, host is NUL-terminated, and construction
+        // completes before the caller releases host.
+        unsafe {
+            tox_options_set_proxy_type(self.as_ptr(), route.proxy_type);
+            if !tox_options_set_proxy_host(self.as_ptr(), host.as_ptr()) {
+                return false;
+            }
+            tox_options_set_proxy_port(self.as_ptr(), route.port);
+            tox_options_set_experimental_disable_dns(self.as_ptr(), true);
+        }
+        true
+    }
+
+    #[cfg(test)]
+    fn network_flags(&self) -> (bool, bool, bool) {
+        // SAFETY: these getters only read the live options allocation.
+        unsafe {
+            (
+                tox_options_get_udp_enabled(self.as_ptr()),
+                tox_options_get_ipv6_enabled(self.as_ptr()),
+                tox_options_get_local_discovery_enabled(self.as_ptr()),
+            )
+        }
+    }
+}
+
+impl Drop for ToxOptions<'_> {
+    fn drop(&mut self) {
+        // SAFETY: self uniquely owns the allocation returned by tox_options_new.
+        unsafe { tox_options_free(self.as_ptr()) };
+    }
 }
 
 impl Default for ProxySettings {
@@ -1427,11 +1618,11 @@ fn avatar_data_url_from_path(path: &Path) -> Result<String, String> {
     } else if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
         "image/webp"
     } else {
-        wipe_sensitive_bytes(&mut bytes);
+        wipe_secret_bytes(&mut bytes);
         return Err("Выбранный файл не является поддерживаемым изображением".to_string());
     };
     let encoded = base64_basic(&bytes);
-    wipe_sensitive_bytes(&mut bytes);
+    wipe_secret_bytes(&mut bytes);
     Ok(format!("data:{mime};base64,{encoded}"))
 }
 
@@ -1445,10 +1636,14 @@ fn hex_upper(bytes: &[u8]) -> String {
     output
 }
 
-fn wipe_sensitive_bytes(value: &mut [u8]) {
+/// Clears a borrowed secret buffer before the caller releases its storage.
+#[inline(never)]
+pub fn wipe_secret_bytes(value: &mut [u8]) {
     for byte in value {
+        // SAFETY: each byte is writable for the duration of this exclusive borrow.
         unsafe { std::ptr::write_volatile(byte, 0) };
     }
+    std::sync::atomic::compiler_fence(Ordering::SeqCst);
 }
 
 fn bridge_http(mut client: TcpStream, settings: &ProxySettings) -> Result<(), String> {
@@ -1505,6 +1700,16 @@ fn prepare_proxy_route(
     Ok((Some(local_route), Some(bridge)))
 }
 
+fn prepare_bootstrap_probe(
+    bootstrap: &Arc<bootstrap_nodes::State>,
+    network: &Arc<Mutex<NetworkSettings>>,
+    proxy: &Arc<Mutex<ProxySettings>>,
+    tor: &TorManager,
+    node: bootstrap_nodes::Node,
+) -> Result<bootstrap_nodes::Probe, String> {
+    bootstrap.prepare_probe(node, Arc::clone(network), Arc::clone(proxy), tor.clone())
+}
+
 #[cfg(test)]
 mod proxy_bridge_tests;
 
@@ -1518,58 +1723,48 @@ fn create_tox_handle(
     network_settings: &NetworkSettings,
     cipher: Option<ProfileCipher>,
 ) -> Result<ToxHandle, String> {
-    let mut options_error = 0_i32;
-    let options = unsafe { tox_options_new(&mut options_error) };
-    let options = NonNull::new(options).ok_or_else(|| {
-        format!("Не удалось подготовить параметры Tox (код ошибки {options_error})")
-    })?;
-
-    // c-toxcore cannot carry UDP or LAN discovery through a TCP proxy. Keep
-    // the user's shared choices for direct mode, while enforcing a strict
-    // proxy/Tor route whenever one is configured.
-    apply_network_options(options.as_ptr(), network_settings, proxy_route.is_some());
-
-    if let Some(data) = savedata {
-        unsafe {
-            tox_options_set_savedata_type(options.as_ptr(), 1);
-            if !tox_options_set_savedata_data(options.as_ptr(), data.as_ptr(), data.len()) {
-                tox_options_free(options.as_ptr());
-                return Err("Не удалось загрузить сохранённый профиль Tox".to_string());
-            }
-        }
-    }
-
     let proxy_host = proxy_route
         .map(|route| {
             CString::new(route.host.as_str())
                 .map_err(|_| "Proxy host contains an invalid zero byte".to_string())
         })
         .transpose()?;
+    let mut options_error = 0_i32;
+    let mut options = ToxOptions::new(&mut options_error).ok_or_else(|| {
+        format!("Не удалось подготовить параметры Tox (код ошибки {options_error})")
+    })?;
+
+    // Keep the user's direct-mode settings, while enforcing the network
+    // restrictions required by a proxy route.
+    options.apply_network(network_settings, proxy_route.is_some());
+
+    if let Some(data) = savedata {
+        if !options.set_savedata(data) {
+            return Err("Не удалось загрузить сохранённый профиль Tox".to_string());
+        }
+    }
     if let (Some(route), Some(host)) = (proxy_route, proxy_host.as_ref()) {
-        unsafe {
-            // Strict proxy mode: toxcore cannot silently fall back to a direct
-            // route. UDP, IPv6 and local discovery are disabled above.
-            tox_options_set_proxy_type(options.as_ptr(), route.proxy_type);
-            if !tox_options_set_proxy_host(options.as_ptr(), host.as_ptr()) {
-                tox_options_free(options.as_ptr());
-                return Err("Не удалось установить локальный SOCKS5-прокси Tor".to_string());
-            }
-            tox_options_set_proxy_port(options.as_ptr(), route.port);
-            tox_options_set_experimental_disable_dns(options.as_ptr(), true);
+        if !options.set_proxy(route, host) {
+            return Err("Не удалось установить локальный SOCKS5-прокси Tor".to_string());
         }
     }
 
     let mut error = 0_i32;
+    // SAFETY: options and all buffers supplied to it are live until this
+    // call completes. A non-null result transfers ownership to ToxHandle.
     let instance = unsafe { tox_new(options.as_ptr(), &mut error) };
     #[cfg(all(test, feature = "desktop"))]
     if !instance.is_null() {
-        shared_route_settings_tests::record_options(&profile_path, options.as_ptr());
+        shared_route_settings_tests::record_options(&profile_path, &options);
     }
-    unsafe { tox_options_free(options.as_ptr()) };
     let instance = NonNull::new(instance)
         .ok_or_else(|| format!("Не удалось создать профиль Tox (код ошибки {error})"))?;
     Ok(ToxHandle {
         instance,
+        tor_proxy_port: proxy_route
+            .filter(|route| route.label == "tor-socks5")
+            .map(|route| route.port)
+            .unwrap_or(0),
         profile_path,
         cipher,
     })
@@ -1583,9 +1778,7 @@ fn tox_savedata_public_key(savedata: &[u8]) -> Result<String, String> {
         &NetworkSettings::default(),
         None,
     )?;
-    let mut address = [0_u8; 38];
-    unsafe { tox_self_get_address(handle.instance.as_ptr(), address.as_mut_ptr()) };
-    unsafe { tox_kill(handle.instance.as_ptr()) };
+    let address = handle.address();
     Ok(hex_upper(&address[..32]))
 }
 
@@ -1595,10 +1788,7 @@ pub(crate) fn tox_nickname_for_state(state: &ToxState) -> Result<String, String>
         .lock()
         .map_err(|_| "PROFILE_NOT_LOADED".to_string())?;
     let handle = guard.as_ref().ok_or("TOX_NOT_INITIALIZED")?;
-    let length = unsafe { tox_self_get_name_size(handle.instance.as_ptr()) };
-    let mut name = vec![0_u8; length];
-    unsafe { tox_self_get_name(handle.instance.as_ptr(), name.as_mut_ptr()) };
-    Ok(String::from_utf8_lossy(&name).into_owned())
+    Ok(handle.native().nickname())
 }
 
 pub fn tox_savedata_nickname(savedata: &[u8]) -> Result<String, String> {
@@ -1609,13 +1799,7 @@ pub fn tox_savedata_nickname(savedata: &[u8]) -> Result<String, String> {
         &NetworkSettings::default(),
         None,
     )?;
-    let length = unsafe { tox_self_get_name_size(handle.instance.as_ptr()) };
-    let mut name = vec![0_u8; length];
-    unsafe {
-        tox_self_get_name(handle.instance.as_ptr(), name.as_mut_ptr());
-        tox_kill(handle.instance.as_ptr());
-    }
-    Ok(String::from_utf8_lossy(&name).into_owned())
+    Ok(handle.native().nickname())
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -1657,7 +1841,7 @@ struct CachedFriendProfile {
     #[serde(default)]
     last_online: Option<u64>,
     // A c-toxcore friend number belongs to one in-memory Tox instance.  Keep
-    // the last observed value only as a migration hint; the public key remains
+    // the last observed value only as a routing hint; the public key remains
     // the durable contact identity.
     #[serde(default)]
     friend_number: Option<u32>,
@@ -2585,20 +2769,21 @@ struct CallbackContext {
     outgoing_files: Arc<Mutex<HashMap<(u32, u32), OutgoingFile>>>,
     downloads_dir: PathBuf,
     avatars_dir: PathBuf,
-    transfer_log_path: PathBuf,
-    network_log_path: PathBuf,
+    transfer_log_path: ProfileLogPath,
+    network_log_path: ProfileLogPath,
     friend_cache: Arc<Mutex<HashMap<String, CachedFriendProfile>>>,
     friend_cache_path: PathBuf,
     pq: Arc<PqEngine>,
     chat_protocol: Arc<ChatProtocolEngine>,
     file_card_protocol: Arc<FileCardEngine>,
-    pq_receipts: Arc<Mutex<HashMap<(u32, u64), String>>>,
     file_receive_settings: Arc<Mutex<FileReceiveSettings>>,
     unread_state: Arc<Mutex<UnreadState>>,
     unread_state_path: PathBuf,
     friend_message_ready_at: Arc<Mutex<HashMap<u32, Instant>>>,
     friend_status_received: Arc<Mutex<HashMap<u32, String>>>,
     network_enabled: Arc<AtomicBool>,
+    #[cfg(feature = "web-core")]
+    handle_generation: Arc<AtomicU64>,
     chat_transaction_gate: Arc<Mutex<()>>,
     chat_transport_ready: Arc<AtomicBool>,
     #[cfg(feature = "web-core")]
@@ -2753,6 +2938,7 @@ enum AtomicWriteRequest {
         bytes: Vec<u8>,
         completed: SyncSender<Result<(), String>>,
     },
+    #[cfg(test)]
     Flush(SyncSender<()>),
     #[cfg(test)]
     PauseBeforeCommit {
@@ -2761,82 +2947,684 @@ enum AtomicWriteRequest {
     },
 }
 
-static ATOMIC_WRITE_SENDER: OnceLock<SyncSender<AtomicWriteRequest>> = OnceLock::new();
+// Admission, collection and completion are separate. Only uncollected requests
+// occupy bounded ingress; accepted snapshots remain in per-path coalesced state.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PersistRequestKind {
+    Snapshot,
+    Required,
+    #[cfg(test)]
+    Flush,
+    #[cfg(test)]
+    Pause,
+}
 
-fn atomic_write_sender() -> &'static SyncSender<AtomicWriteRequest> {
-    ATOMIC_WRITE_SENDER.get_or_init(|| {
-        let (sender, receiver) = mpsc::sync_channel::<AtomicWriteRequest>(256);
-        thread::spawn(move || {
-            while let Ok(first) = receiver.recv() {
-                let (path, bytes) = match first {
-                    AtomicWriteRequest::Write { path, bytes } => (path, bytes),
-                    AtomicWriteRequest::RequiredWrite {
-                        path,
-                        bytes,
-                        completed,
-                    } => {
-                        let result = atomic_write_active_path(&path, &bytes);
-                        let _ = completed.send(result);
-                        continue;
+trait OrderedPersistRequest: Send + Sized + 'static {
+    fn path(&self) -> Option<&Path>;
+    fn kind(&self) -> PersistRequestKind;
+    fn coalesce(&mut self, next: Self);
+    fn process(path: &Path, jobs: Vec<PersistJob<Self>>);
+    fn control(self, pending_snapshot: bool);
+}
+
+struct PersistJob<R> {
+    // A coalesced snapshot retains the first sequence for outstanding barriers.
+    sequence: u64,
+    last_sequence: u64,
+    segment: u64,
+    collected: Instant,
+    epoch: Option<Arc<BatchedPathEpoch>>,
+    request: R,
+}
+
+struct PersistPathQueue<R> {
+    ready: std::collections::VecDeque<PersistJob<R>>,
+    claimed: bool,
+    helper_scheduled: bool,
+    active_first: Option<u64>,
+    urgent_through: u64,
+}
+
+struct PersistQueueState<R> {
+    next_sequence: u64,
+    segment: u64,
+    ingress: std::collections::VecDeque<PersistJob<R>>,
+    paths: HashMap<PathBuf, PersistPathQueue<R>>,
+    active_control: bool,
+    closed: bool,
+}
+
+struct OrderedPersistQueue<R> {
+    state: Mutex<PersistQueueState<R>>,
+    changed: std::sync::Condvar,
+    capacity: Option<usize>,
+    batch_delay: Duration,
+}
+
+type PersistHelperTask = Box<dyn FnOnce() + Send + 'static>;
+
+struct PersistHelperPool {
+    // Rendezvous channels admit no waiting helper tasks. A busy/dead helper is
+    // simply unavailable; the baseline queue worker still owns accepted work.
+    workers: Vec<SyncSender<PersistHelperTask>>,
+}
+
+impl PersistHelperPool {
+    fn new() -> Self {
+        let mut workers = Vec::new();
+        for index in 0..8 {
+            let (sender, receiver) = mpsc::sync_channel::<PersistHelperTask>(0);
+            if thread::Builder::new()
+                .name(format!("persist-helper-{index}"))
+                .spawn(move || {
+                    while let Ok(task) = receiver.recv() {
+                        // The task's queue panic guard handles genuine request
+                        // failure. Keep this shared optional executor available.
+                        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(task));
                     }
-                    AtomicWriteRequest::Flush(completed) => {
-                        let _ = completed.send(());
-                        continue;
-                    }
-                    #[cfg(test)]
-                    AtomicWriteRequest::PauseBeforeCommit { entered, release } => {
-                        let _ = entered.send(false);
-                        let _ = release.recv_timeout(Duration::from_secs(5));
-                        continue;
-                    }
-                };
-                let mut pending = HashMap::from([(path, bytes)]);
-                let mut flush = None;
-                let mut required = None;
-                let deadline = Instant::now() + Duration::from_millis(250);
-                loop {
-                    let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
-                        break;
-                    };
-                    match receiver.recv_timeout(remaining) {
-                        Ok(AtomicWriteRequest::Write { path, bytes }) => {
-                            pending.insert(path, bytes);
-                        }
-                        Ok(AtomicWriteRequest::RequiredWrite {
-                            path,
-                            bytes,
-                            completed,
-                        }) => {
-                            required = Some((path, bytes, completed));
-                            break;
-                        }
-                        Ok(AtomicWriteRequest::Flush(completed)) => {
-                            flush = Some(completed);
-                            break;
-                        }
-                        #[cfg(test)]
-                        Ok(AtomicWriteRequest::PauseBeforeCommit { entered, release }) => {
-                            let _ = entered.send(true);
-                            let _ = release.recv_timeout(Duration::from_secs(5));
-                        }
-                        Err(RecvTimeoutError::Timeout) => break,
-                        Err(RecvTimeoutError::Disconnected) => break,
-                    }
+                })
+                .is_ok()
+            {
+                workers.push(sender);
+            }
+        }
+        Self { workers }
+    }
+
+    fn try_dispatch(&self, mut task: PersistHelperTask) -> bool {
+        for worker in &self.workers {
+            match worker.try_send(task) {
+                Ok(()) => return true,
+                Err(mpsc::TrySendError::Full(returned))
+                | Err(mpsc::TrySendError::Disconnected(returned)) => task = returned,
+            }
+        }
+        // The task contains queue/path identity only, never removed requests.
+        false
+    }
+}
+
+fn persist_helper_pool() -> &'static PersistHelperPool {
+    static POOL: OnceLock<PersistHelperPool> = OnceLock::new();
+    POOL.get_or_init(PersistHelperPool::new)
+}
+
+struct PersistQueuePanicGuard<R: OrderedPersistRequest> {
+    queue: Arc<OrderedPersistQueue<R>>,
+    armed: bool,
+}
+
+impl<R: OrderedPersistRequest> Drop for PersistQueuePanicGuard<R> {
+    fn drop(&mut self) {
+        if self.armed {
+            self.queue.close();
+        }
+    }
+}
+
+impl<R: OrderedPersistRequest> OrderedPersistQueue<R> {
+    fn new(capacity: Option<usize>, batch_delay: Duration) -> Arc<Self> {
+        // Initialize optional shared workers once, never while a queue is locked.
+        // Failure to start any/all helpers does not disable either baseline worker.
+        let _ = persist_helper_pool();
+        let queue = Arc::new(Self {
+            state: Mutex::new(PersistQueueState {
+                next_sequence: 1,
+                segment: 0,
+                ingress: std::collections::VecDeque::new(),
+                paths: HashMap::new(),
+                active_control: false,
+                closed: false,
+            }),
+            changed: std::sync::Condvar::new(),
+            capacity,
+            batch_delay,
+        });
+        let worker = Arc::clone(&queue);
+        if thread::Builder::new()
+            .name("profile-persist".to_string())
+            .spawn(move || worker.work())
+            .is_err()
+        {
+            queue.close();
+        }
+        queue
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, PersistQueueState<R>> {
+        match self.state.lock() {
+            Ok(state) => state,
+            Err(poisoned) => {
+                let mut state = poisoned.into_inner();
+                state.closed = true;
+                self.changed.notify_all();
+                state
+            }
+        }
+    }
+
+    fn close(&self) {
+        let mut state = self.lock();
+        state.closed = true;
+        state.paths.clear();
+        state.ingress.clear();
+        self.changed.notify_all();
+    }
+
+    fn send(self: &Arc<Self>, request: R) -> Result<(), mpsc::SendError<R>> {
+        match self.admit(request, false) {
+            Ok(()) => Ok(()),
+            Err(mpsc::TrySendError::Full(request))
+            | Err(mpsc::TrySendError::Disconnected(request)) => Err(mpsc::SendError(request)),
+        }
+    }
+
+    fn try_send(self: &Arc<Self>, request: R) -> Result<(), mpsc::TrySendError<R>> {
+        self.admit(request, true)
+    }
+
+    fn admit(self: &Arc<Self>, request: R, nonblocking: bool) -> Result<(), mpsc::TrySendError<R>> {
+        let path = request.path().map(Path::to_path_buf);
+        // Capture before capacity waits. A retired producer must not adopt a
+        // later registration merely because bounded admission was delayed.
+        let epoch = match path.as_deref().map(batched_path_epoch).transpose() {
+            Ok(epoch) => epoch,
+            Err(_) => return Err(mpsc::TrySendError::Disconnected(request)),
+        };
+        let kind = request.kind();
+        let mut state = self.lock();
+        loop {
+            if state.closed || state.next_sequence == u64::MAX {
+                return Err(mpsc::TrySendError::Disconnected(request));
+            }
+            if self
+                .capacity
+                .is_none_or(|capacity| state.ingress.len() < capacity)
+            {
+                break;
+            }
+            if nonblocking {
+                return Err(mpsc::TrySendError::Full(request));
+            }
+            state = match self.changed.wait(state) {
+                Ok(state) => state,
+                Err(poisoned) => {
+                    let mut state = poisoned.into_inner();
+                    state.closed = true;
+                    self.changed.notify_all();
+                    state
                 }
-                for (path, bytes) in pending {
-                    let _ = atomic_write_active_path(&path, &bytes);
-                }
-                if let Some((path, bytes, completed)) = required {
-                    let result = atomic_write_active_path(&path, &bytes);
-                    let _ = completed.send(result);
-                }
-                if let Some(completed) = flush {
-                    let _ = completed.send(());
+            };
+        }
+        let sequence = state.next_sequence;
+        state.next_sequence += 1;
+        // Every Required/control request separates ordinary coalescing, even
+        // across paths. The sequence also makes the segment counter bounded.
+        if kind != PersistRequestKind::Snapshot {
+            state.segment = sequence;
+        }
+        let segment = state.segment;
+        let job = PersistJob {
+            sequence,
+            last_sequence: sequence,
+            segment,
+            collected: Instant::now(),
+            epoch,
+            request,
+        };
+        if let Some(path) = &path {
+            let entry = state
+                .paths
+                .entry(path.clone())
+                .or_insert_with(|| PersistPathQueue {
+                    ready: std::collections::VecDeque::new(),
+                    claimed: false,
+                    helper_scheduled: false,
+                    active_first: None,
+                    urgent_through: 0,
+                });
+            if kind == PersistRequestKind::Required {
+                entry.urgent_through = sequence;
+            }
+        }
+        state.ingress.push_back(job);
+        self.changed.notify_all();
+        drop(state);
+        if kind == PersistRequestKind::Required {
+            if let Some(path) = path {
+                self.assist(&path);
+            }
+        }
+        Ok(())
+    }
+
+    fn control(state: &PersistQueueState<R>) -> Option<&PersistJob<R>> {
+        state
+            .ingress
+            .iter()
+            .find(|job| job.request.path().is_none())
+    }
+
+    fn first_pending(state: &PersistQueueState<R>, path: &Path) -> Option<u64> {
+        let ready = state
+            .paths
+            .get(path)
+            .and_then(|entry| entry.ready.front())
+            .map(|job| job.sequence);
+        let incoming = state
+            .ingress
+            .iter()
+            .find(|job| job.request.path() == Some(path))
+            .map(|job| job.sequence);
+        ready.into_iter().chain(incoming).min()
+    }
+
+    fn first_required(state: &PersistQueueState<R>, path: &Path) -> Option<u64> {
+        state
+            .ingress
+            .iter()
+            .find(|job| {
+                job.request.path() == Some(path)
+                    && job.request.kind() == PersistRequestKind::Required
+            })
+            .map(|job| job.sequence)
+    }
+
+    fn allowed_fence(state: &PersistQueueState<R>, path: &Path) -> Option<u64> {
+        if state.active_control {
+            return None;
+        }
+        let entry = state.paths.get(path)?;
+        let mut fence = Self::control(state).map_or(u64::MAX, |control| control.sequence - 1);
+        #[cfg(test)]
+        if Self::control(state)
+            .is_some_and(|control| control.request.kind() == PersistRequestKind::Pause)
+        {
+            // Pending snapshots stay before the intentional hook, while earlier
+            // Required completions still precede the hook exactly as before.
+            fence = Self::first_required(state, path).filter(|required| *required <= fence)?;
+        }
+        if entry.urgent_through != 0 {
+            fence = fence.min(entry.urgent_through);
+        }
+        if let Some(required) =
+            Self::first_required(state, path).filter(|required| *required <= fence)
+        {
+            fence = required;
+        }
+        Self::first_pending(state, path)
+            .filter(|first| *first <= fence)
+            .map(|_| fence)
+    }
+
+    fn collect_snapshots(&self, state: &mut PersistQueueState<R>, selected: Option<&Path>) {
+        if state.active_control {
+            return;
+        }
+        let fence = Self::control(state).map_or(u64::MAX, |control| control.sequence - 1);
+        let mut index = 0;
+        while index < state.ingress.len() {
+            let job = &state.ingress[index];
+            if job.sequence > fence {
+                break;
+            }
+            if job.request.kind() != PersistRequestKind::Snapshot
+                || selected.is_some_and(|path| job.request.path() != Some(path))
+            {
+                index += 1;
+                continue;
+            }
+            // This is the worker's dequeue/collection boundary, not commit.
+            // Required requests remain in bounded ingress until an executor
+            // can take their path; there is no unbounded Required ready queue.
+            let mut job = state.ingress.remove(index).expect("selected snapshot");
+            job.collected = Instant::now();
+            let path = job.request.path().expect("snapshot path").to_path_buf();
+            let entry = state.paths.get_mut(&path).expect("admitted path");
+            let merge = entry.ready.back().is_some_and(|previous| {
+                previous.segment == job.segment
+                    && previous
+                        .epoch
+                        .as_ref()
+                        .zip(job.epoch.as_ref())
+                        .is_some_and(|(left, right)| Arc::ptr_eq(left, right))
+                    && !(previous.sequence <= entry.urgent_through
+                        && job.last_sequence > entry.urgent_through)
+            });
+            if merge {
+                let previous = entry.ready.back_mut().expect("coalescible snapshot");
+                previous.last_sequence = job.last_sequence;
+                previous.request.coalesce(job.request);
+            } else {
+                entry.ready.push_back(job);
+            }
+        }
+        self.changed.notify_all();
+    }
+
+    fn take_batch(
+        &self,
+        state: &mut PersistQueueState<R>,
+        path: &Path,
+        fence: u64,
+    ) -> Vec<PersistJob<R>> {
+        self.collect_snapshots(state, Some(path));
+        let entry = state.paths.get_mut(path).expect("selected path");
+        entry.claimed = true;
+        let mut jobs = Vec::new();
+        while entry.ready.front().is_some_and(|job| job.sequence <= fence) {
+            jobs.push(entry.ready.pop_front().expect("ready snapshot"));
+        }
+        if let Some(index) = state.ingress.iter().position(|job| {
+            job.sequence <= fence
+                && job.request.path() == Some(path)
+                && job.request.kind() == PersistRequestKind::Required
+        }) {
+            jobs.push(state.ingress.remove(index).expect("required path request"));
+        }
+        jobs.sort_by_key(|job| job.sequence);
+        state
+            .paths
+            .get_mut(path)
+            .expect("claimed path")
+            .active_first = jobs.first().map(|job| job.sequence);
+        self.changed.notify_all();
+        jobs
+    }
+
+    fn assist(self: &Arc<Self>, path: &Path) {
+        let mut state = self.lock();
+        if state.closed {
+            return;
+        }
+        let Some(entry) = state
+            .paths
+            .get(path)
+            .filter(|entry| !entry.claimed && !entry.helper_scheduled && entry.urgent_through != 0)
+        else {
+            return;
+        };
+        let _ = entry;
+        if Self::allowed_fence(&state, path).is_none() {
+            return;
+        }
+        state
+            .paths
+            .get_mut(path)
+            .expect("eligible path")
+            .helper_scheduled = true;
+        drop(state);
+        let queue = Arc::clone(self);
+        let owned_path = path.to_path_buf();
+        // No queue lock and no request ownership crosses this optional handoff.
+        if !persist_helper_pool().try_dispatch(Box::new(move || queue.run_assisted(owned_path))) {
+            let mut state = self.lock();
+            if let Some(entry) = state.paths.get_mut(path) {
+                entry.helper_scheduled = false;
+            }
+            Self::remove_idle_path(&mut state, path);
+            self.changed.notify_all();
+        }
+    }
+
+    fn run_assisted(self: &Arc<Self>, path: PathBuf) {
+        let mut state = self.lock();
+        if let Some(entry) = state.paths.get_mut(&path) {
+            entry.helper_scheduled = false;
+        }
+        if state.closed {
+            return;
+        }
+        if state
+            .paths
+            .get(&path)
+            .is_none_or(|entry| entry.claimed || entry.urgent_through == 0)
+        {
+            Self::remove_idle_path(&mut state, &path);
+            return;
+        }
+        let Some(fence) = Self::allowed_fence(&state, &path) else {
+            return;
+        };
+        let jobs = self.take_batch(&mut state, &path, fence);
+        drop(state);
+        self.run_path(path, jobs);
+    }
+
+    fn assist_urgent(self: &Arc<Self>) {
+        let paths = self
+            .lock()
+            .paths
+            .iter()
+            .filter(|(_, entry)| {
+                !entry.claimed && !entry.helper_scheduled && entry.urgent_through != 0
+            })
+            .map(|(path, _)| path.clone())
+            .collect::<Vec<_>>();
+        for path in paths {
+            self.assist(&path);
+        }
+    }
+
+    fn remove_idle_path(state: &mut PersistQueueState<R>, path: &Path) {
+        if state
+            .paths
+            .get(path)
+            .is_some_and(|entry| !entry.claimed && !entry.helper_scheduled)
+            && Self::first_pending(state, path).is_none()
+        {
+            state.paths.remove(path);
+        }
+    }
+
+    fn run_path(self: &Arc<Self>, path: PathBuf, mut jobs: Vec<PersistJob<R>>) {
+        let mut panic_guard = PersistQueuePanicGuard {
+            queue: Arc::clone(self),
+            armed: true,
+        };
+        loop {
+            R::process(&path, jobs);
+            let mut state = self.lock();
+            if state.closed {
+                break;
+            }
+            let pending = Self::first_pending(&state, &path);
+            let Some(entry) = state.paths.get_mut(&path) else {
+                break;
+            };
+            entry.active_first = None;
+            if pending.is_none_or(|first| first > entry.urgent_through) {
+                entry.urgent_through = 0;
+            }
+            let next = (entry.urgent_through != 0)
+                .then(|| Self::allowed_fence(&state, &path))
+                .flatten();
+            if let Some(fence) = next {
+                jobs = self.take_batch(&mut state, &path, fence);
+                drop(state);
+                continue;
+            }
+            state.paths.get_mut(&path).expect("claimed path").claimed = false;
+            Self::remove_idle_path(&mut state, &path);
+            self.changed.notify_all();
+            break;
+        }
+        panic_guard.armed = false;
+    }
+
+    fn outstanding_before(
+        state: &PersistQueueState<R>,
+        fence: u64,
+        selected: Option<&[&Path]>,
+    ) -> bool {
+        state.ingress.iter().any(|job| {
+            job.sequence <= fence
+                && job
+                    .request
+                    .path()
+                    .is_some_and(|path| selected.is_none_or(|paths| paths.contains(&path)))
+        }) || state.paths.iter().any(|(path, entry)| {
+            selected.is_none_or(|paths| paths.contains(&path.as_path()))
+                && (entry.active_first.is_some_and(|first| first <= fence)
+                    || entry.ready.front().is_some_and(|job| job.sequence <= fence))
+        })
+    }
+
+    fn flush_paths(
+        self: &Arc<Self>,
+        paths: &[&Path],
+        unavailable: &str,
+        timeout: &str,
+    ) -> Result<(), String> {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let fence = {
+            let mut state = self.lock();
+            if state.closed {
+                return Err(unavailable.to_string());
+            }
+            let fence = state.next_sequence - 1;
+            for path in paths {
+                if let Some(entry) = state.paths.get_mut(*path) {
+                    entry.urgent_through = entry.urgent_through.max(fence);
                 }
             }
-        });
-        sender
-    })
+            self.changed.notify_all();
+            fence
+        };
+        loop {
+            for path in paths {
+                self.assist(path);
+            }
+            let state = self.lock();
+            if state.closed {
+                return Err(unavailable.to_string());
+            }
+            if !Self::outstanding_before(&state, fence, Some(paths)) {
+                return Ok(());
+            }
+            let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                return Err(timeout.to_string());
+            };
+            match self.changed.wait_timeout(state, remaining) {
+                Ok((state, _)) => drop(state),
+                Err(poisoned) => {
+                    let (mut state, _) = poisoned.into_inner();
+                    state.closed = true;
+                    self.changed.notify_all();
+                    return Err(unavailable.to_string());
+                }
+            }
+        }
+    }
+
+    fn work(self: Arc<Self>) {
+        let mut panic_guard = PersistQueuePanicGuard {
+            queue: Arc::clone(&self),
+            armed: true,
+        };
+        loop {
+            let mut state = self.lock();
+            if state.closed {
+                break;
+            }
+            // Drain/merge snapshots while the batch timer runs. This preserves
+            // the old receiver's capacity release during collection, not commit.
+            self.collect_snapshots(&mut state, None);
+            if !state.active_control {
+                if let Some(control) = Self::control(&state) {
+                    let sequence = control.sequence;
+                    let fence = sequence - 1;
+                    let ready = !Self::outstanding_before(&state, fence, None);
+                    #[cfg(test)]
+                    let ready = if control.request.kind() == PersistRequestKind::Pause {
+                        state
+                            .paths
+                            .values()
+                            .all(|entry| entry.active_first.is_none())
+                            && !state.ingress.iter().any(|job| {
+                                job.sequence <= fence
+                                    && job.request.kind() == PersistRequestKind::Required
+                            })
+                    } else {
+                        ready
+                    };
+                    if ready {
+                        let pending_snapshot = Self::outstanding_before(&state, fence, None);
+                        let index = state
+                            .ingress
+                            .iter()
+                            .position(|job| job.sequence == sequence)
+                            .expect("control sequence");
+                        let control = state.ingress.remove(index).expect("global control");
+                        state.active_control = true;
+                        self.changed.notify_all();
+                        drop(state);
+                        control.request.control(pending_snapshot);
+                        let mut state = self.lock();
+                        state.active_control = false;
+                        self.changed.notify_all();
+                        drop(state);
+                        self.assist_urgent();
+                        continue;
+                    }
+                }
+            }
+            let now = Instant::now();
+            let mut wait = self.batch_delay;
+            let mut selected: Option<(u64, PathBuf, u64)> = None;
+            for (path, entry) in &state.paths {
+                if entry.claimed {
+                    continue;
+                }
+                let Some(fence) = Self::allowed_fence(&state, path) else {
+                    continue;
+                };
+                let first = Self::first_pending(&state, path).expect("eligible path");
+                let immediate = entry.urgent_through != 0
+                    || Self::control(&state).is_some()
+                    || Self::first_required(&state, path).is_some_and(|required| required <= fence);
+                let due = entry
+                    .ready
+                    .front()
+                    .map(|job| job.collected + self.batch_delay);
+                if !immediate && due.is_some_and(|due| due > now) {
+                    wait = wait.min(due.expect("future batch") - now);
+                    continue;
+                }
+                if selected
+                    .as_ref()
+                    .is_none_or(|(sequence, _, _)| first < *sequence)
+                {
+                    selected = Some((first, path.clone(), fence));
+                }
+            }
+            if let Some((_, path, fence)) = selected {
+                let jobs = self.take_batch(&mut state, &path, fence);
+                drop(state);
+                self.run_path(path, jobs);
+                continue;
+            }
+            match self.changed.wait_timeout(state, wait) {
+                Ok((state, _)) => drop(state),
+                Err(poisoned) => {
+                    let (mut state, _) = poisoned.into_inner();
+                    state.closed = true;
+                    self.changed.notify_all();
+                    break;
+                }
+            }
+        }
+        self.close();
+        panic_guard.armed = false;
+    }
+}
+
+static ATOMIC_WRITE_SENDER: OnceLock<Arc<OrderedPersistQueue<AtomicWriteRequest>>> =
+    OnceLock::new();
+
+fn atomic_write_sender() -> &'static Arc<OrderedPersistQueue<AtomicWriteRequest>> {
+    ATOMIC_WRITE_SENDER
+        .get_or_init(|| OrderedPersistQueue::new(Some(256), Duration::from_millis(250)))
 }
 
 fn enqueue_atomic_write_required(
@@ -2871,16 +3659,17 @@ pub(crate) fn enqueue_friend_cache_write_required(
     enqueue_atomic_write_required(path, bytes)
 }
 
-fn unread_target_key(friend_number: u32, friend_public_key: &str) -> String {
-    if friend_public_key.len() == 64
+fn bound_unread_target_key(friend_public_key: &str) -> Option<String> {
+    (friend_public_key.len() == 64
         && friend_public_key
             .bytes()
-            .all(|byte| byte.is_ascii_hexdigit())
-    {
-        format!("friend-key:{}", friend_public_key.to_ascii_uppercase())
-    } else {
-        format!("friend-number:{friend_number}")
-    }
+            .all(|byte| byte.is_ascii_hexdigit()))
+    .then(|| format!("friend-key:{}", friend_public_key.to_ascii_uppercase()))
+}
+
+fn unread_target_key(friend_number: u32, friend_public_key: &str) -> String {
+    bound_unread_target_key(friend_public_key)
+        .unwrap_or_else(|| format!("friend-number:{friend_number}"))
 }
 
 fn increment_unread_friend_message(
@@ -2889,11 +3678,10 @@ fn increment_unread_friend_message(
     friend_public_key: &str,
     message_id: &str,
 ) {
+    let Some(target) = bound_unread_target_key(friend_public_key) else {
+        return;
+    };
     if let Ok(mut state) = context.unread_state.lock() {
-        let target = unread_target_key(friend_number, friend_public_key);
-        if !target.starts_with("friend-key:") {
-            return;
-        }
         let ids = state.unseen_messages.entry(target.clone()).or_default();
         if ids.iter().any(|id| id == message_id) {
             return;
@@ -2913,41 +3701,27 @@ fn increment_unread_friend_message(
     }
 }
 
-fn increment_unread_friend(context: &CallbackContext, friend_number: u32) {
-    let friend_public_key = context
-        .friend_cache
-        .lock()
-        .ok()
-        .and_then(|cache| {
-            cache.iter().find_map(|(key, profile)| {
-                (profile.friend_number == Some(friend_number)).then_some(key.clone())
-            })
-        })
-        .unwrap_or_default();
+fn increment_unread_friend(context: &CallbackContext, friend_number: u32, friend_public_key: &str) {
     let latest_id = context.messages.lock().ok().and_then(|messages| {
         messages.iter().rev().find_map(|message| {
             (!message.mine
-                && message_matches_friend(message, friend_number, &friend_public_key)
+                && message_matches_friend(message, friend_number, friend_public_key)
                 && !message.id.is_empty())
             .then(|| message.id.clone())
         })
     });
     if let Some(message_id) = latest_id {
-        increment_unread_friend_message(context, friend_number, &friend_public_key, &message_id);
+        increment_unread_friend_message(context, friend_number, friend_public_key, &message_id);
     }
 }
 
-fn tox_friend_public_key(tox: *const c_void, friend_number: u32) -> Option<String> {
-    if tox.is_null() {
-        return None;
-    }
-    let mut key = [0_u8; 32];
-    let mut error = 0_i32;
-    unsafe { tox_friend_get_public_key(tox, friend_number, key.as_mut_ptr(), &mut error) }
-        .then(|| hex_upper(&key))
+fn tox_friend_public_key(tox: Option<ToxRef<'_>>, friend_number: u32) -> Option<String> {
+    let mut error = 0;
+    tox?.friend_public_key(friend_number, &mut error)
+        .map(|key| hex_upper(&key))
 }
 
-fn resolve_current_friend_number(tox: *const c_void, expected_public_key: &str) -> Option<u32> {
+fn resolve_current_friend_number(tox: ToxRef<'_>, expected_public_key: &str) -> Option<u32> {
     if expected_public_key.is_empty() {
         return None;
     }
@@ -2961,7 +3735,7 @@ fn resolve_current_friend_number(tox: *const c_void, expected_public_key: &str) 
 }
 
 fn resolve_native_friend_add_result(
-    tox: *const c_void,
+    tox: ToxRef<'_>,
     public_key: &str,
     number: u32,
     error: i32,
@@ -2979,31 +3753,23 @@ fn resolve_native_friend_add_result(
     Err(error)
 }
 
-fn tox_friend_numbers_by_public_key(tox: *const c_void) -> HashMap<String, u32> {
-    if tox.is_null() {
-        return HashMap::new();
-    }
-    let count = unsafe { tox_self_get_friend_list_size(tox) };
-    let mut numbers = vec![0_u32; count];
-    unsafe { tox_self_get_friend_list(tox, numbers.as_mut_ptr()) };
-    numbers
+fn tox_friend_numbers_by_public_key(tox: ToxRef<'_>) -> HashMap<String, u32> {
+    tox.friend_numbers()
         .into_iter()
         .filter_map(|friend_number| {
-            tox_friend_public_key(tox, friend_number).map(|public_key| (public_key, friend_number))
+            tox_friend_public_key(Some(tox), friend_number).map(|public_key| (public_key, friend_number))
         })
         .collect()
 }
 
-fn mark_friend_authorized(context: &CallbackContext, tox: *mut c_void, friend_number: u32) -> bool {
-    if tox.is_null() {
+fn mark_friend_authorized(
+    context: &CallbackContext,
+    tox: Option<ToxRef<'_>>,
+    friend_number: u32,
+) -> bool {
+    let Some(public_key) = tox_friend_public_key(tox, friend_number) else {
         return false;
-    }
-    let mut key = [0_u8; 32];
-    let mut error = 0_i32;
-    if !unsafe { tox_friend_get_public_key(tox, friend_number, key.as_mut_ptr(), &mut error) } {
-        return false;
-    }
-    let public_key = hex_upper(&key);
+    };
     let mut changed = false;
     if let Ok(mut cache) = context.friend_cache.lock() {
         let entry = cache.entry(public_key).or_default();
@@ -3037,8 +3803,6 @@ fn mark_friend_authorized(context: &CallbackContext, tox: *mut c_void, friend_nu
     changed
 }
 
-unsafe impl Send for ToxHandle {}
-
 fn lock_shared_route_gate(gate: &Mutex<bool>) -> Result<std::sync::MutexGuard<'_, bool>, String> {
     let guard = gate
         .lock()
@@ -3057,10 +3821,13 @@ struct ToxState {
     web_finalized: Arc<AtomicBool>,
     local_state_lock: Arc<Mutex<()>>,
     handle_generation: Arc<AtomicU64>,
+    installed_tor_port: Arc<AtomicU16>,
     running: Arc<AtomicBool>,
     tor: TorManager,
     proxy_settings: Arc<Mutex<ProxySettings>>,
     network_settings: Arc<Mutex<NetworkSettings>>,
+    bootstrap_nodes: Arc<bootstrap_nodes::State>,
+    bootstrap_usage: Arc<Mutex<Option<(u64, u64, HashSet<bootstrap_nodes::Node>)>>>,
     shared_route_gate: Option<Arc<Mutex<bool>>>,
     proxy_bridge: Arc<Mutex<Option<ProxyBridge>>>,
     connection: Arc<AtomicU8>,
@@ -3085,15 +3852,14 @@ struct ToxState {
     downloads_dir: PathBuf,
     outgoing_files_dir: PathBuf,
     avatars_dir: PathBuf,
-    transfer_log_path: PathBuf,
-    network_log_path: PathBuf,
+    transfer_log_path: ProfileLogPath,
+    network_log_path: ProfileLogPath,
     friend_cache: Arc<Mutex<HashMap<String, CachedFriendProfile>>>,
     friend_cache_path: PathBuf,
     pq: Arc<PqEngine>,
     pq_active_history_reconciled: Arc<Mutex<HashSet<String>>>,
     chat_protocol: Arc<ChatProtocolEngine>,
     file_card_protocol: Arc<FileCardEngine>,
-    pq_receipts: Arc<Mutex<HashMap<(u32, u64), String>>>,
     file_receive_settings: Arc<Mutex<FileReceiveSettings>>,
     file_receive_settings_path: PathBuf,
     unread_state: Arc<Mutex<UnreadState>>,
@@ -3263,6 +4029,27 @@ mod reconnect_watchdog_tests {
     }
 }
 
+fn read_profile_runtime_json<T: serde::de::DeserializeOwned + Default>(
+    path: &Path,
+) -> Result<T, String> {
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("profile data");
+    let Some(contents) = profiles::read_optional_file(path)
+        .map_err(|error| format!("PROFILE_STATE_READ_FAILED ({name}): {error}"))?
+    else {
+        return Ok(T::default());
+    };
+    serde_json::from_slice(&contents).map_err(|error| {
+        format!(
+            "PROFILE_STATE_INVALID ({name}) at {}:{}",
+            error.line(),
+            error.column()
+        )
+    })
+}
+
 impl ToxState {
     fn new_for_profile(
         paths: ProfilePaths,
@@ -3276,14 +4063,69 @@ impl ToxState {
     ) -> Result<Self, String> {
         let profile_volume = paths.volume.clone();
         let profile_path = paths.profile_path.clone();
+        // Capture log ownership before native allocation: a fallible registry
+        // admission must not leave an unowned Tox handle behind.
+        let log_owner = profile_volume
+            .as_ref()
+            .map(|volume| volume.container_path().to_path_buf())
+            .unwrap_or_else(|| profile_path.clone());
+        let (transfer_log_path, network_log_path) = if paths.logs_enabled {
+            (
+                ProfileLogPath::new(paths.logs_dir.join("file-transfer.log"), log_owner.clone())?,
+                ProfileLogPath::new(paths.logs_dir.join("tox-network.log"), log_owner)?,
+            )
+        } else {
+            (ProfileLogPath::disabled(), ProfileLogPath::disabled())
+        };
         let profile_exists = savedata.is_some();
+        let history_path = paths.data_dir.join("chat-history.json");
+        let pending_messages_path = paths.data_dir.join("pending-messages.json");
+        let pending_pq_messages_path = paths.data_dir.join("pending-pq-messages.json");
+        let pending_files_path = paths.data_dir.join("pending-files.json");
+        let incoming_requests_path = paths.data_dir.join("incoming-friend-requests.json");
+        let friend_cache_path = paths.data_dir.join("friend-profiles.json");
+        let file_receive_settings_path = paths.data_dir.join("file-settings.json");
+        let unread_state_path = paths.data_dir.join("unread-events.json");
         let network_state_path = paths.data_dir.join("network-state.json");
-        // Tox saves Online/Busy in its profile.  The separate flag persists
-        // the user's explicit "disconnect" choice, so we do not bootstrap on
-        // the next application start until they choose an online status again.
-        let network_enabled = profiles::read_text(&network_state_path)
-            .map(|value| value.trim() != "offline")
-            .unwrap_or(true);
+        // Read these before allocating a native handle or starting any writes.
+        // A missing file is a fresh default. An unreadable or malformed one
+        // must never cause existing preferences or queued data to be replaced.
+        let read_runtime_state = || -> Result<_, String> {
+            let network = profiles::read_optional_file(&network_state_path)
+                .map_err(|error| format!("PROFILE_STATE_READ_FAILED (network-state.json): {error}"))?;
+            let network_enabled = match network.as_deref() {
+                None => true,
+                Some(bytes) => match std::str::from_utf8(bytes).map(str::trim) {
+                    Ok("online") => true,
+                    Ok("offline") => false,
+                    _ => return Err("PROFILE_STATE_INVALID (network-state.json)".into()),
+                },
+            };
+            Ok((
+                network_enabled,
+                read_profile_runtime_json(&file_receive_settings_path)?,
+                read_profile_runtime_json(&unread_state_path)?,
+                read_profile_runtime_json::<HashMap<String, CachedFriendProfile>>(&friend_cache_path)?,
+                read_profile_runtime_json(&pending_messages_path)?,
+                read_profile_runtime_json(&pending_pq_messages_path)?,
+                read_profile_runtime_json::<Vec<PendingToxFile>>(&pending_files_path)?,
+                read_profile_runtime_json(&incoming_requests_path)?,
+            ))
+        };
+        let (
+            network_enabled,
+            file_receive_settings,
+            unread_state,
+            friend_cache,
+            pending_messages,
+            pending_pq_messages,
+            mut pending_files,
+            incoming_requests,
+        ) = read_runtime_state().inspect_err(|_| {
+            if let Some(bytes) = savedata.as_mut() {
+                wipe_secret_bytes(bytes);
+            }
+        })?;
         let proxy_settings_value = proxy_settings
             .lock()
             .map_err(|_| "Could not read the shared proxy settings".to_string())?
@@ -3317,84 +4159,34 @@ impl ToxState {
             cipher,
         );
         if let Some(savedata) = savedata.as_mut() {
-            wipe_sensitive_bytes(savedata);
+            wipe_secret_bytes(savedata);
         }
         let handle = handle_result?;
-        let identity_guard = {
-            let mut address = [0_u8; 38];
-            unsafe { tox_self_get_address(handle.instance.as_ptr(), address.as_mut_ptr()) };
-            match ProfileIdentityGuard::acquire(&hex_upper(&address[..32])) {
-                Ok(guard) => Arc::new(guard),
-                Err(error) => {
-                    unsafe { tox_kill(handle.instance.as_ptr()) };
-                    return Err(error);
-                }
-            }
-        };
+        let identity_guard = Arc::new(ProfileIdentityGuard::acquire(&hex_upper(
+            &handle.address()[..32],
+        ))?);
+        // On early return the native handle must close before the identity
+        // guard lets another profile acquire the same public key.
+        let handle = handle;
         if !profile_exists {
             let default_nickname = new_profile_name
                 .filter(|value| !value.trim().is_empty())
                 .unwrap_or("Tox User")
                 .as_bytes();
             let mut name_error = 0_i32;
-            if !unsafe {
-                tox_self_set_name(
-                    handle.instance.as_ptr(),
-                    default_nickname.as_ptr(),
-                    default_nickname.len(),
-                    &mut name_error,
-                )
-            } {
-                unsafe { tox_kill(handle.instance.as_ptr()) };
+            if !handle.native().self_set_name(default_nickname.as_ref(), &mut name_error) {
                 return Err(format!(
                     "Не удалось установить ник нового профиля Tox (код {name_error})"
                 ));
             }
-            if let Err(error) = Self::save(&handle) {
-                unsafe { tox_kill(handle.instance.as_ptr()) };
-                return Err(error);
-            }
+            Self::save(&handle)?;
         }
 
-        if let Some(volume) = profile_volume.as_ref() {
-            let mut address = [0_u8; 38];
-            unsafe { tox_self_get_address(handle.instance.as_ptr(), address.as_mut_ptr()) };
-            if let Err(error) = chat_history_store::legacy_033_migration::run(
-                volume,
-                &paths.data_dir,
-                paths.legacy_033_profile_id.as_deref(),
-                &hex_upper(&address[..32]),
-            ) {
-                unsafe { tox_kill(handle.instance.as_ptr()) };
-                return Err(error);
-            }
-        }
-        let history_path = paths.data_dir.join("chat-history.json");
-        let pending_messages_path = paths.data_dir.join("pending-messages.json");
-        let pending_pq_messages_path = paths.data_dir.join("pending-pq-messages.json");
-        let pending_files_path = paths.data_dir.join("pending-files.json");
-        let incoming_requests_path = paths.data_dir.join("incoming-friend-requests.json");
-        let friend_cache_path = paths.data_dir.join("friend-profiles.json");
-        let file_receive_settings_path = paths.data_dir.join("file-settings.json");
-        let file_receive_settings = profiles::read_file(&file_receive_settings_path)
-            .ok()
-            .and_then(|contents| serde_json::from_slice(&contents).ok())
-            .unwrap_or_default();
-        let unread_state_path = paths.data_dir.join("unread-events.json");
         allow_batched_write(&history_path);
         allow_batched_write(&unread_state_path);
         allow_batched_write(&friend_cache_path);
         allow_batched_write(&pending_messages_path);
         allow_batched_write(&pending_pq_messages_path);
-        let unread_state = profiles::read_file(&unread_state_path)
-            .ok()
-            .and_then(|contents| serde_json::from_slice(&contents).ok())
-            .unwrap_or_default();
-        let friend_cache: HashMap<String, CachedFriendProfile> =
-            profiles::read_file(&friend_cache_path)
-                .ok()
-                .and_then(|data| serde_json::from_slice(&data).ok())
-                .unwrap_or_default();
         if let Some(sequence) = friend_cache
             .values()
             .map(|profile| profile.added_event_sequence)
@@ -3402,14 +4194,14 @@ impl ToxState {
         {
             observe_chat_event_sequence(sequence);
         }
-        let transfer_log_path = paths.logs_dir.join("file-transfer.log");
-        let network_log_path = paths.logs_dir.join("tox-network.log");
-        let legacy_messages = profiles::read_file(&history_path)
-            .ok()
-            .and_then(|contents| serde_json::from_slice::<Vec<ToxMessage>>(&contents).ok())
-            .unwrap_or_default();
-        let pq = Arc::new(PqEngine::new(&paths.data_dir)?);
-        let mut messages = chat_history_store::open_and_register(&history_path, legacy_messages)?;
+        let open_protocols = || -> Result<_, String> {
+            let pq = Arc::new(PqEngine::new(&paths.data_dir)?);
+            let file_card = Arc::new(FileCardEngine::new(&paths.data_dir)?);
+            let chat = Arc::new(ChatProtocolEngine::new(&paths.data_dir)?);
+            Ok((pq, chat, file_card))
+        };
+        let (pq, chat_protocol, file_card_protocol) = open_protocols()?;
+        let mut messages = chat_history_store::open_and_register(&history_path, Vec::new())?;
         let mut recovered_rows = Vec::new();
         for message in &mut messages {
             if let Some(attachment) = message.attachment.as_mut() {
@@ -3443,30 +4235,15 @@ impl ToxState {
         // Durable history lives in bounded chunks. At startup only rows needed
         // by an active delivery/transfer stay resident until a chat is opened.
         messages.retain(message_requires_runtime_residency);
-        let pending_messages = profiles::read_file(&pending_messages_path)
-            .ok()
-            .and_then(|contents| serde_json::from_slice::<Vec<PendingToxMessage>>(&contents).ok())
-            .unwrap_or_default();
-        let pending_pq_messages = profiles::read_file(&pending_pq_messages_path)
-            .ok()
-            .and_then(|contents| serde_json::from_slice::<Vec<PendingToxMessage>>(&contents).ok())
-            .unwrap_or_default();
-        let mut pending_files = profiles::read_file(&pending_files_path)
-            .ok()
-            .and_then(|contents| serde_json::from_slice::<Vec<PendingToxFile>>(&contents).ok())
-            .unwrap_or_default();
         for file in &mut pending_files {
             file.path = rebase_portable_file(&file.path, &paths.outgoing_files_dir);
         }
-        let incoming_requests = profiles::read_file(&incoming_requests_path)
-            .ok()
-            .and_then(|contents| {
-                serde_json::from_slice::<Vec<IncomingFriendRequest>>(&contents).ok()
-            })
-            .unwrap_or_default();
 
-        let chat_protocol = Arc::new(ChatProtocolEngine::new(&paths.data_dir)?);
-        let file_card_protocol = Arc::new(FileCardEngine::new(&paths.data_dir)?);
+        let bootstrap_nodes = match paths.bootstrap_nodes {
+            Some(nodes) => nodes,
+            None => bootstrap_nodes::State::load(None, false)?,
+        };
+        let installed_tor_port = handle.tor_proxy_port;
         let state = Self {
             handle: Arc::new(Mutex::new(Some(handle))),
             _identity_guard: identity_guard,
@@ -3474,10 +4251,13 @@ impl ToxState {
             web_finalized: Arc::new(AtomicBool::new(false)),
             local_state_lock: Arc::new(Mutex::new(())),
             handle_generation: Arc::new(AtomicU64::new(1)),
+            installed_tor_port: Arc::new(AtomicU16::new(installed_tor_port)),
             running: Arc::new(AtomicBool::new(true)),
             tor,
             proxy_settings,
             network_settings,
+            bootstrap_nodes,
+            bootstrap_usage: Arc::new(Mutex::new(None)),
             shared_route_gate: None,
             proxy_bridge: Arc::new(Mutex::new(proxy_bridge)),
             connection: Arc::new(AtomicU8::new(0)),
@@ -3510,7 +4290,6 @@ impl ToxState {
             pq_active_history_reconciled: Arc::new(Mutex::new(HashSet::new())),
             chat_protocol,
             file_card_protocol,
-            pq_receipts: Arc::new(Mutex::new(HashMap::new())),
             file_receive_settings: Arc::new(Mutex::new(file_receive_settings)),
             file_receive_settings_path,
             unread_state: Arc::new(Mutex::new(unread_state)),
@@ -3521,7 +4300,7 @@ impl ToxState {
             chat_transport_ready: Arc::new(AtomicBool::new(true)),
             updates,
             profile_volume,
-            owner_profile_id: paths.legacy_033_profile_id,
+            owner_profile_id: paths.owner_profile_id,
             #[cfg(feature = "web-core")]
             web_profile_id: None,
             #[cfg(feature = "web-core")]
@@ -3567,26 +4346,26 @@ impl ToxState {
     }
 
     fn save(handle: &ToxHandle) -> Result<(), String> {
-        let length = unsafe { tox_get_savedata_size(handle.instance.as_ptr()) };
-        let mut savedata = vec![0_u8; length];
-        unsafe { tox_get_savedata(handle.instance.as_ptr(), savedata.as_mut_ptr()) };
+        let mut savedata = handle.savedata();
         let mut disk_data = match handle.cipher.as_ref() {
             Some(cipher) => {
                 let result = cipher.encrypt(&savedata);
-                wipe_sensitive_bytes(&mut savedata);
+                wipe_secret_bytes(&mut savedata);
                 result?
             }
             None => savedata,
         };
         let result = atomic_write(&handle.profile_path, &disk_data)
             .map_err(|error| format!("Не удалось атомарно сохранить профиль Tox: {error}"));
-        wipe_sensitive_bytes(&mut disk_data);
+        wipe_secret_bytes(&mut disk_data);
         result
     }
 
     #[cfg(feature = "web-core")]
     fn finalize_web_profile_required(&self) -> Result<(), String> {
-        if self.web_finalized.load(Ordering::Acquire) { return Ok(()); }
+        if self.web_finalized.load(Ordering::Acquire) {
+            return Ok(());
+        }
         if self.running.load(Ordering::Acquire) || Arc::strong_count(&self.handle) != 1 {
             return Err("PROFILE_RUNTIME_STOP_TIMEOUT".to_string());
         }
@@ -3595,14 +4374,20 @@ impl ToxState {
         }
         // Older batched snapshots must finish before writing the current RAM
         // state. No cancellation guard or native-handle lock is held here.
-        flush_deferred_profile_writes()?;
+        flush_deferred_writes_for_profile(self)?;
         persist_tox_history_required(&self.messages, &self.history_path, &self.history_enabled)?;
         persist_pending_messages_required(&self.pending_messages, &self.pending_messages_path)?;
-        persist_pending_messages_required(&self.pending_pq_messages, &self.pending_pq_messages_path)?;
+        persist_pending_messages_required(
+            &self.pending_pq_messages,
+            &self.pending_pq_messages_path,
+        )?;
         persist_pending_files_required(&self.pending_files, &self.pending_files_path)?;
         persist_unread_state_required(&self.unread_state, &self.unread_state_path)?;
         {
-            let native = self.handle.lock().map_err(|_| "PROFILE_HANDLE_UNAVAILABLE")?;
+            let native = self
+                .handle
+                .lock()
+                .map_err(|_| "PROFILE_HANDLE_UNAVAILABLE")?;
             let handle = native.as_ref().ok_or("TOX_NOT_INITIALIZED")?;
             Self::save(handle).map_err(|_| "PROFILE_FINAL_SAVE_FAILED".to_string())?;
         }
@@ -3610,10 +4395,13 @@ impl ToxState {
             .map_err(|_| "PROFILE_FINAL_CHECKPOINT_FAILED".to_string())?;
         // Only durable success transfers/kills the native handle. On every
         // earlier error the caller retains the same RAM state and identity.
-        let mut native = self.handle.lock().map_err(|_| "PROFILE_HANDLE_UNAVAILABLE")?;
+        let mut native = self
+            .handle
+            .lock()
+            .map_err(|_| "PROFILE_HANDLE_UNAVAILABLE")?;
         let handle = native.take().ok_or("TOX_NOT_INITIALIZED")?;
         drop(native);
-        unsafe { tox_kill(handle.instance.as_ptr()) };
+        drop(handle);
         self.web_finalized.store(true, Ordering::Release);
         chat_history_store::unregister(&self.history_path);
         Ok(())
@@ -3643,7 +4431,7 @@ impl ToxState {
             let handle = guard
                 .as_ref()
                 .ok_or_else(|| "Профиль Tox не инициализирован".to_string())?;
-            tox_friend_numbers_by_public_key(handle.instance.as_ptr())
+            tox_friend_numbers_by_public_key(handle.native())
         };
         let previous = self
             .friend_cache
@@ -3666,7 +4454,7 @@ impl ToxState {
             .ok()
             .and_then(|guard| {
                 guard.as_ref().and_then(|handle| {
-                    tox_friend_public_key(handle.instance.as_ptr(), friend_number)
+                    tox_friend_public_key(Some(handle.native()), friend_number)
                 })
             })
             .unwrap_or_default()
@@ -3675,8 +4463,7 @@ impl ToxState {
     fn self_public_key(&self) -> Option<String> {
         self.handle.lock().ok().and_then(|guard| {
             guard.as_ref().map(|handle| {
-                let mut address = [0_u8; 38];
-                unsafe { tox_self_get_address(handle.instance.as_ptr(), address.as_mut_ptr()) };
+                let address = handle.address();
                 hex_upper(&address[..32])
             })
         })
@@ -3820,14 +4607,6 @@ impl ToxState {
                 })
                 .collect();
         }
-        if let Ok(mut receipts) = self.pq_receipts.lock() {
-            *receipts = std::mem::take(&mut *receipts)
-                .into_iter()
-                .filter_map(|((friend_number, wire_id), value)| {
-                    remap(friend_number).map(|number| ((number, wire_id), value))
-                })
-                .collect();
-        }
         if let Ok(mut files) = self.incoming_files.lock() {
             *files = std::mem::take(&mut *files)
                 .into_iter()
@@ -3859,11 +4638,11 @@ impl ToxState {
             unread_changed = unread.friends != next;
             unread.friends = next;
         }
-        self.pq
-            .reconcile_friend_numbers(resolved, previous_public_keys);
+        self.pq.reconcile_friend_numbers(resolved);
         unread_changed
     }
 
+    #[cfg(any(test, feature = "web-core"))]
     fn rebuild_network_route(&self) -> Result<(), String> {
         self.rebuild_network_route_if_stalled(None).map(|_| ())
     }
@@ -3949,7 +4728,7 @@ impl ToxState {
         let current = guard
             .as_ref()
             .ok_or_else(|| "Профиль Tox не инициализирован".to_string())?;
-        let previous_friend_numbers = tox_friend_numbers_by_public_key(current.instance.as_ptr());
+        let previous_friend_numbers = tox_friend_numbers_by_public_key(current.native());
         Self::save(current)?;
         // Mounted KAI writes are buffered. Refuse the route transaction before
         // publishing a replacement handle if the existing profile cannot commit.
@@ -3975,7 +4754,7 @@ impl ToxState {
             cipher,
         )?;
         if !recovery_is_current() {
-            unsafe { tox_kill(replacement.instance.as_ptr()) };
+            drop(replacement);
             if let Some(bridge) = next_bridge {
                 bridge.stop();
             }
@@ -3996,10 +4775,7 @@ impl ToxState {
             }
             Ok(())
         };
-        if let Err(error) = reset_protocols() {
-            unsafe { tox_kill(replacement.instance.as_ptr()) };
-            return Err(error);
-        }
+        reset_protocols()?;
         if let Ok(mut ready_at) = self.friend_message_ready_at.lock() {
             ready_at.clear();
         }
@@ -4007,8 +4783,11 @@ impl ToxState {
             received.clear();
         }
         let current_friend_numbers =
-            tox_friend_numbers_by_public_key(replacement.instance.as_ptr());
+            tox_friend_numbers_by_public_key(replacement.native());
+        let installed_tor_port = replacement.tor_proxy_port;
         let previous = guard.replace(replacement);
+        self.installed_tor_port
+            .store(installed_tor_port, Ordering::Release);
         self.reconcile_friend_number_maps(&previous_friend_numbers, &current_friend_numbers);
         note_outgoing_transport_loss(&self.outgoing_files, None);
         self.handle_generation.fetch_add(1, Ordering::SeqCst);
@@ -4016,9 +4795,7 @@ impl ToxState {
         if let Some(updates) = &self.updates {
             updates.changed();
         }
-        if let Some(previous) = previous {
-            unsafe { tox_kill(previous.instance.as_ptr()) };
-        }
+        drop(previous);
         if let Ok(mut bridge) = self.proxy_bridge.lock() {
             if let Some(previous) = bridge.take() {
                 previous.stop();
@@ -4038,15 +4815,37 @@ impl ToxState {
         Ok(true)
     }
 
+    fn used_bootstrap_nodes(&self, revision: u64) -> HashSet<bootstrap_nodes::Node> {
+        if !local_transport_ready(self) {
+            return HashSet::new();
+        }
+        let generation = self.handle_generation.load(Ordering::SeqCst);
+        self.bootstrap_usage
+            .try_lock()
+            .ok()
+            .and_then(|usage| {
+                usage
+                    .as_ref()
+                    .filter(|(observed_revision, observed_generation, _)| {
+                        *observed_revision == revision && *observed_generation == generation
+                    })
+                    .map(|(_, _, nodes)| nodes.clone())
+            })
+            .unwrap_or_default()
+    }
+
     fn start_network_loop(&self) {
         let state = self.clone();
         thread::spawn(move || {
             let mut last_bootstrap = Instant::now() - Duration::from_secs(60);
+            let mut last_bootstrap_observation = Instant::now();
+            let mut bootstrap_revision = None;
+            let mut bootstrap_endpoints = Vec::new();
             let mut last_checkpoint_probe = Instant::now() - Duration::from_secs(1);
             let mut last_queue_flush = Instant::now() - Duration::from_millis(100);
             let mut last_transfer_housekeeping = Instant::now() - Duration::from_secs(1);
             let mut last_history_eviction = Instant::now() - Duration::from_secs(60);
-            let callback_store = Arc::into_raw(Arc::new(CallbackContext {
+            let callback_store = CallbackContext {
                 updates: state.updates.clone(),
                 incoming_requests: Arc::clone(&state.incoming_requests),
                 incoming_requests_path: state.incoming_requests_path.clone(),
@@ -4069,20 +4868,21 @@ impl ToxState {
                 pq: Arc::clone(&state.pq),
                 chat_protocol: Arc::clone(&state.chat_protocol),
                 file_card_protocol: Arc::clone(&state.file_card_protocol),
-                pq_receipts: Arc::clone(&state.pq_receipts),
                 file_receive_settings: Arc::clone(&state.file_receive_settings),
                 unread_state: Arc::clone(&state.unread_state),
                 unread_state_path: state.unread_state_path.clone(),
                 friend_message_ready_at: Arc::clone(&state.friend_message_ready_at),
                 friend_status_received: Arc::clone(&state.friend_status_received),
                 network_enabled: Arc::clone(&state.network_enabled),
+                #[cfg(feature = "web-core")]
+                handle_generation: Arc::clone(&state.handle_generation),
                 chat_transaction_gate: Arc::clone(&state.chat_transaction_gate),
                 chat_transport_ready: Arc::clone(&state.chat_transport_ready),
                 #[cfg(feature = "web-core")]
                 web_profile_id: state.web_profile_id.clone(),
                 #[cfg(feature = "web-core")]
                 web_file_bridge: state.web_file_bridge.clone(),
-            })) as *mut c_void;
+            };
             let mut callback_generation = 0_u64;
             let mut last_connection = u8::MAX;
             let mut reconnect = ToxReconnectWatchdog::default();
@@ -4092,7 +4892,9 @@ impl ToxState {
                     last_history_eviction = Instant::now();
                 }
                 if last_checkpoint_probe.elapsed() >= Duration::from_secs(1) {
-                    if !state.chat_transport_ready.load(Ordering::Acquire) {
+                    if !state.chat_transport_ready.load(Ordering::Acquire)
+                        && pending_contact::recover_absent_purges(&state).is_ok()
+                    {
                         let _ = recover_local_message_deletions(&state);
                     }
                     let _ = state.checkpoint_profile(false);
@@ -4121,19 +4923,29 @@ impl ToxState {
                 // also blocks Tauri's window thread.
                 let observed_generation = state.handle_generation.load(Ordering::SeqCst);
                 let bootstrap_due = callback_generation != observed_generation
+                    || !bootstrap_revision.is_some_and(|revision| {
+                        state.bootstrap_nodes.revision_is_current(revision)
+                    })
                     || last_bootstrap.elapsed() >= Duration::from_secs(20);
-                let bootstrap_plan = bootstrap_due.then(|| {
-                    let allow_local_dns = !state.tor.enabled()
-                        && state
-                            .proxy_settings
+                let bootstrap_plan = bootstrap_due
+                    .then(|| {
+                        let allow_local_dns = !state.tor.enabled()
+                            && state
+                                .proxy_settings
+                                .lock()
+                                .map(|settings| settings.mode == "none")
+                                .unwrap_or(false);
+                        let ipv6 = state
+                            .network_settings
                             .lock()
-                            .map(|settings| settings.mode == "none")
+                            .map(|settings| settings.ipv6_enabled)
                             .unwrap_or(false);
-                    (
-                        observed_generation,
-                        resolved_bootstrap_nodes(allow_local_dns),
-                    )
-                });
+                        state
+                            .bootstrap_nodes
+                            .snapshot(allow_local_dns, ipv6)
+                            .map(|(revision, endpoints)| (observed_generation, revision, endpoints))
+                    })
+                    .flatten();
                 let interval = {
                     let state_guard = match state.handle.lock() {
                         Ok(guard) => guard,
@@ -4154,98 +4966,67 @@ impl ToxState {
 
                     let current_generation = state.handle_generation.load(Ordering::SeqCst);
                     if callback_generation != current_generation {
-                        unsafe {
-                            tox_callback_friend_request(
-                                handle.instance.as_ptr(),
-                                Some(on_friend_request),
-                            );
-                            tox_callback_friend_message(
-                                handle.instance.as_ptr(),
-                                Some(on_friend_message),
-                            );
-                            tox_callback_friend_read_receipt(
-                                handle.instance.as_ptr(),
-                                // c-toxcore keeps the historical API name, but
-                                // this callback proves delivery to the peer
-                                // client only. Kaigen never exposes it as a
-                                // human-read state.
-                                Some(on_friend_delivery_receipt),
-                            );
-                            tox_callback_friend_lossless_packet(
-                                handle.instance.as_ptr(),
-                                Some(on_friend_lossless_packet),
-                            );
-                            tox_callback_file_chunk_request(
-                                handle.instance.as_ptr(),
-                                Some(on_file_chunk_request),
-                            );
-                            tox_callback_file_recv(handle.instance.as_ptr(), Some(on_file_recv));
-                            tox_callback_file_recv_control(
-                                handle.instance.as_ptr(),
-                                Some(on_file_recv_control),
-                            );
-                            tox_callback_file_recv_chunk(
-                                handle.instance.as_ptr(),
-                                Some(on_file_recv_chunk),
-                            );
-                            tox_callback_friend_connection_status(
-                                handle.instance.as_ptr(),
-                                Some(on_friend_connection_status),
-                            );
-                            tox_callback_friend_name(
-                                handle.instance.as_ptr(),
-                                Some(on_friend_name),
-                            );
-                            tox_callback_friend_status(
-                                handle.instance.as_ptr(),
-                                Some(on_friend_status),
-                            );
-                            tox_callback_friend_status_message(
-                                handle.instance.as_ptr(),
-                                Some(on_friend_status_message),
-                            );
-                        }
+                        handle.register_callbacks();
                         callback_generation = current_generation;
                         last_bootstrap = Instant::now() - Duration::from_secs(60);
+                        bootstrap_revision = None;
+                        bootstrap_endpoints.clear();
                         last_connection = u8::MAX;
                     }
 
-                    if last_bootstrap.elapsed() >= Duration::from_secs(20) {
-                        if let Some((planned_generation, nodes)) = bootstrap_plan.as_ref() {
-                            // A route rebuild may finish while DNS is being
-                            // resolved. Discard that stale plan and resolve for
-                            // the new generation during the next iteration.
-                            if *planned_generation == current_generation {
-                                bootstrap_tox(handle.instance.as_ptr(), nodes);
-                                last_bootstrap = Instant::now();
-                            }
+                    if let Some((planned_generation, revision, nodes)) = bootstrap_plan {
+                        // A route rebuild may finish while DNS is being
+                        // resolved. Discard that stale plan and resolve for
+                        // the new generation during the next iteration.
+                        if planned_generation == current_generation
+                            && state.bootstrap_nodes.with_current(revision, || {
+                                bootstrap_nodes::connect(handle.native(), &nodes)
+                            })
+                        {
+                            bootstrap_revision = Some(revision);
+                            bootstrap_endpoints = nodes;
+                            last_bootstrap = Instant::now();
                         }
                     }
 
-                    unsafe {
-                        tox_iterate(handle.instance.as_ptr(), callback_store);
+                    {
+                        handle.iterate(&callback_store);
+                        if last_bootstrap_observation.elapsed() >= Duration::from_millis(500) {
+                            if let Ok(mut usage) = state.bootstrap_usage.try_lock() {
+                                *usage = bootstrap_revision.map(|revision| {
+                                    (
+                                        revision,
+                                        current_generation,
+                                        bootstrap_nodes::observed(
+                                            handle.native(),
+                                            &bootstrap_endpoints,
+                                        ),
+                                    )
+                                });
+                            }
+                            last_bootstrap_observation = Instant::now();
+                        }
                         #[cfg(test)]
                         state.iterations.fetch_add(1, Ordering::Relaxed);
                         let transport_ready = local_transport_ready(&state);
                         if transport_ready {
-                            drive_pq_shutdowns(&state, handle.instance.as_ptr());
                             if last_queue_flush.elapsed() >= Duration::from_millis(100) {
-                                drive_pq_sessions(&state, handle.instance.as_ptr());
-                                flush_pending_pq_messages(&state, handle.instance.as_ptr());
-                                flush_pending_messages(&state, handle.instance.as_ptr());
-                                flush_chat_protocol_outbox(&state, handle.instance.as_ptr());
-                                flush_file_card_outbox(&state, handle.instance.as_ptr());
-                                flush_pq_outbox(&state, handle.instance.as_ptr());
-                                flush_pending_files(&state, handle.instance.as_ptr());
+                                drive_pq_sessions(&state, handle.native());
+                                flush_pending_pq_messages(&state, handle.native());
+                                flush_pending_messages(&state, handle.native());
+                                flush_chat_protocol_outbox(&state, handle.native());
+                                flush_file_card_outbox(&state, handle.native());
+                                flush_pq_outbox(&state, handle.native());
+                                flush_pending_files(&state, handle.native());
                                 last_queue_flush = Instant::now();
                             }
                             if last_transfer_housekeeping.elapsed() >= Duration::from_secs(1) {
-                                check_file_transfer_timeouts(&state, handle.instance.as_ptr());
+                                check_file_transfer_timeouts(&state, handle.native());
                                 last_transfer_housekeeping = Instant::now();
                             }
                         }
                         let connection = if transport_ready {
-                            tox_self_get_connection_status(handle.instance.as_ptr())
+                            handle.native().connection_status()
                         } else {
                             0
                         };
@@ -4262,7 +5043,7 @@ impl ToxState {
                         } else {
                             state.connection.store(connection, Ordering::Relaxed);
                         }
-                        tox_iteration_interval(handle.instance.as_ptr())
+                        handle.native().iteration_interval()
                     }
                 };
 
@@ -4291,9 +5072,6 @@ impl ToxState {
                     }
                 }
                 thread::sleep(Duration::from_millis(u64::from(interval.clamp(5, 1000))));
-            }
-            unsafe {
-                drop(Arc::from_raw(callback_store.cast::<CallbackContext>()));
             }
         });
     }
@@ -4338,11 +5116,13 @@ impl ToxState {
             .handle
             .lock()
             .map_err(|_| "Could not close the profile before deletion".to_string())?;
-        if let Some(instance) = state.take() {
-            unsafe { tox_kill(instance.instance.as_ptr()) };
-        }
+        drop(state.take());
         drop(state);
-        flush_deferred_profile_writes()
+        // The worker/callbacks are quiescent and the handle guard is gone.
+        // Retire only this producer, never a later reopened profile.
+        self.transfer_log_path.retire()?;
+        self.network_log_path.retire()?;
+        flush_deferred_writes_for_profile(self)
     }
 }
 
@@ -4360,6 +5140,8 @@ struct AppSettings {
     language: String,
     #[serde(default = "default_true")]
     close_to_tray: bool,
+    #[serde(default = "default_true")]
+    automatic_updates: bool,
     #[serde(default)]
     initial_connection_preset: Option<String>,
     #[serde(default)]
@@ -4379,6 +5161,7 @@ impl Default for AppSettings {
         Self {
             language: default_language(),
             close_to_tray: true,
+            automatic_updates: true,
             initial_connection_preset: None,
             initial_connection_preset_required: false,
         }
@@ -4472,6 +5255,69 @@ fn exact_loaded_profile<T: Clone>(
 }
 
 #[cfg(feature = "desktop")]
+#[derive(Default)]
+struct DesktopWorkTracker {
+    state: Mutex<DesktopWorkState>,
+    idle: std::sync::Condvar,
+}
+
+#[cfg(feature = "desktop")]
+#[derive(Default)]
+struct DesktopWorkState {
+    pending: usize,
+    closing: bool,
+}
+
+#[cfg(feature = "desktop")]
+struct DesktopWorkLease(Arc<DesktopWorkTracker>);
+
+#[cfg(feature = "desktop")]
+impl DesktopWorkTracker {
+    fn admit(self: &Arc<Self>) -> Result<DesktopWorkLease, String> {
+        let mut state = self.state.lock().map_err(|_| "DESKTOP_WORK_UNAVAILABLE")?;
+        if state.closing {
+            return Err("APPLICATION_EXIT_IN_PROGRESS".into());
+        }
+        state.pending = state.pending.checked_add(1).ok_or("DESKTOP_WORK_LIMIT")?;
+        Ok(DesktopWorkLease(Arc::clone(self)))
+    }
+
+    fn close(&self) -> Result<(), String> {
+        self.state
+            .lock()
+            .map_err(|_| "DESKTOP_WORK_UNAVAILABLE")?
+            .closing = true;
+        Ok(())
+    }
+
+    fn wait_until_idle(&self) -> Result<(), String> {
+        let mut state = self.state.lock().map_err(|_| "DESKTOP_WORK_UNAVAILABLE")?;
+        while state.pending != 0 {
+            state = self
+                .idle
+                .wait(state)
+                .map_err(|_| "DESKTOP_WORK_UNAVAILABLE")?;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(feature = "desktop")]
+impl Drop for DesktopWorkLease {
+    fn drop(&mut self) {
+        let mut state = self
+            .0
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        state.pending = state.pending.saturating_sub(1);
+        if state.pending == 0 {
+            self.0.idle.notify_all();
+        }
+    }
+}
+
+#[cfg(feature = "desktop")]
 #[derive(Clone)]
 struct AppState {
     app: tauri::AppHandle,
@@ -4482,9 +5328,13 @@ struct AppState {
     proxy_settings_path: PathBuf,
     network_settings: Arc<Mutex<NetworkSettings>>,
     network_settings_path: PathBuf,
+    bootstrap_nodes: Arc<bootstrap_nodes::State>,
     shared_route_gate: Arc<Mutex<bool>>,
     registry: Arc<Mutex<ProfileRegistry>>,
     profiles: Arc<Mutex<HashMap<String, Arc<ToxState>>>>,
+    remote_profiles: Arc<webgate_host::WebgateHost>,
+    webgate_downloads: Arc<webgate_downloads::Downloads>,
+    desktop_update: Arc<desktop_update::UpdateManager>,
     load_errors: Arc<Mutex<HashMap<String, String>>>,
     settings: Arc<Mutex<AppSettings>>,
     settings_path: PathBuf,
@@ -4493,6 +5343,10 @@ struct AppState {
     native_dialog_open: Arc<AtomicBool>,
     exit_requested: Arc<AtomicBool>,
     shutdown_started: Arc<AtomicBool>,
+    shutdown_completed: Arc<AtomicBool>,
+    desktop_work: Arc<DesktopWorkTracker>,
+    native_file_drop_revision: Arc<AtomicU64>,
+    close_to_tray: Arc<AtomicBool>,
 }
 
 #[cfg(feature = "desktop")]
@@ -4501,6 +5355,10 @@ struct NativeFileDropTarget {
     profile_id: String,
     friend_number: u32,
     recipient_public_key: String,
+    contact_incarnation: u64,
+    view_lease_id: Option<String>,
+    revision: u64,
+    remote: Option<Arc<webgate::RemoteProfile>>,
 }
 
 #[cfg(feature = "desktop")]
@@ -4509,6 +5367,10 @@ struct NativeFileDropTarget {
 struct NativeFileDropBatch {
     profile_id: String,
     friend_number: u32,
+    expected_public_key: String,
+    expected_contact_incarnation: u64,
+    view_lease_id: Option<String>,
+    target_revision: u64,
     batch: NativeFileBatchSelection,
 }
 
@@ -4568,28 +5430,90 @@ impl AppState {
                 })?,
             )?;
         }
+        let close_to_tray = settings.close_to_tray;
+        let bootstrap_nodes = bootstrap_nodes::State::load(
+            Some(portable.data_dir.join("bootstrap-nodes.json")),
+            false,
+        )?;
+        let automatic_updates = settings.automatic_updates;
+        let settings = Arc::new(Mutex::new(settings));
+        let proxy_settings = Arc::new(Mutex::new(proxy_settings));
+        let update_events = app.clone();
+        let update_exit = app.clone();
+        let update_settings = settings.clone();
+        let update_settings_path = settings_path.clone();
+        let desktop_update = desktop_update::UpdateManager::new(
+            portable.data_dir.clone(),
+            portable.root_dir.clone(),
+            webgate_desktop::transport_policy_parts(tor.clone(), proxy_settings.clone()),
+            automatic_updates,
+            Arc::new(move |view| {
+                let _ = update_events.emit("desktop-update-state", view);
+            }),
+            Arc::new(move || {
+                if let Some(state) = update_exit.try_state::<AppState>() {
+                    request_application_exit(&update_exit, state.inner());
+                }
+            }),
+            Arc::new(move |enabled| {
+                let mut settings = update_settings
+                    .lock()
+                    .map_err(|_| "UPDATE_SETTINGS_UNAVAILABLE".to_string())?;
+                let previous = settings.automatic_updates;
+                settings.automatic_updates = enabled;
+                let result = (|| {
+                    let bytes = serde_json::to_vec_pretty(&*settings)
+                        .map_err(|_| "UPDATE_SETTINGS_INVALID".to_string())?;
+                    atomic_write(&update_settings_path, &bytes)
+                        .map_err(|_| "UPDATE_SETTINGS_SAVE_FAILED".to_string())
+                })();
+                if result.is_err() {
+                    settings.automatic_updates = previous;
+                }
+                result
+            }),
+        )?;
         let state = Self {
             app,
             root_dir: portable.root_dir,
             data_dir: portable.data_dir,
             tor,
-            proxy_settings: Arc::new(Mutex::new(proxy_settings)),
+            proxy_settings,
             proxy_settings_path,
             network_settings: Arc::new(Mutex::new(network_settings)),
             network_settings_path,
+            bootstrap_nodes,
             shared_route_gate: Arc::new(Mutex::new(false)),
             registry: Arc::new(Mutex::new(registry)),
             profiles: Arc::new(Mutex::new(HashMap::new())),
+            remote_profiles: Arc::new(webgate_host::WebgateHost::default()),
+            webgate_downloads: Arc::new(webgate_downloads::Downloads::default()),
+            desktop_update,
             load_errors: Arc::new(Mutex::new(HashMap::new())),
-            settings: Arc::new(Mutex::new(settings)),
+            settings,
             settings_path,
             native_file_grants: Arc::new(Mutex::new(NativeFileGrantStore::default())),
             native_file_drop_target: Arc::new(Mutex::new(None)),
             native_dialog_open: Arc::new(AtomicBool::new(false)),
             exit_requested: Arc::new(AtomicBool::new(false)),
             shutdown_started: Arc::new(AtomicBool::new(false)),
+            shutdown_completed: Arc::new(AtomicBool::new(false)),
+            desktop_work: Arc::new(DesktopWorkTracker::default()),
+            native_file_drop_revision: Arc::new(AtomicU64::new(0)),
+            close_to_tray: Arc::new(AtomicBool::new(close_to_tray)),
         };
 
+        let event_app = state.app.clone();
+        state.remote_profiles.set_event_handler(Arc::new(move |profile_id, event| {
+            desktop_notifications::notify_webgate_event(&event_app, &profile_id, &event);
+            let _ = event_app.emit("profiles-changed", &profile_id);
+            let _ = event_app.emit("webgate-event", serde_json::json!({"profileId": profile_id, "event": event}));
+        }))?;
+        if let Err(error) = webgate_desktop::initialize_persistence(&state) {
+            if let Ok(mut errors) = state.load_errors.lock() {
+                errors.insert("webgate-store".into(), error);
+            }
+        }
         let records = state
             .registry
             .lock()
@@ -4713,18 +5637,6 @@ impl AppState {
         registry.profile_path(&self.root_dir, record)
     }
 
-    fn paths_for(&self, record: &ProfileRecord) -> Result<ProfilePaths, String> {
-        let registry = self
-            .registry
-            .lock()
-            .map_err(|_| "Could not access the profile registry".to_string())?;
-        ProfilePaths::new(
-            self.root_dir.clone(),
-            registry.data_path(&self.root_dir, record)?,
-            registry.profile_path(&self.root_dir, record)?,
-        )
-    }
-
     fn open_profile_paths(
         &self,
         record: &ProfileRecord,
@@ -4732,7 +5644,7 @@ impl AppState {
     ) -> Result<ProfilePaths, String> {
         let container_path = self.persistent_profile_path(record)?;
         if !is_kai_profile_path(&container_path) {
-            return self.paths_for(record);
+            return Err("PROFILE_LEGACY_FORMAT_UNSUPPORTED".into());
         }
         let volume = KaiProfileVolume::open(container_path, password)?;
         let namespace = volume.namespace_root().to_path_buf();
@@ -4746,6 +5658,16 @@ impl AppState {
 
     fn load_record(&self, record: &ProfileRecord, password: Option<&str>) -> Result<(), String> {
         let _route_guard = lock_shared_route_gate(&self.shared_route_gate)?;
+        let current_record = self.record(&record.id)?;
+        if !current_record.enabled {
+            return Err("PROFILE_DISABLED_REIMPORT_REQUIRED".into());
+        }
+        if current_record.file != record.file
+            || current_record.data_directory != record.data_directory
+            || current_record.imported_from != record.imported_from
+        {
+            return Err("PROFILE_OWNER_CHANGED".into());
+        }
         if self
             .profiles
             .lock()
@@ -4754,43 +5676,11 @@ impl AppState {
         {
             return Ok(());
         }
-        let persistent_path = self.persistent_profile_path(record)?;
-        let legacy_migration = !is_kai_profile_path(&persistent_path);
-        let (paths, savedata, cipher, legacy_data_path, legacy_profile_path) = if legacy_migration {
-            let (savedata, _) = profiles::read_profile(&persistent_path, password)?;
-            let container_path = persistent_path
-                .parent()
-                .ok_or_else(|| "PROFILE_PATH_INVALID".to_string())?
-                .join(format!("{}.kai", record.id));
-            let volume = KaiProfileVolume::create(
-                container_path,
-                record.encrypted.then_some(password).flatten(),
-            )?;
-            let namespace = volume.namespace_root().to_path_buf();
-            let data_path = self.root_dir.join(&record.data_directory);
-            copy_directory_into_volume(&data_path, &namespace.join("data"))?;
-            let paths = ProfilePaths::new_with_volume(
-                self.root_dir.clone(),
-                namespace.join("data"),
-                namespace.join("profile.tox"),
-                Some(Arc::clone(&volume)),
-            )?;
-            profiles::write_file(&paths.profile_path, &savedata)?;
-            (
-                paths,
-                savedata,
-                None,
-                Some(data_path),
-                Some(persistent_path),
-            )
-        } else {
-            let paths = self.open_profile_paths(record, password)?;
-            let (savedata, cipher) = profiles::read_profile(&paths.profile_path, password)?;
-            (paths, savedata, cipher, None, None)
-        };
+        let paths = self.open_profile_paths(record, password)?;
+        let (savedata, cipher) = profiles::read_profile(&paths.profile_path, password)?;
         let tox = Arc::new(
             ToxState::new_for_profile(
-                paths.with_legacy_033_owner(&record.id),
+                paths.with_profile_owner(&record.id, Arc::clone(&self.bootstrap_nodes)),
                 self.tor.clone(),
                 Arc::clone(&self.proxy_settings),
                 Arc::clone(&self.network_settings),
@@ -4801,27 +5691,6 @@ impl AppState {
             )?
             .with_shared_route_gate(Arc::clone(&self.shared_route_gate)),
         );
-        if legacy_migration {
-            tox.checkpoint_profile(true)?;
-            let mut registry = self
-                .registry
-                .lock()
-                .map_err(|_| "Could not access the profile registry".to_string())?;
-            let migrated = registry
-                .profiles
-                .iter_mut()
-                .find(|candidate| candidate.id == record.id)
-                .ok_or_else(|| "PROFILE_NOT_FOUND".to_string())?;
-            migrated.file = format!("profiles/{}/{}.kai", record.id, record.id);
-            registry.save(&self.data_dir)?;
-            drop(registry);
-            if let Some(path) = legacy_profile_path {
-                let _ = fs::remove_file(path);
-            }
-            if let Some(path) = legacy_data_path {
-                let _ = fs::remove_dir_all(path);
-            }
-        }
         self.allow_profile_media(&tox)?;
         self.profiles
             .lock()
@@ -5004,7 +5873,7 @@ fn profile_user_status(tox_state: &ToxState) -> String {
     let Some(handle) = handle.as_ref() else {
         return "online".to_string();
     };
-    match unsafe { tox_self_get_status(handle.instance.as_ptr()) } {
+    match handle.native().self_status() {
         1 => "away",
         2 => "busy",
         _ => "online",
@@ -5036,7 +5905,7 @@ fn set_user_status_inner(tox_state: &ToxState, status: &str) -> Result<String, S
                 state
                     .as_ref()
                     .map(|handle| {
-                        tox_friend_numbers_by_public_key(handle.instance.as_ptr())
+                        tox_friend_numbers_by_public_key(handle.native())
                             .into_values()
                             .collect::<Vec<_>>()
                     })
@@ -5064,7 +5933,7 @@ fn set_user_status_inner(tox_state: &ToxState, status: &str) -> Result<String, S
     let instance = state
         .as_ref()
         .ok_or_else(|| "The Tox profile is not initialised".to_string())?;
-    unsafe { tox_self_set_status(instance.instance.as_ptr(), tox_status) };
+    instance.native().self_set_status(tox_status);
     log_network(
         &tox_state.network_log_path,
         format!("SELF_STATUS status={status} raw={tox_status}"),
@@ -5072,7 +5941,7 @@ fn set_user_status_inner(tox_state: &ToxState, status: &str) -> Result<String, S
     ToxState::save(instance)?;
     let friend_numbers = (!was_enabled)
         .then(|| {
-            tox_friend_numbers_by_public_key(instance.instance.as_ptr())
+            tox_friend_numbers_by_public_key(instance.native())
                 .into_values()
                 .collect::<Vec<_>>()
         })
@@ -5110,7 +5979,7 @@ fn tray_status(app_state: &AppState) -> String {
     let Some(handle) = handle.as_ref() else {
         return "offline".to_string();
     };
-    match unsafe { tox_self_get_status(handle.instance.as_ptr()) } {
+    match handle.native().self_status() {
         1 => "away",
         2 => "busy",
         _ => "online",
@@ -5314,7 +6183,24 @@ fn tray_image(
 }
 
 #[cfg(feature = "desktop")]
-fn update_tray(app: &tauri::AppHandle, app_state: &AppState) {
+fn update_tray(app: &tauri::AppHandle, _app_state: &AppState) {
+    #[cfg(target_os = "macos")]
+    {
+        let main_app = app.clone();
+        // AppKit requires both using and dropping the tray handle on the main thread.
+        let _ = app.run_on_main_thread(move || {
+            if let Some(app_state) = main_app.try_state::<AppState>() {
+                update_tray_icon_and_menu(&main_app, &app_state);
+            }
+        });
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    update_tray_icon_and_menu(app, _app_state);
+}
+
+#[cfg(feature = "desktop")]
+fn update_tray_icon_and_menu(app: &tauri::AppHandle, app_state: &AppState) {
     let unread: u32 = app_state
         .profiles
         .lock()
@@ -5507,6 +6393,27 @@ fn create_tray(
     Ok(items)
 }
 
+/// # Safety
+/// user_data is the live CallbackContext passed to this synchronous iteration.
+unsafe fn callback_context<'a>(user_data: *mut c_void) -> Option<&'a CallbackContext> {
+    // SAFETY: the native callback contract supplies the correct live pointer.
+    unsafe { user_data.cast::<CallbackContext>().as_ref() }
+}
+
+/// # Safety
+/// Non-null data points to length readable bytes until this callback returns.
+unsafe fn callback_bytes(
+    _context: &CallbackContext,
+    data: *const u8,
+    length: usize,
+) -> Option<&[u8]> {
+    if data.is_null() || length > isize::MAX as usize {
+        return None;
+    }
+    // SAFETY: the remaining pointer validity follows from the callback contract.
+    Some(unsafe { std::slice::from_raw_parts(data, length) })
+}
+
 unsafe extern "C" fn on_friend_request(
     _tox: *mut c_void,
     public_key: *const u8,
@@ -5514,22 +6421,30 @@ unsafe extern "C" fn on_friend_request(
     length: usize,
     user_data: *mut c_void,
 ) {
-    if public_key.is_null() || user_data.is_null() {
+    // SAFETY: Tox invokes registered callbacks synchronously with the context
+    // borrowed by ToxHandle::iterate.
+    let Some(context) = (unsafe { callback_context(user_data) }) else {
         return;
-    }
-    let key = unsafe { std::slice::from_raw_parts(public_key, 32) };
-    let public_key = key
-        .iter()
-        .map(|byte| format!("{byte:02X}"))
-        .collect::<String>();
-    let message = if message.is_null() {
-        String::new()
-    } else {
-        sanitize_untrusted_text(&String::from_utf8_lossy(unsafe {
-            std::slice::from_raw_parts(message, length)
-        }))
     };
-    let context = unsafe { &*(user_data as *const CallbackContext) };
+    // SAFETY: Tox supplies the fixed-size public key and optional message.
+    let Some(key) = (unsafe { callback_bytes(context, public_key, 32) }) else {
+        return;
+    };
+    let message = if message.is_null() {
+        &[]
+    } else {
+        // SAFETY: Tox supplies length readable bytes until return.
+        let Some(bytes) = (unsafe { callback_bytes(context, message, length) }) else {
+            return;
+        };
+        bytes
+    };
+    handle_friend_request(context, key, message);
+}
+
+fn handle_friend_request(context: &CallbackContext, key: &[u8], message: &[u8]) {
+    let public_key = hex_upper(key);
+    let message = sanitize_untrusted_text(&String::from_utf8_lossy(message));
     log_network(
         &context.network_log_path,
         format!(
@@ -5568,7 +6483,7 @@ unsafe extern "C" fn on_friend_request(
 
 fn store_incoming_chat_message(
     context: &CallbackContext,
-    tox: *mut c_void,
+    tox: Option<ToxRef<'_>>,
     friend_number: u32,
     envelope: Option<MessageEnvelope>,
     legacy_text: Option<String>,
@@ -5963,7 +6878,7 @@ fn ensure_incoming_file_card(
 
 fn handle_file_card_packet(
     context: &CallbackContext,
-    tox: *mut c_void,
+    tox: Option<ToxRef<'_>>,
     friend_number: u32,
     bytes: &[u8],
 ) -> Result<(), String> {
@@ -6196,7 +7111,7 @@ fn reconcile_rejected_file_cards(
 
 fn handle_chat_protocol_packet(
     context: &CallbackContext,
-    tox: *mut c_void,
+    tox: Option<ToxRef<'_>>,
     friend_number: u32,
     bytes: &[u8],
     pq_protected: bool,
@@ -6324,13 +7239,12 @@ fn handle_chat_protocol_packet(
                 reaction.pq_required,
             )?;
             if status == ReactionAckStatus::Applied {
-                if let Ok(mut unread) = context.unread_state.lock() {
-                    unread.record_incoming_event(unread_target_key(
-                        friend_number,
-                        &friend_public_key,
-                    ));
+                if let Some(target) = bound_unread_target_key(&friend_public_key) {
+                    if let Ok(mut unread) = context.unread_state.lock() {
+                        unread.record_incoming_event(target);
+                    }
+                    persist_unread_state(&context.unread_state, &context.unread_state_path);
                 }
-                persist_unread_state(&context.unread_state, &context.unread_state_path);
                 bump_chat_view_revision(&context.history_path, friend_number, &friend_public_key);
                 if let Some(updates) = &context.updates {
                     updates.changed();
@@ -6386,12 +7300,23 @@ unsafe extern "C" fn on_friend_message(
     length: usize,
     user_data: *mut c_void,
 ) {
-    if message.is_null() || user_data.is_null() {
+    // SAFETY: Tox invokes registered callbacks synchronously with the context
+    // borrowed by ToxHandle::iterate.
+    let Some(context) = (unsafe { callback_context(user_data) }) else {
         return;
-    }
-    let raw_text = String::from_utf8_lossy(unsafe { std::slice::from_raw_parts(message, length) })
-        .into_owned();
-    let context = unsafe { &*(user_data as *const CallbackContext) };
+    };
+    // SAFETY: this pointer is the live Tox instance invoking the callback.
+    let tox = unsafe { ToxRef::from_callback(tox, context) };
+    // SAFETY: the native message buffer is readable for this callback.
+    let Some(message) = (unsafe { callback_bytes(context, message, length) }) else {
+        return;
+    };
+    handle_friend_message(context, tox, friend_number, message);
+}
+
+fn handle_friend_message(context: &CallbackContext, tox: Option<ToxRef<'_>>, friend_number: u32, message: &[u8]) {
+    let raw_text = String::from_utf8_lossy(message).into_owned();
+    let length = message.len();
     mark_friend_authorized(context, tox, friend_number);
     log_network(
         &context.network_log_path,
@@ -6438,34 +7363,32 @@ unsafe extern "C" fn on_friend_lossless_packet(
     length: usize,
     user_data: *mut c_void,
 ) {
-    if tox.is_null() || data.is_null() || user_data.is_null() {
+    // SAFETY: Tox invokes registered callbacks synchronously with the context
+    // borrowed by ToxHandle::iterate.
+    let Some(context) = (unsafe { callback_context(user_data) }) else {
         return;
-    }
-    unsafe {
-        on_friend_lossless_packet_with_connection_observation(
-            tox,
-            friend_number,
-            data,
-            length,
-            user_data,
-            friend_is_connected(tox, friend_number),
-        );
-    }
+    };
+    // SAFETY: this pointer is the live Tox instance invoking the callback.
+    let Some(tox) = (unsafe { ToxRef::from_callback(tox, context) }) else {
+        return;
+    };
+    // SAFETY: the native packet buffer is readable for this callback.
+    let Some(bytes) = (unsafe { callback_bytes(context, data, length) }) else {
+        return;
+    };
+    handle_friend_lossless_packet(
+        context, Some(tox), friend_number, bytes, friend_is_connected(tox, friend_number),
+    );
 }
 
-unsafe fn on_friend_lossless_packet_with_connection_observation(
-    tox: *mut c_void,
+fn handle_friend_lossless_packet(
+    context: &CallbackContext,
+    tox: Option<ToxRef<'_>>,
     friend_number: u32,
-    data: *const u8,
-    length: usize,
-    user_data: *mut c_void,
+    bytes: &[u8],
     peer_online: bool,
 ) {
-    if data.is_null() || user_data.is_null() {
-        return;
-    }
-    let context = unsafe { &*(user_data as *const CallbackContext) };
-    let bytes = unsafe { std::slice::from_raw_parts(data, length) };
+    let length = bytes.len();
     if file_card_protocol::is_packet(bytes) {
         mark_friend_authorized(context, tox, friend_number);
         if let Err(error) = handle_file_card_packet(context, tox, friend_number, bytes) {
@@ -6500,7 +7423,7 @@ unsafe fn on_friend_lossless_packet_with_connection_observation(
             &context.history_path,
             friend_number,
             &key,
-            &pq_tox_owner(tox),
+            &pq_tox_owner(tox.ok_or("FRIEND_NOT_FOUND")?),
         )?;
         let previous_status = context.pq.status(friend_number);
         let revision = context.pq.connection_revision(friend_number);
@@ -6547,31 +7470,7 @@ unsafe fn on_friend_lossless_packet_with_connection_observation(
                     &context.history_path,
                     &context.history_enabled,
                 );
-                increment_unread_friend(context, friend_number);
-            }
-            PqSessionEvent::OfferCollisionYielded => {
-                update_latest_pq_history_bound(
-                    &context.messages,
-                    friend_number,
-                    &friend_public_key,
-                    &status,
-                    "superseded",
-                );
-                append_pq_history_bound(
-                    &context.messages,
-                    friend_number,
-                    &friend_public_key,
-                    &status,
-                    "responder",
-                    "incoming_offer",
-                    false,
-                );
-                persist_tox_history(
-                    &context.messages,
-                    &context.history_path,
-                    &context.history_enabled,
-                );
-                increment_unread_friend(context, friend_number);
+                increment_unread_friend(context, friend_number, &friend_public_key);
             }
             PqSessionEvent::Active => {
                 if let Err(error) = record_pq_active_history_for_engine(
@@ -6605,23 +7504,7 @@ unsafe fn on_friend_lossless_packet_with_connection_observation(
                         &context.history_enabled,
                     );
                 }
-                increment_unread_friend(context, friend_number);
-            }
-            PqSessionEvent::Withdrawn => {
-                if update_latest_pq_history_bound(
-                    &context.messages,
-                    friend_number,
-                    &friend_public_key,
-                    &status,
-                    "withdrawn",
-                ) {
-                    persist_tox_history(
-                        &context.messages,
-                        &context.history_path,
-                        &context.history_enabled,
-                    );
-                }
-                increment_unread_friend(context, friend_number);
+                increment_unread_friend(context, friend_number, &friend_public_key);
             }
             PqSessionEvent::CloseRequested => {
                 append_pq_history_bound(
@@ -6638,7 +7521,7 @@ unsafe fn on_friend_lossless_packet_with_connection_observation(
                     &context.history_path,
                     &context.history_enabled,
                 );
-                increment_unread_friend(context, friend_number);
+                increment_unread_friend(context, friend_number, &friend_public_key);
             }
             PqSessionEvent::Closed => {
                 let updated = update_latest_pq_history_bound(
@@ -6718,10 +7601,6 @@ unsafe fn on_friend_lossless_packet_with_connection_observation(
                     true,
                 )
                 .is_ok(),
-                Ok(None) if !context.pq.is_v2(friend_number) => {
-                    store_incoming_chat_message(context, tox, friend_number, None, Some(text), true)
-                        .is_ok()
-                }
                 Ok(None) => false, // V2 requires a durable application message ID.
                 Err(error) => {
                     log_network(
@@ -6761,41 +7640,6 @@ unsafe fn on_friend_lossless_packet_with_connection_observation(
     } else if let Some(wire_id) = result.received_wire_id {
         context.pq.discard_received(friend_number, wire_id);
     }
-    if let Some(wire_id) = result
-        .acknowledged_wire_id
-        .filter(|_| !context.pq.is_v2(friend_number))
-    {
-        let local_id = context
-            .pq_receipts
-            .lock()
-            .ok()
-            .and_then(|mut receipts| receipts.remove(&(friend_number, wire_id)));
-        if let Some(local_id) = local_id {
-            if let Ok(mut messages) = context.messages.lock() {
-                if let Some(message) = messages.iter_mut().find(|message| message.id == local_id) {
-                    message.delivery = "delivered".to_string();
-                    message.delivered_at = Some(unix_timestamp());
-                }
-            }
-            persist_tox_history(
-                &context.messages,
-                &context.history_path,
-                &context.history_enabled,
-            );
-            let friend_public_key = tox_friend_public_key(tox, friend_number).unwrap_or_default();
-            let _ = context.chat_protocol.update_message_operation_delivery(
-                friend_number,
-                &friend_public_key,
-                &local_id,
-                "delivered",
-            );
-            drop_cached_message_if_inactive_evicted(
-                &context.messages,
-                &context.history_residency,
-                &local_id,
-            );
-        }
-    }
     log_network(
         &context.network_log_path,
         format!("PQ_PACKET friend={friend_number} bytes={length}"),
@@ -6808,10 +7652,17 @@ unsafe extern "C" fn on_friend_delivery_receipt(
     message_id: u32,
     user_data: *mut c_void,
 ) {
-    if user_data.is_null() {
+    // SAFETY: Tox invokes registered callbacks synchronously with the context
+    // borrowed by ToxHandle::iterate.
+    let Some(context) = (unsafe { callback_context(user_data) }) else {
         return;
-    }
-    let context = unsafe { &*(user_data as *const CallbackContext) };
+    };
+    // SAFETY: this pointer is the live Tox instance invoking the callback.
+    let tox = unsafe { ToxRef::from_callback(tox, context) };
+    handle_friend_delivery_receipt(context, tox, friend_number, message_id);
+}
+
+fn handle_friend_delivery_receipt(context: &CallbackContext, tox: Option<ToxRef<'_>>, friend_number: u32, message_id: u32) {
     let local_id = context
         .delivery_receipts
         .lock()
@@ -6998,11 +7849,20 @@ unsafe extern "C" fn on_friend_name(
     length: usize,
     user_data: *mut c_void,
 ) {
-    if name.is_null() || user_data.is_null() {
+    // SAFETY: Tox invokes registered callbacks synchronously with the context
+    // borrowed by ToxHandle::iterate.
+    let Some(context) = (unsafe { callback_context(user_data) }) else {
         return;
-    }
-    let bytes = unsafe { std::slice::from_raw_parts(name, length) };
-    let context = unsafe { &*(user_data as *const CallbackContext) };
+    };
+    // SAFETY: Tox lends the name bytes to this callback.
+    let Some(bytes) = (unsafe { callback_bytes(context, name, length) }) else {
+        return;
+    };
+    handle_friend_name(context, friend_number, bytes);
+}
+
+fn handle_friend_name(context: &CallbackContext, friend_number: u32, bytes: &[u8]) {
+    let length = bytes.len();
     log_network(
         &context.network_log_path,
         format!(
@@ -7018,20 +7878,27 @@ unsafe extern "C" fn on_friend_status(
     status: u8,
     user_data: *mut c_void,
 ) {
-    if user_data.is_null() {
+    // SAFETY: Tox invokes registered callbacks synchronously with the context
+    // borrowed by ToxHandle::iterate.
+    let Some(context) = (unsafe { callback_context(user_data) }) else {
         return;
-    }
-    let context = unsafe { &*(user_data as *const CallbackContext) };
+    };
+    // SAFETY: this pointer is the live Tox instance invoking the callback.
+    let tox = unsafe { ToxRef::from_callback(tox, context) };
+    handle_friend_status(context, tox, friend_number, status);
+}
+
+fn handle_friend_status(context: &CallbackContext, tox: Option<ToxRef<'_>>, friend_number: u32, status: u8) {
     log_network(
         &context.network_log_path,
         format!("FRIEND_STATUS friend={friend_number} status={status}"),
     );
-    if tox.is_null() || status > 2 {
+    let Some(tox) = tox.filter(|_| status <= 2) else {
         return;
-    }
+    };
     // Initial "online" is a real status packet as well. Reading the getter's
     // default zero cannot establish that this connection received a status.
-    mark_friend_authorized(context, tox, friend_number);
+    mark_friend_authorized(context, Some(tox), friend_number);
     let observed = (|| -> Result<(), String> {
         let _transaction = context
             .chat_transaction_gate
@@ -7042,7 +7909,7 @@ unsafe extern "C" fn on_friend_status(
         {
             return Ok(());
         }
-        let key = tox_friend_public_key(tox, friend_number).ok_or("FRIEND_NOT_FOUND")?;
+        let key = tox_friend_public_key(Some(tox), friend_number).ok_or("FRIEND_NOT_FOUND")?;
         // Preserve the actual authenticated status observation even if binding
         // needs a retry after a history/checkpoint error. Tox need not repeat
         // an unchanged USERSTATUS; losing this fact would fence PQ forever.
@@ -7083,11 +7950,20 @@ unsafe extern "C" fn on_friend_status_message(
     length: usize,
     user_data: *mut c_void,
 ) {
-    if message.is_null() || user_data.is_null() {
+    // SAFETY: Tox invokes registered callbacks synchronously with the context
+    // borrowed by ToxHandle::iterate.
+    let Some(context) = (unsafe { callback_context(user_data) }) else {
         return;
-    }
-    let bytes = unsafe { std::slice::from_raw_parts(message, length) };
-    let context = unsafe { &*(user_data as *const CallbackContext) };
+    };
+    // SAFETY: Tox lends the status-message bytes to this callback.
+    let Some(bytes) = (unsafe { callback_bytes(context, message, length) }) else {
+        return;
+    };
+    handle_friend_status_message(context, friend_number, bytes);
+}
+
+fn handle_friend_status_message(context: &CallbackContext, friend_number: u32, bytes: &[u8]) {
+    let length = bytes.len();
     log_network(
         &context.network_log_path,
         format!(
@@ -7218,7 +8094,7 @@ fn profile_media_source(path: &Path) -> Option<String> {
         _ => "image/png",
     };
     let encoded = base64_basic(&bytes);
-    wipe_sensitive_bytes(&mut bytes);
+    wipe_secret_bytes(&mut bytes);
     Some(format!("data:{mime};base64,{encoded}"))
 }
 
@@ -7286,16 +8162,127 @@ fn current_self_avatar_matches(avatars_dir: &PathBuf, bytes: &[u8]) -> bool {
         .unwrap_or(false)
 }
 
-fn log_transfer(path: &PathBuf, event: impl AsRef<str>) {
-    if path.as_os_str().is_empty() {
+// A queued log owns the producer's immutable epoch, never a freshly looked-up
+// path generation. Ordinary close preserves accepted logs; destruction retires
+// their epochs under the same gate used for append and rotation.
+#[derive(Clone)]
+struct ProfileLogPath {
+    epoch: Arc<ProfileLogEpoch>,
+}
+
+struct ProfileLogEpoch {
+    path: PathBuf,
+    physical_profile_path: PathBuf,
+    gate: Arc<Mutex<()>>,
+    retired: AtomicBool,
+}
+
+#[derive(Default)]
+struct ProfileLogRegistry {
+    gates: HashMap<PathBuf, std::sync::Weak<Mutex<()>>>,
+    epochs: Vec<std::sync::Weak<ProfileLogEpoch>>,
+}
+
+static PROFILE_LOG_REGISTRY: OnceLock<Mutex<ProfileLogRegistry>> = OnceLock::new();
+
+impl ProfileLogPath {
+    fn new(path: PathBuf, physical_profile_path: PathBuf) -> Result<Self, String> {
+        let registry = PROFILE_LOG_REGISTRY.get_or_init(|| Mutex::new(Default::default()));
+        let gate = {
+            let mut registry = registry
+                .lock()
+                .map_err(|_| "PROFILE_LOG_REGISTRY_UNAVAILABLE")?;
+            registry.gates.retain(|_, gate| gate.strong_count() > 0);
+            registry.epochs.retain(|epoch| epoch.strong_count() > 0);
+            if let Some(gate) = registry.gates.get(&path).and_then(std::sync::Weak::upgrade) {
+                gate
+            } else {
+                let gate = Arc::new(Mutex::new(()));
+                registry.gates.insert(path.clone(), Arc::downgrade(&gate));
+                gate
+            }
+        };
+        let _guard = gate.lock().map_err(|_| "PROFILE_LOG_PATH_UNAVAILABLE")?;
+        let epoch = Arc::new(ProfileLogEpoch {
+            path,
+            physical_profile_path,
+            gate: Arc::clone(&gate),
+            retired: AtomicBool::new(false),
+        });
+        // Never wait for a path gate while holding the registry.
+        registry
+            .lock()
+            .map_err(|_| "PROFILE_LOG_REGISTRY_UNAVAILABLE")?
+            .epochs
+            .push(Arc::downgrade(&epoch));
+        Ok(Self { epoch })
+    }
+
+    fn disabled() -> Self {
+        Self {
+            epoch: Arc::new(ProfileLogEpoch {
+                path: PathBuf::new(),
+                physical_profile_path: PathBuf::new(),
+                gate: Arc::new(Mutex::new(())),
+                retired: AtomicBool::new(true),
+            }),
+        }
+    }
+
+    fn path(&self) -> &Path {
+        &self.epoch.path
+    }
+
+    fn retire(&self) -> Result<(), String> {
+        let _guard = self
+            .epoch
+            .gate
+            .lock()
+            .map_err(|_| "PROFILE_LOG_PATH_UNAVAILABLE")?;
+        self.epoch.retired.store(true, Ordering::Release);
+        Ok(())
+    }
+}
+
+// Caller owns the profile lifecycle through physical removal (desktop route
+// gate, or exclusive Web runtime). Snapshot all accepted producer epochs,
+// including ordinary-close backlogs. No registry lock spans a path wait or I/O.
+fn retire_profile_logs_under(directory: &Path) -> Result<(), String> {
+    let Some(registry) = PROFILE_LOG_REGISTRY.get() else {
+        return Ok(());
+    };
+    let epochs = {
+        let mut registry = registry
+            .lock()
+            .map_err(|_| "PROFILE_LOG_REGISTRY_UNAVAILABLE")?;
+        registry.gates.retain(|_, gate| gate.strong_count() > 0);
+        registry.epochs.retain(|epoch| epoch.strong_count() > 0);
+        registry
+            .epochs
+            .iter()
+            .filter_map(std::sync::Weak::upgrade)
+            .filter(|epoch| {
+                epoch.path.starts_with(directory)
+                    || epoch.physical_profile_path.starts_with(directory)
+            })
+            .collect::<Vec<_>>()
+    };
+    for epoch in epochs {
+        ProfileLogPath { epoch }.retire()?;
+    }
+    Ok(())
+}
+
+fn log_transfer(path: &ProfileLogPath, event: impl AsRef<str>) {
+    if path.epoch.retired.load(Ordering::Acquire) {
         return;
     }
     let line = format!("{} {}\n", unix_timestamp(), event.as_ref());
     queue_log_write(path, line.into_bytes(), false);
 }
 
-fn log_network(path: &PathBuf, event: impl AsRef<str>) {
-    if path.as_os_str().is_empty() {
+fn log_network(path: &ProfileLogPath, event: impl AsRef<str>) {
+    if path.epoch.retired.load(Ordering::Acquire) {
         return;
     }
     let line = format!("{} {}\n", unix_timestamp(), event.as_ref());
@@ -7303,19 +8290,59 @@ fn log_network(path: &PathBuf, event: impl AsRef<str>) {
 }
 
 struct LogWriteRequest {
-    path: PathBuf,
+    target: ProfileLogPath,
     bytes: Vec<u8>,
     rotate: bool,
 }
 
 static LOG_WRITE_SENDER: OnceLock<SyncSender<LogWriteRequest>> = OnceLock::new();
 
-fn queue_log_write(path: &Path, bytes: Vec<u8>, rotate: bool) {
+fn queue_log_write(path: &ProfileLogPath, bytes: Vec<u8>, rotate: bool) {
     let _ = log_write_sender().try_send(LogWriteRequest {
-        path: path.to_path_buf(),
+        target: path.clone(),
         bytes,
         rotate,
     });
+}
+
+fn append_profile_log(request: LogWriteRequest) {
+    let epoch = &request.target.epoch;
+    let Ok(_guard) = epoch.gate.lock() else {
+        return;
+    };
+    if epoch.retired.load(Ordering::Acquire) {
+        return;
+    }
+    let path = &epoch.path;
+    let bytes = request.bytes;
+    let rotate = request.rotate;
+    const MAX_LOG_SIZE: u64 = 5 * 1024 * 1024;
+    if kai::managed_volume(path).is_some() {
+        let mut current = profiles::read_file(path).unwrap_or_default();
+        if rotate && current.len().saturating_add(bytes.len()) > MAX_LOG_SIZE as usize {
+            let previous = path.with_extension("log.1");
+            let _ = profiles::remove_file(&previous);
+            let _ = profiles::rename(path, &previous);
+            current.clear();
+        }
+        current.extend_from_slice(&bytes);
+        let _ = profiles::write_file(path, &current);
+        return;
+    }
+    if rotate
+        && fs::metadata(path)
+            .map(|metadata| metadata.len().saturating_add(bytes.len() as u64) > MAX_LOG_SIZE)
+            .unwrap_or(false)
+    {
+        let previous = path.with_extension("log.1");
+        let _ = fs::remove_file(&previous);
+        let _ = fs::rename(path, previous);
+    }
+    let _ = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .and_then(|mut file| file.write_all(&bytes));
 }
 
 fn log_write_sender() -> &'static SyncSender<LogWriteRequest> {
@@ -7323,8 +8350,8 @@ fn log_write_sender() -> &'static SyncSender<LogWriteRequest> {
         let (sender, receiver) = mpsc::sync_channel::<LogWriteRequest>(2048);
         thread::spawn(move || {
             while let Ok(first) = receiver.recv() {
-                let mut pending = HashMap::<PathBuf, (Vec<u8>, bool)>::new();
-                pending.insert(first.path, (first.bytes, first.rotate));
+                let mut pending = HashMap::<PathBuf, Vec<LogWriteRequest>>::new();
+                pending.insert(first.target.path().to_path_buf(), vec![first]);
                 let deadline = Instant::now() + Duration::from_millis(500);
                 loop {
                     let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
@@ -7332,46 +8359,28 @@ fn log_write_sender() -> &'static SyncSender<LogWriteRequest> {
                     };
                     match receiver.recv_timeout(remaining) {
                         Ok(request) => {
-                            let entry = pending.entry(request.path).or_default();
-                            entry.0.extend_from_slice(&request.bytes);
-                            entry.1 |= request.rotate;
+                            let chunks = pending
+                                .entry(request.target.path().to_path_buf())
+                                .or_default();
+                            // Preserve path FIFO across producer epochs; only adjacent
+                            // chunks belonging to the same producer may coalesce.
+                            if let Some(last) = chunks.last_mut().filter(|last| {
+                                Arc::ptr_eq(&last.target.epoch, &request.target.epoch)
+                            }) {
+                                last.bytes.extend_from_slice(&request.bytes);
+                                last.rotate |= request.rotate;
+                            } else {
+                                chunks.push(request);
+                            }
                         }
                         Err(RecvTimeoutError::Timeout) => break,
                         Err(RecvTimeoutError::Disconnected) => break,
                     }
                 }
-                for (path, (bytes, rotate)) in pending {
-                    const MAX_LOG_SIZE: u64 = 5 * 1024 * 1024;
-                    if kai::managed_volume(&path).is_some() {
-                        let mut current = profiles::read_file(&path).unwrap_or_default();
-                        if rotate
-                            && current.len().saturating_add(bytes.len()) > MAX_LOG_SIZE as usize
-                        {
-                            let previous = path.with_extension("log.1");
-                            let _ = profiles::remove_file(&previous);
-                            let _ = profiles::rename(&path, &previous);
-                            current.clear();
-                        }
-                        current.extend_from_slice(&bytes);
-                        let _ = profiles::write_file(&path, &current);
-                        continue;
+                for chunks in pending.into_values() {
+                    for request in chunks {
+                        append_profile_log(request);
                     }
-                    if rotate
-                        && fs::metadata(&path)
-                            .map(|metadata| {
-                                metadata.len().saturating_add(bytes.len() as u64) > MAX_LOG_SIZE
-                            })
-                            .unwrap_or(false)
-                    {
-                        let previous = path.with_extension("log.1");
-                        let _ = fs::remove_file(&previous);
-                        let _ = fs::rename(&path, previous);
-                    }
-                    let _ = OpenOptions::new()
-                        .create(true)
-                        .append(true)
-                        .open(&path)
-                        .and_then(|mut file| file.write_all(&bytes));
                 }
             }
         });
@@ -7388,23 +8397,34 @@ fn event_fingerprint(bytes: &[u8]) -> String {
     format!("{hash:016X}")
 }
 
-#[inline]
-unsafe fn callback_file_control(
-    tox: *mut c_void,
+fn callback_transport_available(tox: Option<ToxRef<'_>>) -> bool {
+    #[cfg(test)]
+    if native_file_callback_pause_tests::with_io(|_| ()).is_some() {
+        return true;
+    }
+    tox.is_some()
+}
+
+fn callback_file_control(
+    tox: Option<ToxRef<'_>>,
     friend_number: u32,
     file_number: u32,
     control: i32,
-    error: *mut i32,
+    error: &mut i32,
 ) -> bool {
     #[cfg(test)]
     if let Some(result) = native_file_callback_pause_tests::with_io(|io| {
         io.controls.push((friend_number, file_number, control));
-        unsafe { *error = 0 };
+        *error = 0;
         true
     }) {
         return result;
     }
-    unsafe { tox_file_control(tox, friend_number, file_number, control, error) }
+    let Some(tox) = tox else {
+        *error = -1;
+        return false;
+    };
+    tox.file_control(friend_number, file_number, control, error)
 }
 
 #[inline]
@@ -7424,41 +8444,27 @@ fn callback_read_file_range(path: &Path, position: u64, length: usize) -> Result
     read_file_range(path, position, length)
 }
 
-#[inline]
-unsafe fn callback_file_send_chunk(
-    tox: *mut c_void,
+fn callback_file_send_chunk(
+    tox: Option<ToxRef<'_>>,
     friend_number: u32,
     file_number: u32,
     position: u64,
-    data: *const u8,
-    length: usize,
-    error: *mut i32,
+    data: &[u8],
+    error: &mut i32,
 ) -> bool {
     #[cfg(test)]
     if let Some(result) = native_file_callback_pause_tests::with_io(|io| {
-        let bytes = if length == 0 {
-            Vec::new()
-        } else {
-            unsafe { std::slice::from_raw_parts(data, length).to_vec() }
-        };
-        io.chunks
-            .push((friend_number, file_number, position, bytes));
-        unsafe { *error = 0 };
+        io.chunks.push((friend_number, file_number, position, data.to_vec()));
+        *error = 0;
         true
     }) {
         return result;
     }
-    unsafe {
-        tox_file_send_chunk(
-            tox,
-            friend_number,
-            file_number,
-            position,
-            data,
-            length,
-            error,
-        )
-    }
+    let Some(tox) = tox else {
+        *error = -1;
+        return false;
+    };
+    tox.file_send_chunk(friend_number, file_number, position, data, error)
 }
 
 unsafe extern "C" fn on_file_chunk_request(
@@ -7469,10 +8475,19 @@ unsafe extern "C" fn on_file_chunk_request(
     length: usize,
     user_data: *mut c_void,
 ) {
-    if tox.is_null() || user_data.is_null() {
+    // SAFETY: Tox invokes registered callbacks synchronously with the context
+    // borrowed by ToxHandle::iterate.
+    let Some(context) = (unsafe { callback_context(user_data) }) else {
         return;
-    }
-    let context = unsafe { &*(user_data as *const CallbackContext) };
+    };
+    // SAFETY: this pointer is the live Tox instance invoking the callback.
+    let Some(tox) = (unsafe { ToxRef::from_callback(tox, context) }) else {
+        return;
+    };
+    handle_file_chunk_request(context, Some(tox), friend_number, file_number, position, length);
+}
+
+fn handle_file_chunk_request(context: &CallbackContext, tox: Option<ToxRef<'_>>, friend_number: u32, file_number: u32, position: u64, length: usize) {
     let transfer = context
         .outgoing_files
         .lock()
@@ -7512,17 +8527,22 @@ unsafe extern "C" fn on_file_chunk_request(
         let handled = context
             .web_file_bridge
             .as_ref()
-            .map(|bridge| bridge.on_outgoing_request(transfer_id, position, length))
+            .map(|bridge| {
+                bridge.on_outgoing_request_at_generation(
+                    transfer_id,
+                    position,
+                    length,
+                    context.handle_generation.load(Ordering::SeqCst),
+                )
+            })
             .unwrap_or(false);
         if length > 0 {
             // The workspace transfer worker supplies this requested range from
             // the committed server source. Callbacks only publish demand; they
             // never read the filesystem or wait for the storage worker.
-            if !handled && !tox.is_null() {
+            if !handled && callback_transport_available(tox) {
                 let mut error = 0_i32;
-                unsafe {
-                    let _ = callback_file_control(tox, friend_number, file_number, 2, &mut error);
-                }
+                let _ = callback_file_control(tox, friend_number, file_number, 2, &mut error);
             }
             return;
         }
@@ -7611,21 +8631,7 @@ unsafe extern "C" fn on_file_chunk_request(
         data
     };
     let mut error = 0_i32;
-    unsafe {
-        let _ = callback_file_send_chunk(
-            tox,
-            friend_number,
-            file_number,
-            position,
-            if data.is_empty() {
-                std::ptr::null()
-            } else {
-                data.as_ptr()
-            },
-            data.len(),
-            &mut error,
-        );
-    }
+    let _ = callback_file_send_chunk(tox, friend_number, file_number, position, &data, &mut error);
     if error != 0 {
         log_transfer(&context.transfer_log_path, format!("SEND_CHUNK error={error} friend={friend_number} file={file_number} pos={position} len={length}"));
         return;
@@ -7789,20 +8795,23 @@ mod native_file_callback_pause_tests {
                 outgoing_files: Arc::new(Mutex::new(HashMap::from([((FRIEND, FILE), transfer)]))),
                 downloads_dir: root.0.join("downloads"),
                 avatars_dir: root.0.join("avatars"),
-                transfer_log_path: root.0.join("transfer.log"),
-                network_log_path: root.0.join("network.log"),
+                transfer_log_path: ProfileLogPath::new(root.0.join("transfer.log"), root.0.clone())
+                    .unwrap(),
+                network_log_path: ProfileLogPath::new(root.0.join("network.log"), root.0.clone())
+                    .unwrap(),
                 friend_cache: Arc::new(Mutex::new(HashMap::new())),
                 friend_cache_path: root.0.join("friends.json"),
                 pq: Arc::new(PqEngine::new(&root.0).unwrap()),
                 chat_protocol: Arc::new(ChatProtocolEngine::new(&root.0).unwrap()),
                 file_card_protocol: Arc::new(FileCardEngine::new(&root.0).unwrap()),
-                pq_receipts: Arc::new(Mutex::new(HashMap::new())),
                 file_receive_settings: Arc::new(Mutex::new(FileReceiveSettings::default())),
                 unread_state: Arc::new(Mutex::new(UnreadState::default())),
                 unread_state_path: root.0.join("unread.json"),
                 friend_message_ready_at: Arc::new(Mutex::new(HashMap::new())),
                 friend_status_received: Arc::new(Mutex::new(HashMap::new())),
                 network_enabled: Arc::new(AtomicBool::new(false)),
+                #[cfg(feature = "web-core")]
+                handle_generation: Arc::new(AtomicU64::new(1)),
                 chat_transaction_gate: Arc::new(Mutex::new(())),
                 chat_transport_ready: Arc::new(AtomicBool::new(false)),
                 #[cfg(feature = "web-core")]
@@ -7834,12 +8843,7 @@ mod native_file_callback_pause_tests {
         }
 
         fn peer_control(&mut self, control: i32) {
-            // Both callbacks' native calls are intercepted while IoGuard is alive.
-            let tox = std::ptr::NonNull::<u8>::dangling()
-                .as_ptr()
-                .cast::<c_void>();
-            let user_data = (&mut self.context as *mut CallbackContext).cast::<c_void>();
-            unsafe { on_file_recv_control(tox, FRIEND, FILE, control, user_data) };
+            handle_file_recv_control(&self.context, None, FRIEND, FILE, control);
         }
 
         fn chunk(&mut self) {
@@ -7847,11 +8851,7 @@ mod native_file_callback_pause_tests {
         }
 
         fn chunk_at(&mut self, position: u64, length: usize) {
-            let tox = std::ptr::NonNull::<u8>::dangling()
-                .as_ptr()
-                .cast::<c_void>();
-            let user_data = (&mut self.context as *mut CallbackContext).cast::<c_void>();
-            unsafe { on_file_chunk_request(tox, FRIEND, FILE, position, length, user_data) };
+            handle_file_chunk_request(&self.context, None, FRIEND, FILE, position, length);
         }
 
         fn transfer(&self) -> OutgoingFile {
@@ -7964,21 +8964,7 @@ mod native_file_callback_pause_tests {
         }
 
         fn receive(fixture: &mut Fixture, position: u64, bytes: &[u8]) {
-            let tox = std::ptr::NonNull::<u8>::dangling()
-                .as_ptr()
-                .cast::<c_void>();
-            let user_data = (&mut fixture.context as *mut CallbackContext).cast::<c_void>();
-            unsafe {
-                on_file_recv_chunk(
-                    tox,
-                    FRIEND,
-                    FILE,
-                    position,
-                    bytes.as_ptr(),
-                    bytes.len(),
-                    user_data,
-                )
-            };
+            handle_file_recv_chunk(&fixture.context, None, FRIEND, FILE, position, bytes);
         }
 
         fn one_dequeue(fixture: &mut Fixture, io: &IoGuard) {
@@ -8199,6 +9185,41 @@ mod native_file_callback_pause_tests {
             assert_eq!(profiles::read_file(&partial).unwrap(), b"abcdefgh");
             one_dequeue(&mut fixture, &io);
             persisted(&fixture, "complete");
+        }
+
+        #[test]
+        fn late_native_receive_chunk_preserves_local_pause_until_resume() {
+            let _io = IoGuard::new();
+            let (mut fixture, _) = incoming(8, false);
+            let partial = {
+                let mut files = fixture.context.incoming_files.lock().unwrap();
+                let transfer = files.get_mut(&(FRIEND, FILE)).unwrap();
+                transfer.set_local_paused(true, Instant::now());
+                transfer.path.clone()
+            };
+            set_attachment_transfer_state(&fixture.context.messages, MESSAGE, "paused");
+
+            receive(&mut fixture, 0, b"abcd");
+            let paused = fixture.attachment();
+            assert_eq!(paused.transferred, 4);
+            assert_eq!(paused.transfer_state, "paused");
+            assert_eq!(paused.speed_bytes_per_sec, 0);
+            assert_eq!(paused.eta_seconds, None);
+            assert_eq!(profiles::read_file(&partial).unwrap(), b"abcd");
+
+            fixture
+                .context
+                .incoming_files
+                .lock()
+                .unwrap()
+                .get_mut(&(FRIEND, FILE))
+                .unwrap()
+                .set_local_paused(false, Instant::now());
+            receive(&mut fixture, 4, b"efgh");
+            let resumed = fixture.attachment();
+            assert_eq!(resumed.transferred, 8);
+            assert_eq!(resumed.transfer_state, "receiving");
+            assert_eq!(profiles::read_file(&partial).unwrap(), b"abcdefgh");
         }
 
         #[test]
@@ -8723,10 +9744,28 @@ unsafe extern "C" fn on_file_recv(
     filename_length: usize,
     user_data: *mut c_void,
 ) {
-    if tox.is_null() || user_data.is_null() {
+    // SAFETY: Tox invokes registered callbacks synchronously with the context
+    // borrowed by ToxHandle::iterate.
+    let Some(context) = (unsafe { callback_context(user_data) }) else {
         return;
-    }
-    let context = unsafe { &*(user_data as *const CallbackContext) };
+    };
+    // SAFETY: this pointer is the live Tox instance invoking the callback.
+    let Some(tox) = (unsafe { ToxRef::from_callback(tox, context) }) else {
+        return;
+    };
+    let filename = if filename.is_null() {
+        b"file"
+    } else {
+        // SAFETY: Tox lends the filename bytes to this callback.
+        let Some(bytes) = (unsafe { callback_bytes(context, filename, filename_length) }) else {
+            return;
+        };
+        bytes
+    };
+    handle_file_recv(context, tox, friend_number, file_number, kind, file_size, filename);
+}
+
+fn handle_file_recv(context: &CallbackContext, tox: ToxRef<'_>, friend_number: u32, file_number: u32, kind: u32, file_size: u64, filename: &[u8]) {
     let is_avatar = kind == 1;
     // qTox uses the raw 32-byte avatar hash as the filename.  It is binary
     // data, not a Windows-safe UTF-8 path, so never use it as a local name.
@@ -8734,42 +9773,23 @@ unsafe extern "C" fn on_file_recv(
     let name = if is_avatar {
         "avatar.png".to_string()
     } else {
-        let received_name = if filename.is_null() {
-            "file".to_string()
-        } else {
-            String::from_utf8_lossy(unsafe {
-                std::slice::from_raw_parts(filename, filename_length)
-            })
-            .into_owned()
-        };
-        safe_file_name(&received_name)
+        safe_file_name(&String::from_utf8_lossy(filename))
     };
     let image = is_image_name(&name);
-    let friend_public_key = tox_friend_public_key(tox, friend_number).unwrap_or_default();
-    let protocol_binding = if is_avatar {
+    let friend_public_key = tox_friend_public_key(Some(tox), friend_number).unwrap_or_default();
+    let native_file_id = if is_avatar {
         None
     } else {
-        let mut transfer_id = [0_u8; 32];
-        let mut file_id_error = 0_i32;
-        let has_file_id = unsafe {
-            tox_file_get_file_id(
-                tox,
-                friend_number,
-                file_number,
-                transfer_id.as_mut_ptr(),
-                &mut file_id_error,
-            )
-        };
-        if has_file_id && file_id_error == 0 {
-            context.file_card_protocol.binding_by_transfer_id(
-                friend_number,
-                &friend_public_key,
-                transfer_id,
-            )
-        } else {
-            None
-        }
+        let mut error = 0;
+        tox.file_id(friend_number, file_number, &mut error).filter(|_| error == 0)
     };
+    let protocol_binding = native_file_id.and_then(|transfer_id| {
+        context.file_card_protocol.binding_by_transfer_id(
+            friend_number,
+            &friend_public_key,
+            transfer_id,
+        )
+    });
     if let Some(binding) = protocol_binding.as_ref() {
         let valid = binding.direction == FileCardDirection::Incoming
             && binding.filename == name
@@ -8777,9 +9797,7 @@ unsafe extern "C" fn on_file_recv(
             && !binding.pq_required;
         if !valid {
             let mut error = 0_i32;
-            unsafe {
-                let _ = tox_file_control(tox, friend_number, file_number, 2, &mut error);
-            }
+            let _ = tox.file_control(friend_number, file_number, 2, &mut error);
             set_attachment_transfer_error(
                 &context.messages,
                 &binding.message_id,
@@ -8794,9 +9812,7 @@ unsafe extern "C" fn on_file_recv(
         }
         if ensure_incoming_file_card(context, binding).is_err() {
             let mut error = 0_i32;
-            unsafe {
-                let _ = tox_file_control(tox, friend_number, file_number, 2, &mut error);
-            }
+            let _ = tox.file_control(friend_number, file_number, 2, &mut error);
             return;
         }
     }
@@ -8807,9 +9823,7 @@ unsafe extern "C" fn on_file_recv(
         .unwrap_or_else(|_| FileReceiveSettings::blocked());
     if !is_avatar && file_size > MAX_CHAT_FILE_BYTES {
         let mut error = 0_i32;
-        unsafe {
-            let _ = tox_file_control(tox, friend_number, file_number, 2, &mut error);
-        }
+        let _ = tox.file_control(friend_number, file_number, 2, &mut error);
         log_transfer(
             &context.transfer_log_path,
             format!("RECV_REJECTED_TOO_LARGE friend={friend_number} file={file_number} size={file_size} limit={MAX_CHAT_FILE_BYTES} error={error}"),
@@ -8818,9 +9832,7 @@ unsafe extern "C" fn on_file_recv(
     }
     if !is_avatar && settings.deny_all {
         let mut error = 0_i32;
-        unsafe {
-            let _ = tox_file_control(tox, friend_number, file_number, 2, &mut error);
-        }
+        let _ = tox.file_control(friend_number, file_number, 2, &mut error);
         if let Some(binding) = protocol_binding.as_ref() {
             set_attachment_transfer_cancelled(
                 &context.messages,
@@ -8851,6 +9863,9 @@ unsafe extern "C" fn on_file_recv(
             } else {
                 "application/octet-stream".to_string()
             };
+            // The callback still owns this native handle through tox_iterate.
+            // Capture its actual generation here, never at a later browser ACK.
+            let native_generation = context.handle_generation.load(Ordering::SeqCst);
             let transfer_id = match bridge.offer_incoming(
                 profile_id,
                 friend_number,
@@ -8863,12 +9878,27 @@ unsafe extern "C" fn on_file_recv(
                 Ok(value) => value,
                 Err(_) => {
                     let mut error = 0_i32;
-                    unsafe {
-                        let _ = tox_file_control(tox, friend_number, file_number, 2, &mut error);
-                    }
+                    let _ = tox.file_control(friend_number, file_number, 2, &mut error);
                     return;
                 }
             };
+            if let Err(error) = bridge.bind_native_generation(&transfer_id, native_generation) {
+                // Keep the local offer visible/durable. Missing provenance
+                // remains wire-unavailable in the bridge; never adopt a new handle.
+                log_transfer(
+                    &context.transfer_log_path,
+                    format!("WEB_RECV_GENERATION_BIND_FAILED transfer={transfer_id} error={error}"),
+                );
+            } else if let Some(file_id) = native_file_id {
+                let local_address = tox.address();
+                let _ = bridge.bind_native_transfer_identity(
+                    &transfer_id,
+                    native_generation,
+                    file_id,
+                    hex_upper(&local_address[..32]),
+                    friend_public_key.clone(),
+                );
+            }
             if protocol_binding.is_none() {
                 if let Ok(mut messages) = context.messages.lock() {
                     messages.push(ToxMessage {
@@ -9108,9 +10138,7 @@ unsafe extern "C" fn on_file_recv(
     }
     if start_now {
         let mut error = 0_i32;
-        unsafe {
-            let _ = tox_file_control(tox, friend_number, file_number, 0, &mut error);
-        }
+        let _ = tox.file_control(friend_number, file_number, 0, &mut error);
         if error != 0 && error != 4 {
             if let Ok(mut files) = context.incoming_files.lock() {
                 if let Some(file) = files.get_mut(&(friend_number, file_number)) {
@@ -9213,13 +10241,14 @@ fn cancel_incoming_file_cards(messages: &Mutex<Vec<ToxMessage>>) -> Vec<(u32, St
 
 // The caller owns the native handle. Applying the policy and cancelling all
 // in-flight receives therefore cannot race a chunk, EOF or peer RESUME callback.
-fn cancel_incoming_receives_for_policy(state: &ToxState, tox: *mut c_void) -> Result<bool, String> {
+fn cancel_incoming_receives_for_policy(state: &ToxState, tox: Option<ToxRef<'_>>) -> Result<bool, String> {
+    let tox = tox.filter(|_| local_transport_ready(state));
     let incoming = take_incoming_chat_files(&state.incoming_files)?;
     let mut changed = !incoming.is_empty();
     for ((friend_number, file_number), transfer) in incoming {
-        if !tox.is_null() {
+        if let Some(tox) = tox {
             let mut error = 0_i32;
-            unsafe { tox_file_control(tox, friend_number, file_number, 2, &mut error) };
+            tox.file_control(friend_number, file_number, 2, &mut error);
         }
         let _ = profiles::remove_file(&transfer.path);
     }
@@ -9228,7 +10257,11 @@ fn cancel_incoming_receives_for_policy(state: &ToxState, tox: *mut c_void) -> Re
         state.web_profile_id.as_deref(),
         state.web_file_bridge.as_ref(),
     ) {
-        changed |= bridge.cancel_incoming_for_policy(profile_id, tox)?;
+        changed |= bridge.cancel_incoming_for_policy_at_generation(
+            profile_id,
+            tox,
+            state.handle_generation.load(Ordering::SeqCst),
+        )?;
     }
     let cancelled = cancel_incoming_file_cards(&state.messages);
     changed |= !cancelled.is_empty();
@@ -9263,10 +10296,7 @@ fn set_file_receive_settings_for_state(
         .file_receive_settings
         .lock()
         .map_err(|_| "FILE_SETTINGS_UNAVAILABLE".to_string())? = settings.clone();
-    let tox = handle
-        .as_ref()
-        .map(|handle| handle.instance.as_ptr())
-        .unwrap_or(std::ptr::null_mut());
+    let tox = handle.as_ref().map(ToxHandle::native);
     if settings.deny_all {
         cancel_incoming_receives_for_policy(state, tox)?;
     } else {
@@ -9275,7 +10305,7 @@ fn set_file_receive_settings_for_state(
     Ok(settings)
 }
 
-fn resume_next_queued_incoming(tox: *mut c_void, context: &CallbackContext) {
+fn resume_next_queued_incoming(tox: Option<ToxRef<'_>>, context: &CallbackContext) {
     resume_next_queued_incoming_with(
         tox,
         &context.file_receive_settings,
@@ -9288,7 +10318,10 @@ fn resume_next_queued_incoming(tox: *mut c_void, context: &CallbackContext) {
     );
 }
 
-fn resume_next_queued_incoming_for_state(tox: *mut c_void, state: &ToxState) {
+fn resume_next_queued_incoming_for_state(tox: Option<ToxRef<'_>>, state: &ToxState) {
+    if !local_transport_ready(state) {
+        return;
+    }
     resume_next_queued_incoming_with(
         tox,
         &state.file_receive_settings,
@@ -9303,16 +10336,16 @@ fn resume_next_queued_incoming_for_state(tox: *mut c_void, state: &ToxState) {
 
 #[allow(clippy::too_many_arguments)]
 fn resume_next_queued_incoming_with(
-    tox: *mut c_void,
+    tox: Option<ToxRef<'_>>,
     file_receive_settings: &Arc<Mutex<FileReceiveSettings>>,
     incoming_files: &Arc<Mutex<HashMap<(u32, u32), IncomingFile>>>,
     messages: &Arc<Mutex<Vec<ToxMessage>>>,
     history_path: &PathBuf,
     history_enabled: &Arc<AtomicBool>,
-    transfer_log_path: &PathBuf,
+    transfer_log_path: &ProfileLogPath,
     updates: Option<&ProfileUpdateEmitter>,
 ) {
-    if tox.is_null() {
+    if !callback_transport_available(tox) {
         return;
     }
     let Ok(settings) = file_receive_settings.lock() else {
@@ -9336,9 +10369,7 @@ fn resume_next_queued_incoming_with(
         return;
     };
     let mut error = 0_i32;
-    unsafe {
-        let _ = callback_file_control(tox, friend_number, file_number, 0, &mut error);
-    }
+    let _ = callback_file_control(tox, friend_number, file_number, 0, &mut error);
     let resumed = error == 0 || error == 4;
     if resumed {
         if let Ok(mut files) = incoming_files.lock() {
@@ -9366,10 +10397,22 @@ unsafe extern "C" fn on_file_recv_control(
     control: i32,
     user_data: *mut c_void,
 ) {
-    if tox.is_null() || user_data.is_null() || !(0..=2).contains(&control) {
+    // SAFETY: Tox invokes registered callbacks synchronously with the context
+    // borrowed by ToxHandle::iterate.
+    let Some(context) = (unsafe { callback_context(user_data) }) else {
+        return;
+    };
+    // SAFETY: this pointer is the live Tox instance invoking the callback.
+    let Some(tox) = (unsafe { ToxRef::from_callback(tox, context) }) else {
+        return;
+    };
+    handle_file_recv_control(context, Some(tox), friend_number, file_number, control);
+}
+
+fn handle_file_recv_control(context: &CallbackContext, tox: Option<ToxRef<'_>>, friend_number: u32, file_number: u32, control: i32) {
+    if !(0..=2).contains(&control) {
         return;
     }
-    let context = unsafe { &*(user_data as *const CallbackContext) };
 
     #[cfg(feature = "web-core")]
     let web_update = context
@@ -9377,7 +10420,13 @@ unsafe extern "C" fn on_file_recv_control(
         .as_deref()
         .zip(context.web_file_bridge.as_ref())
         .and_then(|(profile_id, bridge)| {
-            bridge.on_native_control(profile_id, friend_number, file_number, control as u32)
+            bridge.on_native_control_at_generation(
+                profile_id,
+                friend_number,
+                file_number,
+                control as u32,
+                context.handle_generation.load(Ordering::SeqCst),
+            )
         });
     #[cfg(feature = "web-core")]
     let blocked_web_resume = control == 0
@@ -9421,9 +10470,7 @@ unsafe extern "C" fn on_file_recv_control(
         // toxcore's local pause bit. Reassert it when peer acceptance arrives.
         // Keep the Web workspace's existing pause/queue enforcement as well.
         let mut error = 0_i32;
-        unsafe {
-            let _ = callback_file_control(tox, friend_number, file_number, 1, &mut error);
-        }
+        let _ = callback_file_control(tox, friend_number, file_number, 1, &mut error);
     }
 
     if control == 2 {
@@ -9549,20 +10596,39 @@ unsafe extern "C" fn on_file_recv_chunk(
     length: usize,
     user_data: *mut c_void,
 ) {
-    if user_data.is_null() {
+    // SAFETY: Tox invokes registered callbacks synchronously with the context
+    // borrowed by ToxHandle::iterate.
+    let Some(context) = (unsafe { callback_context(user_data) }) else {
         return;
-    }
-    let context = unsafe { &*(user_data as *const CallbackContext) };
+    };
+    // SAFETY: this pointer is the live Tox instance invoking the callback.
+    let tox = unsafe { ToxRef::from_callback(tox, context) };
+    let data = if length == 0 {
+        &[]
+    } else {
+        // SAFETY: Tox lends the chunk bytes to this callback.
+        let Some(bytes) = (unsafe { callback_bytes(context, data, length) }) else {
+            return;
+        };
+        bytes
+    };
+    handle_file_recv_chunk(context, tox, friend_number, file_number, position, data);
+}
+
+fn handle_file_recv_chunk(context: &CallbackContext, tox: Option<ToxRef<'_>>, friend_number: u32, file_number: u32, position: u64, data: &[u8]) {
+    let length = data.len();
     #[cfg(feature = "web-core")]
     if let (Some(profile_id), Some(bridge)) = (
         context.web_profile_id.as_deref(),
         context.web_file_bridge.as_ref(),
     ) {
-        let transfer_id = if length == 0 {
-            bridge.incoming_terminal_by_native(profile_id, friend_number, file_number)
-        } else {
-            bridge.incoming_by_native(profile_id, friend_number, file_number)
-        };
+        let transfer_id = bridge.incoming_callback_route(
+            profile_id,
+            friend_number,
+            file_number,
+            context.handle_generation.load(Ordering::SeqCst),
+            length == 0,
+        );
         if let Some(transfer_id) = transfer_id {
             if length == 0 {
                 // The backend transfer tick releases the slot after storage
@@ -9570,19 +10636,13 @@ unsafe extern "C" fn on_file_recv_chunk(
                 let _ = bridge.incoming_remote_complete(&transfer_id);
                 return;
             }
-            if data.is_null() {
-                return;
-            }
-            let bytes = unsafe { std::slice::from_raw_parts(data, length) };
-            let accepted = match bridge.push_incoming_chunk(&transfer_id, position, bytes) {
+            let accepted = match bridge.push_incoming_chunk(&transfer_id, position, data) {
                 Ok(value) => value,
                 Err(_) => {
-                    if !tox.is_null() {
+                    if callback_transport_available(tox) {
                         let mut error = 0_i32;
-                        unsafe {
-                            let _ =
-                                tox_file_control(tox, friend_number, file_number, 2, &mut error);
-                        }
+                        let _ =
+                                callback_file_control(tox, friend_number, file_number, 2, &mut error);
                     }
                     if let Some((message_id, _, _)) = bridge.progress(&transfer_id) {
                         set_attachment_transfer_error(
@@ -9599,11 +10659,9 @@ unsafe extern "C" fn on_file_recv_chunk(
                     return;
                 }
             };
-            if !accepted && !tox.is_null() {
+            if !accepted && callback_transport_available(tox) {
                 let mut error = 0_i32;
-                unsafe {
-                    let _ = tox_file_control(tox, friend_number, file_number, 1, &mut error);
-                }
+                let _ = callback_file_control(tox, friend_number, file_number, 1, &mut error);
             }
             // The backend tick advances visible progress only after the
             // workspace worker confirms durable bytes. Browser download is a
@@ -9657,7 +10715,7 @@ unsafe extern "C" fn on_file_recv_chunk(
                     &context.history_path,
                     &context.history_enabled,
                 );
-                if transfer.kind != 1 && !tox.is_null() {
+                if transfer.kind != 1 && callback_transport_available(tox) {
                     resume_next_queued_incoming(tox, context);
                 }
                 return;
@@ -9702,7 +10760,7 @@ unsafe extern "C" fn on_file_recv_chunk(
                         transfer.size
                     ),
                 );
-                if transfer.kind != 1 && !tox.is_null() {
+                if transfer.kind != 1 && callback_transport_available(tox) {
                     resume_next_queued_incoming(tox, context);
                 }
                 return;
@@ -9742,13 +10800,10 @@ unsafe extern "C" fn on_file_recv_chunk(
                     message_id,
                 );
             }
-            if transfer.kind != 1 && !tox.is_null() {
+            if transfer.kind != 1 && callback_transport_available(tox) {
                 resume_next_queued_incoming(tox, context);
             }
         }
-        return;
-    }
-    if data.is_null() {
         return;
     }
     let mut update = None;
@@ -9761,7 +10816,7 @@ unsafe extern "C" fn on_file_recv_chunk(
                 transfer.buffered_target.as_ref(),
                 transfer.size,
                 position,
-                unsafe { std::slice::from_raw_parts(data, length) },
+                data,
             )
             .and_then(|_| {
                 transfer
@@ -9771,10 +10826,16 @@ unsafe extern "C" fn on_file_recv_chunk(
             if result.is_ok() {
                 let transferred = transfer.coverage.transferred();
                 let speed = transfer.meter.update(transferred);
+                // Retain bytes from an in-flight chunk without losing the local pause.
+                let (speed, transfer_state) = if transfer.locally_paused {
+                    (0, "paused")
+                } else {
+                    (speed, "receiving")
+                };
                 update = transfer
                     .message_id
                     .clone()
-                    .map(|id| (id, transferred, speed, transfer.size));
+                    .map(|id| (id, transferred, speed, transfer.size, transfer_state));
             } else {
                 chunk_failure = Some((
                     transfer.path.clone(),
@@ -9788,12 +10849,10 @@ unsafe extern "C" fn on_file_recv_chunk(
         if let Ok(mut files) = context.incoming_files.lock() {
             files.remove(&(friend_number, file_number));
         }
-        if !tox.is_null() {
+        if callback_transport_available(tox) {
             let mut control_error = 0_i32;
-            unsafe {
-                let _ =
+            let _ =
                     callback_file_control(tox, friend_number, file_number, 2, &mut control_error);
-            }
         }
         let _ = profiles::remove_file(&path);
         if let Some(message_id) = message_id {
@@ -9812,19 +10871,19 @@ unsafe extern "C" fn on_file_recv_chunk(
             &context.history_path,
             &context.history_enabled,
         );
-        if !tox.is_null() {
+        if callback_transport_available(tox) {
             resume_next_queued_incoming(tox, context);
         }
         return;
     }
-    if let Some((message_id, transferred, speed, size)) = update {
+    if let Some((message_id, transferred, speed, size, transfer_state)) = update {
         publish_attachment_progress(
             context,
             &message_id,
             transferred,
             speed,
             size,
-            "receiving",
+            transfer_state,
             false,
             None,
         );
@@ -9837,10 +10896,19 @@ unsafe extern "C" fn on_friend_connection_status(
     connection: u8,
     user_data: *mut c_void,
 ) {
-    if tox.is_null() || user_data.is_null() {
+    // SAFETY: Tox invokes registered callbacks synchronously with the context
+    // borrowed by ToxHandle::iterate.
+    let Some(context) = (unsafe { callback_context(user_data) }) else {
         return;
-    }
-    let context = unsafe { &*(user_data as *const CallbackContext) };
+    };
+    // SAFETY: this pointer is the live Tox instance invoking the callback.
+    let Some(tox) = (unsafe { ToxRef::from_callback(tox, context) }) else {
+        return;
+    };
+    handle_friend_connection_status(context, tox, friend_number, connection);
+}
+
+fn handle_friend_connection_status(context: &CallbackContext, tox: ToxRef<'_>, friend_number: u32, connection: u8) {
     log_network(
         &context.network_log_path,
         format!("FRIEND_CONNECTION friend={friend_number} status={connection}"),
@@ -9877,9 +10945,8 @@ unsafe extern "C" fn on_friend_connection_status(
             format!("PQ_CONNECTION_STATE_WAIT friend={friend_number} error={error}"),
         );
     }
-    let mut key = [0_u8; 32];
     let mut key_error = 0_i32;
-    if unsafe { tox_friend_get_public_key(tox, friend_number, key.as_mut_ptr(), &mut key_error) } {
+    if let Some(key) = tox.friend_public_key(friend_number, &mut key_error) {
         let public_key = key
             .iter()
             .map(|byte| format!("{byte:02X}"))
@@ -9945,23 +11012,9 @@ unsafe extern "C" fn on_friend_connection_status(
         );
         return;
     }
-    let mut hash = [0_u8; 32];
-    unsafe {
-        let _ = tox_hash(hash.as_mut_ptr(), bytes.as_ptr(), bytes.len());
-    }
+    let hash = tox_avatar_digest(&bytes);
     let mut error = 0_i32;
-    let number = unsafe {
-        tox_file_send(
-            tox,
-            friend_number,
-            1,
-            bytes.len() as u64,
-            hash.as_ptr(),
-            hash.as_ptr(),
-            hash.len(),
-            &mut error,
-        )
-    };
+    let number = tox.file_send(friend_number, 1, bytes.len() as u64, Some(&hash), hash.as_ref(), &mut error);
     log_transfer(
         &context.transfer_log_path,
         format!(
@@ -10035,18 +11088,13 @@ fn record_friend_event_sequence(
     friend_number: u32,
     friend_public_key: &str,
 ) {
-    let Ok(mut cache) = cache.lock() else { return };
-    let key = if !friend_public_key.is_empty() {
-        friend_public_key.to_ascii_uppercase()
-    } else if let Some((key, _)) = cache
-        .iter()
-        .find(|(_, profile)| profile.friend_number == Some(friend_number))
-    {
-        key.clone()
-    } else {
+    if friend_public_key.is_empty() {
         return;
-    };
-    let entry = cache.entry(key).or_default();
+    }
+    let Ok(mut cache) = cache.lock() else { return };
+    let entry = cache
+        .entry(friend_public_key.to_ascii_uppercase())
+        .or_default();
     entry.friend_number = Some(friend_number);
     entry.added_event_sequence = next_chat_event_sequence();
     if let Ok(bytes) = serde_json::to_vec(&*cache) {
@@ -10420,15 +11468,13 @@ fn message_requires_runtime_residency(message: &ToxMessage) -> bool {
     })
 }
 
-fn last_event_maps_for_state(
-    state: &ToxState,
-) -> Result<(HashMap<String, u64>, HashMap<u32, u64>), String> {
-    let (mut by_key, by_number) = if state.history_enabled.load(Ordering::Relaxed)
+fn last_events_for_state(state: &ToxState) -> Result<HashMap<String, u64>, String> {
+    let mut by_key = if state.history_enabled.load(Ordering::Relaxed)
         && chat_history_store::contains_registered(&state.history_path)
     {
         chat_history_store::last_events_registered(&state.history_path)?
     } else {
-        (HashMap::new(), HashMap::new())
+        HashMap::new()
     };
     let messages = state
         .messages
@@ -10444,7 +11490,7 @@ fn last_event_maps_for_state(
             *entry = (*entry).max(message.timestamp);
         }
     }
-    Ok((by_key, by_number))
+    Ok(by_key)
 }
 
 fn active_file_card_message_ids(state: &ToxState) -> HashSet<String> {
@@ -10861,7 +11907,7 @@ fn cancel_chat_message_for_state(
         .lock()
         .map_err(|_| "TOX_PROFILE_LOCK_POISONED".to_string())?;
     let instance = handle.as_ref().ok_or("TOX_NOT_INITIALIZED")?;
-    let public_key = tox_friend_public_key(instance.instance.as_ptr(), friend_number)
+    let public_key = tox_friend_public_key(Some(instance.native()), friend_number)
         .ok_or("CHAT_CONTACT_NOT_FOUND")?;
     if expected_public_key.is_some_and(|expected| !expected.eq_ignore_ascii_case(&public_key)) {
         return Err("CHAT_CONTACT_IDENTITY_CHANGED".to_string());
@@ -10953,12 +11999,6 @@ fn cancel_chat_message_for_state(
             message_id,
         )?
         || state.pq.has_durable_message(message_id)
-        || state
-            .pq_receipts
-            .lock()
-            .map_err(|_| "CHAT_RECEIPT_STATE_UNAVAILABLE".to_string())?
-            .values()
-            .any(|id| id == message_id)
     {
         return Err(if message.pq_protected {
             "PQ_MESSAGE_ALREADY_TRANSMITTED"
@@ -11073,7 +12113,7 @@ fn observe_chat_peer_connection(
         .map_err(|_| "Tox handle is locked".to_string())?;
     let online = handle
         .as_ref()
-        .is_some_and(|handle| friend_is_connected(handle.instance.as_ptr(), friend_number));
+        .is_some_and(|handle| friend_is_connected(handle.native(), friend_number));
     Ok((online, revision))
 }
 
@@ -11118,15 +12158,10 @@ fn ordinary_chat_transport_waits_for_pq(state: &ToxState, friend_number: u32) ->
     // It may finish after a peer-initiated PQ session becomes active, while
     // negotiation, a pending decision and key shutdown still fence the queue.
     state.pq.holds_plaintext_messages(friend_number)
-        && !(state.pq.is_v2(friend_number) && state.pq.status(friend_number).state == "active")
+        && state.pq.status(friend_number).state != "active"
 }
 
-fn file_chat_transport_waits_for_pq(state: &ToxState, friend_number: u32) -> bool {
-    // Files have always used native Tox in legacy PQ sessions. Only the new
-    // v2 first-send negotiation adds a wait before publishing their offers.
-    state.pq.is_v2(friend_number) && ordinary_chat_transport_waits_for_pq(state, friend_number)
-}
-
+#[cfg(test)]
 fn send_chat_message_for_state(
     state: &ToxState,
     friend_number: u32,
@@ -11143,6 +12178,7 @@ fn send_chat_message_for_state(
         quote,
         formatting,
         None,
+        None,
     )
 }
 
@@ -11154,6 +12190,7 @@ fn send_chat_message_for_state_bound(
     quote: Option<ChatQuote>,
     formatting: Vec<TextFormatSpan>,
     expected_public_key: Option<&str>,
+    expected_contact_incarnation: Option<u64>,
 ) -> Result<SendMessageResult, String> {
     let (peer_online, connection_revision) = observe_chat_peer_connection(state, friend_number)?;
     send_chat_message_for_state_with_connection_observation_bound(
@@ -11167,6 +12204,7 @@ fn send_chat_message_for_state_bound(
         Some(connection_revision),
         None,
         expected_public_key,
+        expected_contact_incarnation,
     )
 }
 
@@ -11193,6 +12231,7 @@ fn send_chat_message_for_state_with_peer_online(
     )
 }
 
+#[cfg(test)]
 fn send_chat_message_for_state_with_connection_observation(
     state: &ToxState,
     friend_number: u32,
@@ -11215,6 +12254,7 @@ fn send_chat_message_for_state_with_connection_observation(
         connection_revision,
         local_online_override,
         None,
+        None,
     )
 }
 
@@ -11230,6 +12270,7 @@ fn send_chat_message_for_state_with_connection_observation_bound(
     connection_revision: Option<u64>,
     local_online_override: Option<bool>,
     expected_public_key: Option<&str>,
+    expected_contact_incarnation: Option<u64>,
 ) -> Result<SendMessageResult, String> {
     let sanitized = sanitize_untrusted_text(&text);
     let text = sanitized.trim().to_string();
@@ -11247,6 +12288,7 @@ fn send_chat_message_for_state_with_connection_observation_bound(
     {
         return Err("CHAT_CONTACT_IDENTITY_CHANGED".to_string());
     }
+    pending_contact::require_incarnation(state, &friend_public_key, expected_contact_incarnation)?;
     let operation_fingerprint = operation_id
         .as_ref()
         .map(|_| send_payload_fingerprint(&text, &quote, &formatting))
@@ -11490,7 +12532,7 @@ fn send_chat_message_for_state_with_connection_observation_bound(
     // A first contact message is already assigned its final application ID
     // while it waits for capability/key confirmation; retries keep this ID.
     let protocol_supported = state.chat_protocol.supports(friend_number)
-        || pq_protected && state.pq.is_v2(friend_number);
+        || pq_protected && state.pq.owns_session(friend_number);
     let id = if protocol_supported {
         chat_protocol::new_common_message_id()?
     } else {
@@ -11726,6 +12768,7 @@ fn pq_history_event(status: &PqStatus, role: &str, event_status: &str) -> PqHist
     }
 }
 
+#[cfg(test)]
 fn append_pq_history(
     messages: &Arc<Mutex<Vec<ToxMessage>>>,
     friend_number: u32,
@@ -11804,6 +12847,7 @@ fn pq_active_history_role(previous_status: &PqStatus) -> (&'static str, bool) {
     }
 }
 
+#[cfg(test)]
 fn record_pq_active_history(
     messages: &Arc<Mutex<Vec<ToxMessage>>>,
     history_path: &PathBuf,
@@ -11866,16 +12910,12 @@ fn ensure_pq_history_before_payload(
     friend_public_key: &str,
 ) -> Result<(), String> {
     let status = pq.status(friend_number);
-    if pq.is_v2(friend_number) {
-        let (notified, manual_restart, _) = pq.active_history_notice(friend_number)?;
-        if !manual_restart
-            && notified.as_ref().is_some_and(|(local, peer)| {
-                local == &status.local_fingerprint && peer == &status.peer_fingerprint
-            })
-        {
-            return Ok(());
-        }
-    } else if status.state.starts_with("closing") {
+    let (notified, manual_restart, _) = pq.active_history_notice(friend_number)?;
+    if !manual_restart
+        && notified.as_ref().is_some_and(|(local, peer)| {
+            local == &status.local_fingerprint && peer == &status.peer_fingerprint
+        })
+    {
         return Ok(());
     }
     if status.state != "active" {
@@ -11939,6 +12979,7 @@ fn record_pq_active_history_with_role_for_engine(
     Ok(changed)
 }
 
+#[cfg(test)]
 fn record_pq_active_history_with_role(
     messages: &Arc<Mutex<Vec<ToxMessage>>>,
     history_path: &PathBuf,
@@ -12263,15 +13304,6 @@ fn record_pq_active_history_with_role_policy(
     Ok(changed)
 }
 
-fn update_latest_pq_history(
-    messages: &Arc<Mutex<Vec<ToxMessage>>>,
-    friend_number: u32,
-    status: &PqStatus,
-    event_status: &str,
-) -> bool {
-    update_latest_pq_history_bound(messages, friend_number, "", status, event_status)
-}
-
 fn update_latest_pq_history_bound(
     messages: &Arc<Mutex<Vec<ToxMessage>>>,
     friend_number: u32,
@@ -12378,6 +13410,7 @@ enum HistoryPersistRequest {
         message_id: String,
         completed: SyncSender<Result<bool, String>>,
     },
+    #[cfg(test)]
     Flush(SyncSender<()>),
     #[cfg(test)]
     PauseBeforeCommit {
@@ -12387,59 +13420,160 @@ enum HistoryPersistRequest {
 }
 
 static HISTORY_REVISIONS: OnceLock<Mutex<HashMap<PathBuf, u64>>> = OnceLock::new();
-static HISTORY_PERSIST_SENDER: OnceLock<Sender<HistoryPersistRequest>> = OnceLock::new();
-static CANCELLED_BATCH_PATHS: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
+static HISTORY_PERSIST_SENDER: OnceLock<Arc<OrderedPersistQueue<HistoryPersistRequest>>> =
+    OnceLock::new();
+static CANCELLED_BATCH_PATHS: OnceLock<Mutex<BatchedWritePaths>> = OnceLock::new();
 static CHAT_VIEW_REVISIONS: OnceLock<Mutex<HashMap<(PathBuf, String), (u64, u64)>>> =
     OnceLock::new();
 
-fn cancel_batched_write(path: &Path) {
-    if let Ok(mut paths) = CANCELLED_BATCH_PATHS
-        .get_or_init(|| Mutex::new(HashSet::new()))
+#[derive(Default)]
+struct BatchedWritePaths {
+    cancelled: HashSet<PathBuf>,
+    gates: HashMap<PathBuf, std::sync::Weak<Mutex<()>>>,
+    epochs: HashMap<PathBuf, std::sync::Weak<BatchedPathEpoch>>,
+}
+
+struct BatchedPathEpoch {
+    gate: Arc<Mutex<()>>,
+    retired: AtomicBool,
+}
+
+fn batched_path_gate(path: &Path) -> Result<Arc<Mutex<()>>, String> {
+    let mut paths = CANCELLED_BATCH_PATHS
+        .get_or_init(|| Mutex::new(BatchedWritePaths::default()))
         .lock()
-    {
-        paths.insert(path.to_path_buf());
+        .map_err(|_| "PROFILE_WRITE_CANCELLATION_UNAVAILABLE".to_string())?;
+    paths.gates.retain(|_, gate| gate.strong_count() != 0);
+    paths.epochs.retain(|_, epoch| epoch.strong_count() != 0);
+    if let Some(gate) = paths.gates.get(path).and_then(std::sync::Weak::upgrade) {
+        return Ok(gate);
     }
+    let gate = Arc::new(Mutex::new(()));
+    paths
+        .gates
+        .insert(path.to_path_buf(), Arc::downgrade(&gate));
+    Ok(gate)
+}
+
+fn batched_path_epoch(path: &Path) -> Result<Arc<BatchedPathEpoch>, String> {
+    let gate = batched_path_gate(path)?;
+    let mut paths = CANCELLED_BATCH_PATHS
+        .get_or_init(|| Mutex::new(BatchedWritePaths::default()))
+        .lock()
+        .map_err(|_| "PROFILE_WRITE_CANCELLATION_UNAVAILABLE".to_string())?;
+    if let Some(epoch) = paths.epochs.get(path).and_then(std::sync::Weak::upgrade) {
+        return Ok(epoch);
+    }
+    let epoch = Arc::new(BatchedPathEpoch {
+        gate,
+        retired: AtomicBool::new(paths.cancelled.contains(path)),
+    });
+    paths
+        .epochs
+        .insert(path.to_path_buf(), Arc::downgrade(&epoch));
+    Ok(epoch)
+}
+
+fn with_batched_path_gate<R>(
+    path: &Path,
+    gate: &Mutex<()>,
+    operation: impl FnOnce() -> Result<R, String>,
+) -> Result<R, String> {
+    // Never wait for this gate while holding the registry or queue mutex.
+    let _path = match gate.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            let _guard = poisoned.into_inner();
+            let mut paths = CANCELLED_BATCH_PATHS
+                .get_or_init(|| Mutex::new(BatchedWritePaths::default()))
+                .lock()
+                .map_err(|_| "PROFILE_WRITE_CANCELLATION_UNAVAILABLE".to_string())?;
+            paths.cancelled.insert(path.to_path_buf());
+            if let Some(epoch) = paths.epochs.get(path).and_then(std::sync::Weak::upgrade) {
+                epoch.retired.store(true, Ordering::Release);
+            }
+            return Err("PROFILE_WRITE_CANCELLATION_UNAVAILABLE".to_string());
+        }
+    };
+    operation()
+}
+
+fn cancel_batched_write(path: &Path) {
+    let Ok(gate) = batched_path_gate(path) else {
+        return;
+    };
+    let _ = with_batched_path_gate(path, &gate, || {
+        let mut paths = CANCELLED_BATCH_PATHS
+            .get_or_init(|| Mutex::new(BatchedWritePaths::default()))
+            .lock()
+            .map_err(|_| "PROFILE_WRITE_CANCELLATION_UNAVAILABLE".to_string())?;
+        if let Some(epoch) = paths.epochs.get(path).and_then(std::sync::Weak::upgrade) {
+            epoch.retired.store(true, Ordering::Release);
+        }
+        paths.cancelled.insert(path.to_path_buf());
+        Ok(())
+    });
 }
 
 fn allow_batched_write(path: &Path) {
-    if let Ok(mut paths) = CANCELLED_BATCH_PATHS
-        .get_or_init(|| Mutex::new(HashSet::new()))
-        .lock()
-    {
-        paths.remove(path);
-    }
-}
-
-fn with_active_batched_path(path: &Path, write: impl FnOnce()) {
-    let Ok(paths) = CANCELLED_BATCH_PATHS
-        .get_or_init(|| Mutex::new(HashSet::new()))
-        .lock()
-    else {
+    let Ok(gate) = batched_path_gate(path) else {
         return;
     };
-    if !paths.contains(path) {
-        write();
-    }
+    let _ = with_batched_path_gate(path, &gate, || {
+        let mut paths = CANCELLED_BATCH_PATHS
+            .get_or_init(|| Mutex::new(BatchedWritePaths::default()))
+            .lock()
+            .map_err(|_| "PROFILE_WRITE_CANCELLATION_UNAVAILABLE".to_string())?;
+        if let Some(epoch) = paths.epochs.remove(path).and_then(|epoch| epoch.upgrade()) {
+            epoch.retired.store(true, Ordering::Release);
+        }
+        paths.cancelled.remove(path);
+        Ok(())
+    });
 }
 
-fn with_active_batched_path_result(
+// Caller owns this path's stable gate. The publication closure is restricted
+// to the history registry swap; it must not wait for a store or perform I/O.
+// All fallible locks/loading precede retirement. Publication is infallible
+// under the held store/registry guards, so failed open retains the old epoch.
+fn transition_batched_path_epoch<R>(
     path: &Path,
-    write: impl FnOnce() -> Result<(), String>,
-) -> Result<(), String> {
-    let paths = CANCELLED_BATCH_PATHS
-        .get_or_init(|| Mutex::new(HashSet::new()))
+    allowed: bool,
+    publish: impl FnOnce() -> R,
+) -> Result<R, String> {
+    let mut paths = CANCELLED_BATCH_PATHS
+        .get_or_init(|| Mutex::new(BatchedWritePaths::default()))
         .lock()
         .map_err(|_| "PROFILE_WRITE_CANCELLATION_UNAVAILABLE".to_string())?;
-    if paths.contains(path) {
-        return Err("PROFILE_WRITE_CANCELLED".to_string());
+    if let Some(epoch) = paths.epochs.remove(path).and_then(|epoch| epoch.upgrade()) {
+        epoch.retired.store(true, Ordering::Release);
     }
-    write()
+    if allowed {
+        paths.cancelled.remove(path);
+    }
+    // Ordinary unregister does not add a permanent path tombstone.
+    // Explicit destroy cancellation, if present, is retained.
+    Ok(publish())
 }
 
-fn atomic_write_active_path(path: &Path, bytes: &[u8]) -> Result<(), String> {
-    // Keep cancellation and the actual replace in one critical section: once
-    // deletion marks a path cancelled, no already-queued write can revive it.
-    with_active_batched_path_result(path, || atomic_write(path, bytes))
+fn with_captured_batched_path<R>(
+    path: &Path,
+    epoch: &BatchedPathEpoch,
+    write: impl FnOnce() -> Result<R, String>,
+) -> Result<R, String> {
+    with_batched_path_gate(path, &epoch.gate, || {
+        let cancelled = {
+            let paths = CANCELLED_BATCH_PATHS
+                .get_or_init(|| Mutex::new(BatchedWritePaths::default()))
+                .lock()
+                .map_err(|_| "PROFILE_WRITE_CANCELLATION_UNAVAILABLE".to_string())?;
+            paths.cancelled.contains(path)
+        };
+        if cancelled || epoch.retired.load(Ordering::Acquire) {
+            return Err("PROFILE_WRITE_CANCELLED".to_string());
+        }
+        write()
+    })
 }
 
 fn bump_history_revision(path: &Path) -> u64 {
@@ -12654,38 +13788,6 @@ pub(crate) fn wait_for_registered_history_write(
         .map_err(|_| "PROFILE_HISTORY_WRITE_UNAVAILABLE".to_string())?
 }
 
-fn clear_registered_history_direct(
-    path: &Path,
-    friend: Option<&(u32, String)>,
-) -> Result<(), String> {
-    with_active_batched_path_result(path, || match friend {
-        Some((friend_number, friend_public_key)) => chat_history_store::clear_registered(
-            path,
-            Some((*friend_number, friend_public_key.as_str())),
-        ),
-        None => chat_history_store::clear_registered(path, None),
-    })
-}
-
-fn remove_registered_history_direct(
-    path: &Path,
-    friend_number: u32,
-    friend_public_key: &str,
-    message_id: &str,
-) -> Result<bool, String> {
-    let mut removed = false;
-    with_active_batched_path_result(path, || {
-        removed = chat_history_store::remove_message_registered(
-            path,
-            friend_number,
-            friend_public_key,
-            message_id,
-        )?;
-        Ok(())
-    })?;
-    Ok(removed)
-}
-
 fn write_tox_history_rows_direct(
     messages: &[ToxMessage],
     path: &Path,
@@ -12694,12 +13796,14 @@ fn write_tox_history_rows_direct(
     if !enabled {
         return Ok(());
     }
-    if chat_history_store::contains_registered(path) {
-        return chat_history_store::upsert_registered(path, messages);
+    // Some persistence tests deliberately exercise an unregistered flat fixture.
+    #[cfg(test)]
+    if !chat_history_store::contains_registered(path) {
+        let serialized =
+            serde_json::to_vec(messages).map_err(|_| "CHAT_HISTORY_ENCODE_FAILED".to_string())?;
+        return atomic_write(path, &serialized).map_err(|_| "CHAT_HISTORY_WRITE_FAILED".to_string());
     }
-    let serialized =
-        serde_json::to_vec(messages).map_err(|_| "CHAT_HISTORY_ENCODE_FAILED".to_string())?;
-    atomic_write(path, &serialized).map_err(|_| "CHAT_HISTORY_WRITE_FAILED".to_string())
+    chat_history_store::upsert_registered(path, messages)
 }
 
 fn write_ordered_history_rows(
@@ -12714,173 +13818,9 @@ fn write_ordered_history_rows(
     }
 }
 
-fn history_persist_sender() -> &'static Sender<HistoryPersistRequest> {
-    HISTORY_PERSIST_SENDER.get_or_init(|| {
-        let (sender, receiver) = mpsc::channel::<HistoryPersistRequest>();
-        thread::spawn(move || {
-            while let Ok(first) = receiver.recv() {
-                let (path, messages, enabled) = match first {
-                    HistoryPersistRequest::Write {
-                        path,
-                        messages,
-                        enabled,
-                    } => (path, messages, enabled),
-                    HistoryPersistRequest::RequiredWrite {
-                        path,
-                        messages,
-                        before,
-                        completed,
-                    } => {
-                        let result = with_active_batched_path_result(&path, || {
-                            write_ordered_history_rows(&path, &messages, before.as_ref())
-                        });
-                        let _ = completed.send(result);
-                        continue;
-                    }
-                    HistoryPersistRequest::RequiredClear {
-                        path,
-                        friend,
-                        completed,
-                    } => {
-                        let result = clear_registered_history_direct(&path, friend.as_ref());
-                        let _ = completed.send(result);
-                        continue;
-                    }
-                    HistoryPersistRequest::RequiredRemove {
-                        path,
-                        friend_number,
-                        friend_public_key,
-                        message_id,
-                        completed,
-                    } => {
-                        let result = remove_registered_history_direct(
-                            &path,
-                            friend_number,
-                            &friend_public_key,
-                            &message_id,
-                        );
-                        let _ = completed.send(result);
-                        continue;
-                    }
-                    HistoryPersistRequest::Flush(completed) => {
-                        let _ = completed.send(());
-                        continue;
-                    }
-                    #[cfg(test)]
-                    HistoryPersistRequest::PauseBeforeCommit { entered, release } => {
-                        let _ = entered.send(false);
-                        let _ = release.recv_timeout(Duration::from_secs(5));
-                        continue;
-                    }
-                };
-                let mut pending =
-                    HashMap::<PathBuf, (HashMap<String, ToxMessage>, Arc<AtomicBool>)>::new();
-                merge_history_rows(&mut pending, path, messages, enabled);
-                let mut flush = None;
-                let mut required = None;
-                let deadline = Instant::now() + Duration::from_millis(350);
-                loop {
-                    let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
-                        break;
-                    };
-                    match receiver.recv_timeout(remaining) {
-                        Ok(HistoryPersistRequest::Write {
-                            path,
-                            messages,
-                            enabled,
-                        }) => {
-                            merge_history_rows(&mut pending, path, messages, enabled);
-                        }
-                        Ok(HistoryPersistRequest::RequiredWrite {
-                            path,
-                            messages,
-                            before,
-                            completed,
-                        }) => {
-                            required = Some((path, messages, before, completed));
-                            break;
-                        }
-                        Ok(HistoryPersistRequest::RequiredClear {
-                            path,
-                            friend,
-                            completed,
-                        }) => {
-                            for (pending_path, (messages, enabled)) in pending.drain() {
-                                let messages = messages.into_values().collect::<Vec<_>>();
-                                let _ = with_active_batched_path_result(&pending_path, || {
-                                    write_tox_history_rows_direct(
-                                        &messages,
-                                        &pending_path,
-                                        enabled.load(Ordering::Relaxed),
-                                    )
-                                });
-                            }
-                            let result = clear_registered_history_direct(&path, friend.as_ref());
-                            let _ = completed.send(result);
-                            continue;
-                        }
-                        Ok(HistoryPersistRequest::RequiredRemove {
-                            path,
-                            friend_number,
-                            friend_public_key,
-                            message_id,
-                            completed,
-                        }) => {
-                            for (pending_path, (messages, enabled)) in pending.drain() {
-                                let messages = messages.into_values().collect::<Vec<_>>();
-                                let _ = with_active_batched_path_result(&pending_path, || {
-                                    write_tox_history_rows_direct(
-                                        &messages,
-                                        &pending_path,
-                                        enabled.load(Ordering::Relaxed),
-                                    )
-                                });
-                            }
-                            let result = remove_registered_history_direct(
-                                &path,
-                                friend_number,
-                                &friend_public_key,
-                                &message_id,
-                            );
-                            let _ = completed.send(result);
-                            continue;
-                        }
-                        Ok(HistoryPersistRequest::Flush(completed)) => {
-                            flush = Some(completed);
-                            break;
-                        }
-                        #[cfg(test)]
-                        Ok(HistoryPersistRequest::PauseBeforeCommit { entered, release }) => {
-                            let _ = entered.send(true);
-                            let _ = release.recv_timeout(Duration::from_secs(5));
-                        }
-                        Err(RecvTimeoutError::Timeout) => break,
-                        Err(RecvTimeoutError::Disconnected) => break,
-                    }
-                }
-                for (path, (messages, enabled)) in pending {
-                    let messages = messages.into_values().collect::<Vec<_>>();
-                    with_active_batched_path(&path, || {
-                        let _ = write_tox_history_rows_direct(
-                            &messages,
-                            &path,
-                            enabled.load(Ordering::Relaxed),
-                        );
-                    });
-                }
-                if let Some((path, messages, before, completed)) = required {
-                    let result = with_active_batched_path_result(&path, || {
-                        write_ordered_history_rows(&path, &messages, before.as_ref())
-                    });
-                    let _ = completed.send(result);
-                }
-                if let Some(completed) = flush {
-                    let _ = completed.send(());
-                }
-            }
-        });
-        sender
-    })
+fn history_persist_sender() -> &'static Arc<OrderedPersistQueue<HistoryPersistRequest>> {
+    HISTORY_PERSIST_SENDER
+        .get_or_init(|| OrderedPersistQueue::new(None, Duration::from_millis(350)))
 }
 
 fn merge_history_rows(
@@ -12903,22 +13843,273 @@ fn merge_history_rows(
     }
 }
 
+impl OrderedPersistRequest for AtomicWriteRequest {
+    fn path(&self) -> Option<&Path> {
+        match self {
+            Self::Write { path, .. } | Self::RequiredWrite { path, .. } => Some(path),
+            #[cfg(test)]
+            _ => None,
+        }
+    }
+
+    fn kind(&self) -> PersistRequestKind {
+        match self {
+            Self::Write { .. } => PersistRequestKind::Snapshot,
+            Self::RequiredWrite { .. } => PersistRequestKind::Required,
+            #[cfg(test)]
+            Self::Flush(_) => PersistRequestKind::Flush,
+            #[cfg(test)]
+            Self::PauseBeforeCommit { .. } => PersistRequestKind::Pause,
+        }
+    }
+
+    fn coalesce(&mut self, next: Self) {
+        match (self, next) {
+            (Self::Write { bytes, .. }, Self::Write { bytes: next, .. }) => *bytes = next,
+            _ => unreachable!("only compatible snapshots are collected together"),
+        }
+    }
+
+    fn process(path: &Path, jobs: Vec<PersistJob<Self>>) {
+        let mut jobs = jobs.into_iter().peekable();
+        while let Some(job) = jobs.next() {
+            let segment = job.segment;
+            let epoch = job.epoch.expect("path work has an admission generation");
+            match job.request {
+                Self::Write { mut bytes, .. } => {
+                    while jobs.peek().is_some_and(|next| {
+                        next.request.kind() == PersistRequestKind::Snapshot
+                            && next.segment == segment
+                            && next
+                                .epoch
+                                .as_ref()
+                                .is_some_and(|next_epoch| Arc::ptr_eq(&epoch, next_epoch))
+                    }) {
+                        if let Self::Write { bytes: next, .. } =
+                            jobs.next().expect("peeked job").request
+                        {
+                            bytes = next;
+                        }
+                    }
+                    let _ = with_captured_batched_path(path, &epoch, || atomic_write(path, &bytes));
+                }
+                Self::RequiredWrite {
+                    bytes, completed, ..
+                } => {
+                    let result =
+                        with_captured_batched_path(path, &epoch, || atomic_write(path, &bytes));
+                    let _ = completed.send(result);
+                }
+                #[cfg(test)]
+                _ => unreachable!("global controls are not path work"),
+            }
+        }
+    }
+
+    fn control(self, _pending_snapshot: bool) {
+        match self {
+            #[cfg(test)]
+            Self::Flush(completed) => {
+                let _ = completed.send(());
+            }
+            #[cfg(test)]
+            Self::PauseBeforeCommit { entered, release } => {
+                let _ = entered.send(_pending_snapshot);
+                let _ = release.recv_timeout(Duration::from_secs(5));
+            }
+            _ => unreachable!("path work is not a global control"),
+        }
+    }
+}
+
+impl OrderedPersistRequest for HistoryPersistRequest {
+    fn path(&self) -> Option<&Path> {
+        match self {
+            Self::Write { path, .. }
+            | Self::RequiredWrite { path, .. }
+            | Self::RequiredClear { path, .. }
+            | Self::RequiredRemove { path, .. } => Some(path),
+            #[cfg(test)]
+            _ => None,
+        }
+    }
+
+    fn kind(&self) -> PersistRequestKind {
+        match self {
+            Self::Write { .. } => PersistRequestKind::Snapshot,
+            Self::RequiredWrite { .. }
+            | Self::RequiredClear { .. }
+            | Self::RequiredRemove { .. } => PersistRequestKind::Required,
+            #[cfg(test)]
+            Self::Flush(_) => PersistRequestKind::Flush,
+            #[cfg(test)]
+            Self::PauseBeforeCommit { .. } => PersistRequestKind::Pause,
+        }
+    }
+
+    fn coalesce(&mut self, next: Self) {
+        match (self, next) {
+            (
+                Self::Write {
+                    path,
+                    messages,
+                    enabled,
+                },
+                Self::Write {
+                    messages: next,
+                    enabled: next_enabled,
+                    ..
+                },
+            ) => {
+                let mut pending = HashMap::new();
+                merge_history_rows(
+                    &mut pending,
+                    path.clone(),
+                    std::mem::take(messages),
+                    Arc::clone(enabled),
+                );
+                merge_history_rows(&mut pending, path.clone(), next, next_enabled);
+                let (rows, latest_enabled) = pending.remove(path).expect("collected history path");
+                *messages = rows.into_values().collect();
+                *enabled = latest_enabled;
+            }
+            _ => unreachable!("only compatible snapshots are collected together"),
+        }
+    }
+
+    fn process(path: &Path, jobs: Vec<PersistJob<Self>>) {
+        let mut jobs = jobs.into_iter().peekable();
+        while let Some(job) = jobs.next() {
+            let segment = job.segment;
+            let epoch = job.epoch.expect("path work has an admission generation");
+            match job.request {
+                Self::Write {
+                    messages, enabled, ..
+                } => {
+                    let mut pending = HashMap::new();
+                    merge_history_rows(&mut pending, path.to_path_buf(), messages, enabled);
+                    while jobs.peek().is_some_and(|next| {
+                        next.request.kind() == PersistRequestKind::Snapshot
+                            && next.segment == segment
+                            && next
+                                .epoch
+                                .as_ref()
+                                .is_some_and(|next_epoch| Arc::ptr_eq(&epoch, next_epoch))
+                    }) {
+                        if let Self::Write {
+                            messages, enabled, ..
+                        } = jobs.next().expect("peeked job").request
+                        {
+                            merge_history_rows(&mut pending, path.to_path_buf(), messages, enabled);
+                        }
+                    }
+                    let (rows, enabled) = pending.remove(path).expect("current path merged");
+                    let rows = rows.into_values().collect::<Vec<_>>();
+                    let _ = with_captured_batched_path(path, &epoch, || {
+                        write_tox_history_rows_direct(&rows, path, enabled.load(Ordering::Relaxed))
+                    });
+                }
+                Self::RequiredWrite {
+                    messages,
+                    before,
+                    completed,
+                    ..
+                } => {
+                    let result = with_captured_batched_path(path, &epoch, || {
+                        write_ordered_history_rows(path, &messages, before.as_ref())
+                    });
+                    let _ = completed.send(result);
+                }
+                Self::RequiredClear {
+                    friend, completed, ..
+                } => {
+                    let result = with_captured_batched_path(path, &epoch, || {
+                        chat_history_store::clear_registered(
+                            path,
+                            friend.as_ref().map(|(number, key)| (*number, key.as_str())),
+                        )
+                    });
+                    let _ = completed.send(result);
+                }
+                Self::RequiredRemove {
+                    friend_number,
+                    friend_public_key,
+                    message_id,
+                    completed,
+                    ..
+                } => {
+                    let result = with_captured_batched_path(path, &epoch, || {
+                        chat_history_store::remove_message_registered(
+                            path,
+                            friend_number,
+                            &friend_public_key,
+                            &message_id,
+                        )
+                    });
+                    let _ = completed.send(result);
+                }
+                #[cfg(test)]
+                _ => unreachable!("global controls are not path work"),
+            }
+        }
+    }
+
+    fn control(self, _pending_snapshot: bool) {
+        match self {
+            #[cfg(test)]
+            Self::Flush(completed) => {
+                let _ = completed.send(());
+            }
+            #[cfg(test)]
+            Self::PauseBeforeCommit { entered, release } => {
+                let _ = entered.send(_pending_snapshot);
+                let _ = release.recv_timeout(Duration::from_secs(5));
+            }
+            _ => unreachable!("path work is not a global control"),
+        }
+    }
+}
+
+fn flush_deferred_writes_for_profile(profile: &ToxState) -> Result<(), String> {
+    // These are precisely the five paths admitted to the two deferred queues.
+    // .tox, pending files and Kai checkpoint remain synchronous final writes.
+    let atomic_paths = [
+        profile.unread_state_path.as_path(),
+        profile.friend_cache_path.as_path(),
+        profile.pending_messages_path.as_path(),
+        profile.pending_pq_messages_path.as_path(),
+    ];
+    atomic_write_sender().flush_paths(
+        &atomic_paths,
+        "PROFILE_WRITE_QUEUE_UNAVAILABLE",
+        "PROFILE_WRITE_FLUSH_TIMEOUT",
+    )?;
+    history_persist_sender().flush_paths(
+        &[profile.history_path.as_path()],
+        "PROFILE_HISTORY_QUEUE_UNAVAILABLE",
+        "PROFILE_HISTORY_FLUSH_TIMEOUT",
+    )
+}
+
+#[cfg(test)]
+// Test-only global completion barrier. The registered full job owns its outer
+// watchdog; isolated pause bodies additionally retain their 120-second watchdog.
 pub(crate) fn flush_deferred_profile_writes() -> Result<(), String> {
     let (atomic_completed, atomic_flushed) = mpsc::sync_channel(0);
     atomic_write_sender()
         .send(AtomicWriteRequest::Flush(atomic_completed))
         .map_err(|_| "PROFILE_WRITE_QUEUE_UNAVAILABLE".to_string())?;
     atomic_flushed
-        .recv_timeout(Duration::from_secs(3))
-        .map_err(|_| "PROFILE_WRITE_FLUSH_TIMEOUT".to_string())?;
+        .recv()
+        .map_err(|_| "PROFILE_WRITE_QUEUE_UNAVAILABLE".to_string())?;
 
     let (history_completed, history_flushed) = mpsc::sync_channel(0);
     history_persist_sender()
         .send(HistoryPersistRequest::Flush(history_completed))
         .map_err(|_| "PROFILE_HISTORY_QUEUE_UNAVAILABLE".to_string())?;
     history_flushed
-        .recv_timeout(Duration::from_secs(3))
-        .map_err(|_| "PROFILE_HISTORY_FLUSH_TIMEOUT".to_string())
+        .recv()
+        .map_err(|_| "PROFILE_HISTORY_QUEUE_UNAVAILABLE".to_string())
 }
 
 fn persist_pending_messages(messages: &Arc<Mutex<Vec<PendingToxMessage>>>, path: &PathBuf) {
@@ -12986,9 +14177,19 @@ fn persist_incoming_friend_requests(
     let _ = profiles::write_file(path, &serialized);
 }
 
+#[cfg(test)]
 fn reject_incoming_friend_request_for_state(
     state: &ToxState,
     public_key: &str,
+) -> Result<(), String> {
+    reject_incoming_friend_request_with_cleanup(state, public_key, None, |_, _| Ok(Vec::new()))
+}
+
+fn reject_incoming_friend_request_with_cleanup(
+    state: &ToxState,
+    public_key: &str,
+    expected_contact_incarnation: Option<u64>,
+    remove_external_payloads: impl FnOnce(u32, &str) -> Result<Vec<String>, String>,
 ) -> Result<(), String> {
     if public_key.len() != 64 || !public_key.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err("Некорректный публичный ключ Tox".to_string());
@@ -12999,9 +14200,20 @@ fn reject_incoming_friend_request_for_state(
         .handle
         .lock()
         .map_err(|_| "Could not access the Tox profile".to_string())?;
-    if handle.is_none() {
-        return Err("The Tox profile is not initialised".to_string());
-    }
+    let instance = handle
+        .as_ref()
+        .ok_or("The Tox profile is not initialised")?;
+    pending_contact::require_incarnation(state, public_key, expected_contact_incarnation)?;
+    let resumed_purge = if let Some(friend) = resolve_current_friend_number(instance.native(), public_key) {
+        if pending_contact::purge_with_handle(state, instance, friend, public_key, || {
+            remove_external_payloads(friend, public_key)
+        })? {
+            return Ok(());
+        }
+        false
+    } else {
+        pending_contact::finish_absent_with_handle(state, instance, Some(public_key))?
+    };
     let mut requests = state
         .incoming_requests
         .lock()
@@ -13030,6 +14242,9 @@ fn reject_incoming_friend_request_for_state(
     drop(unread);
     drop(requests);
     drop(handle);
+    if resumed_purge {
+        recover_local_message_deletions(state)?;
+    }
     if let Some(updates) = &state.updates {
         updates.changed();
     }
@@ -13038,16 +14253,14 @@ fn reject_incoming_friend_request_for_state(
 
 // toxcore does not retain text messages for an offline peer.  Keep the queue
 // in our profile and only pass an item to toxcore once the friend is online.
-fn flush_pending_messages(state: &ToxState, tox: *mut c_void) {
+fn flush_pending_messages(state: &ToxState, tox: ToxRef<'_>) {
     flush_pending_messages_with_transport(
         state,
         |key| resolve_current_friend_number(tox, key),
         |friend| friend_is_connected(tox, friend),
         |friend, bytes| {
             let mut error = 0_i32;
-            let receipt = unsafe {
-                tox_friend_send_message(tox, friend, 0, bytes.as_ptr(), bytes.len(), &mut error)
-            };
+            let receipt = tox.send_message(friend, 0, bytes.as_ref(), &mut error);
             if error == 0 {
                 Ok(receipt)
             } else {
@@ -13301,7 +14514,7 @@ fn encrypt_pending_pq_message(
     )
 }
 
-fn flush_pending_pq_messages(state: &ToxState, tox: *mut c_void) {
+fn flush_pending_pq_messages(state: &ToxState, tox: ToxRef<'_>) {
     let Ok(_transaction) = state.chat_transaction_gate.lock() else {
         return;
     };
@@ -13317,7 +14530,6 @@ fn flush_pending_pq_messages(state: &ToxState, tox: *mut c_void) {
     }
 
     let mut sent = Vec::new();
-    let mut legacy_sent = Vec::new();
     for mut item in pending {
         if state
             .chat_protocol
@@ -13369,26 +14581,11 @@ fn flush_pending_pq_messages(state: &ToxState, tox: *mut c_void) {
         if !checkpoint_first_message_transmission(state, &item) {
             continue;
         }
-        if !state.pq.is_v2(item.friend_number) {
-            if let Ok(mut receipts) = state.pq_receipts.lock() {
-                receipts.insert((item.friend_number, encrypted.wire_id), item.id.clone());
-            } else {
-                continue;
-            }
-            legacy_sent.push((item.friend_public_key.clone(), item.id.clone()));
-        }
         state.pq.queue(item.friend_number, encrypted.packets);
         sent.push((item.friend_public_key, item.id));
     }
     if sent.is_empty() {
         return;
-    }
-    if let Ok(mut pending) = state.pending_pq_messages.lock() {
-        pending.retain(|item| {
-            !legacy_sent.iter().any(|(key, id)| {
-                id == &item.id && key.eq_ignore_ascii_case(&item.friend_public_key)
-            })
-        });
     }
     if let Ok(mut messages) = state.messages.lock() {
         for message in messages.iter_mut() {
@@ -13404,7 +14601,7 @@ fn flush_pending_pq_messages(state: &ToxState, tox: *mut c_void) {
     persist_tox_history(&state.messages, &state.history_path, &state.history_enabled);
 }
 
-fn drive_pq_sessions(state: &ToxState, tox: *mut c_void) {
+fn drive_pq_sessions(state: &ToxState, tox: ToxRef<'_>) {
     let Ok(_transaction) = state.chat_transaction_gate.lock() else {
         return;
     };
@@ -13670,6 +14867,7 @@ fn queue_backed_unsent_text_rows_with_keys(
     Ok(rows)
 }
 
+#[cfg(test)]
 fn clear_tox_history_for_state(
     state: &ToxState,
     friend_number: Option<u32>,
@@ -13687,7 +14885,7 @@ fn clear_tox_history_for_state_bound(
         .lock()
         .map_err(|_| "TOX_PROFILE_LOCK_POISONED")?;
     let instance = handle.as_ref().ok_or("TOX_NOT_INITIALIZED")?;
-    let friends = tox_friend_numbers_by_public_key(instance.instance.as_ptr());
+    let friends = tox_friend_numbers_by_public_key(instance.native());
     let current_keys = unique_public_keys_by_friend_number(&friends).0;
     let friend_public_key = match friend_number {
         Some(number) => current_keys
@@ -13956,6 +15154,7 @@ fn pq_status_for_state_bound(
     Ok(status)
 }
 
+#[cfg(test)]
 fn skip_pq_auto_for_state(state: &ToxState, friend: u32) -> Result<PqStatus, String> {
     skip_pq_auto_for_state_bound(state, friend, None)
 }
@@ -14090,57 +15289,7 @@ fn resume_pq_auto_skip(state: &ToxState, friend: u32, key: &str) -> Result<(), S
     state.pq.finish_auto_skip(friend)
 }
 
-fn drive_pq_shutdowns(state: &ToxState, tox: *mut c_void) {
-    let Ok(_transaction) = state.chat_transaction_gate.lock() else {
-        return;
-    };
-    for friend_number in state.pq.shutdown_friends() {
-        let Some(key) = tox_friend_public_key(tox, friend_number) else {
-            continue;
-        };
-        if !state.pq.contact_bound(friend_number, &key) {
-            continue;
-        }
-        let pending_drained = state
-            .pending_pq_messages
-            .lock()
-            .map(|pending| {
-                pending
-                    .iter()
-                    .all(|message| !pending_message_matches_friend(message, friend_number, &key))
-            })
-            .unwrap_or(false);
-        let receipts_drained = state
-            .pq_receipts
-            .lock()
-            .map(|receipts| {
-                receipts
-                    .keys()
-                    .all(|(receipt_friend, _)| *receipt_friend != friend_number)
-            })
-            .unwrap_or(false);
-        let (packets, closed) = state
-            .pq
-            .drive_shutdown(friend_number, pending_drained && receipts_drained);
-        if !packets.is_empty() {
-            state.pq.queue(friend_number, packets);
-        }
-        if closed {
-            let status = state.pq.status(friend_number);
-            if update_latest_pq_history_bound(
-                &state.messages,
-                friend_number,
-                &key,
-                &status,
-                "closed",
-            ) {
-                persist_tox_history(&state.messages, &state.history_path, &state.history_enabled);
-            }
-        }
-    }
-}
-
-fn flush_pq_outbox(state: &ToxState, tox: *mut c_void) {
+fn flush_pq_outbox(state: &ToxState, tox: ToxRef<'_>) {
     let Ok(_transaction) = state.chat_transaction_gate.lock() else {
         return;
     };
@@ -14155,15 +15304,7 @@ fn flush_pq_outbox(state: &ToxState, tox: *mut c_void) {
             continue;
         }
         let mut error = 0_i32;
-        let sent = unsafe {
-            tox_friend_send_lossless_packet(
-                tox,
-                friend_number,
-                bytes.as_ptr(),
-                bytes.len(),
-                &mut error,
-            )
-        };
+        let sent = tox.send_lossless_packet(friend_number, bytes.as_ref(), &mut error);
         if !sent || error != 0 {
             retry.push_back((friend_number, bytes));
             // A full toxcore send queue usually drains on the next iterate.
@@ -14177,7 +15318,7 @@ fn flush_pq_outbox(state: &ToxState, tox: *mut c_void) {
     }
 }
 
-fn flush_chat_protocol_outbox(state: &ToxState, tox: *mut c_void) {
+fn flush_chat_protocol_outbox(state: &ToxState, tox: ToxRef<'_>) {
     let Ok(_transaction) = state.chat_transaction_gate.lock() else {
         return;
     };
@@ -14242,15 +15383,7 @@ fn flush_chat_protocol_outbox(state: &ToxState, tox: *mut c_void) {
             continue;
         }
         let mut error = 0_i32;
-        let sent = unsafe {
-            tox_friend_send_lossless_packet(
-                tox,
-                friend_number,
-                bytes.as_ptr(),
-                bytes.len(),
-                &mut error,
-            )
-        };
+        let sent = tox.send_lossless_packet(friend_number, bytes.as_ref(), &mut error);
         if !sent || error != 0 {
             retry.push((friend_number, bytes));
             retry.append(&mut outbox);
@@ -14260,7 +15393,7 @@ fn flush_chat_protocol_outbox(state: &ToxState, tox: *mut c_void) {
     state.chat_protocol.requeue_packets_front(retry);
 }
 
-fn flush_file_card_outbox(state: &ToxState, tox: *mut c_void) {
+fn flush_file_card_outbox(state: &ToxState, tox: ToxRef<'_>) {
     let Ok(_transaction) = state.chat_transaction_gate.lock() else {
         return;
     };
@@ -14314,7 +15447,7 @@ fn flush_file_card_outbox(state: &ToxState, tox: *mut c_void) {
             continue;
         };
         if !state.chat_protocol.supports(friend_number)
-            || file_chat_transport_waits_for_pq(state, friend_number)
+            || ordinary_chat_transport_waits_for_pq(state, friend_number)
         {
             continue;
         }
@@ -14381,7 +15514,7 @@ fn flush_file_card_outbox(state: &ToxState, tox: *mut c_void) {
         };
         if !friend_is_connected(tox, friend_number)
             || !state.chat_protocol.supports(friend_number)
-            || file_chat_transport_waits_for_pq(state, friend_number)
+            || ordinary_chat_transport_waits_for_pq(state, friend_number)
         {
             continue;
         }
@@ -14396,19 +15529,11 @@ fn flush_file_card_outbox(state: &ToxState, tox: *mut c_void) {
             continue;
         }
         let mut error = 0_i32;
-        let _ = unsafe {
-            tox_friend_send_lossless_packet(
-                tox,
-                friend_number,
-                packet.as_ptr(),
-                packet.len(),
-                &mut error,
-            )
-        };
+        let _ = tox.send_lossless_packet(friend_number, packet.as_ref(), &mut error);
     }
 }
 
-fn flush_pending_files(state: &ToxState, tox: *mut c_void) {
+fn flush_pending_files(state: &ToxState, tox: ToxRef<'_>) {
     let Ok(_transaction) = state.chat_transaction_gate.lock() else {
         return;
     };
@@ -14463,7 +15588,7 @@ fn flush_pending_files(state: &ToxState, tox: *mut c_void) {
             continue;
         };
         item.friend_number = current_friend_number;
-        if file_chat_transport_waits_for_pq(state, item.friend_number) {
+        if ordinary_chat_transport_waits_for_pq(state, item.friend_number) {
             continue;
         }
         if item.protocol_version == Some(file_card_protocol::VERSION) {
@@ -14502,9 +15627,7 @@ fn flush_pending_files(state: &ToxState, tox: *mut c_void) {
             continue;
         }
         let mut connection_error = 0_i32;
-        let connection = unsafe {
-            tox_friend_get_connection_status(tox, item.friend_number, &mut connection_error)
-        };
+        let connection = tox.friend_connection_status(item.friend_number, &mut connection_error);
         if connection_error != 0 || connection == 0 {
             continue;
         }
@@ -14548,18 +15671,7 @@ fn flush_pending_files(state: &ToxState, tox: *mut c_void) {
         };
 
         let mut error = 0_i32;
-        let file_number = unsafe {
-            tox_file_send(
-                tox,
-                item.friend_number,
-                0,
-                item.size,
-                file_id.as_ptr(),
-                item.filename.as_bytes().as_ptr(),
-                item.filename.len(),
-                &mut error,
-            )
-        };
+        let file_number = tox.file_send(item.friend_number, 0, item.size, Some(&file_id), item.filename.as_bytes(), &mut error);
         if error == 0 {
             if let Ok(mut outgoing) = state.outgoing_files.lock() {
                 outgoing.insert(
@@ -14637,9 +15749,9 @@ fn flush_pending_files(state: &ToxState, tox: *mut c_void) {
 // toxcore transfers are stream based: there is no protocol-level resume after a
 // cancellation.  A retry therefore creates a fresh Tox file offer from the
 // locally cached source file.  This is safer than leaving a dead offer forever.
-fn friend_is_connected(tox: *mut c_void, friend_number: u32) -> bool {
+fn friend_is_connected(tox: ToxRef<'_>, friend_number: u32) -> bool {
     let mut error = 0_i32;
-    unsafe { tox_friend_get_connection_status(tox, friend_number, &mut error) != 0 && error == 0 }
+    tox.friend_connection_status(friend_number, &mut error) != 0 && error == 0
 }
 
 fn outgoing_transfer_timed_out(transfer: &OutgoingFile) -> bool {
@@ -14705,7 +15817,7 @@ fn pending_file_retry(
     }
 }
 
-fn check_file_transfer_timeouts(state: &ToxState, tox: *mut c_void) {
+fn check_file_transfer_timeouts(state: &ToxState, tox: ToxRef<'_>) {
     let expired_outgoing = state
         .outgoing_files
         .lock()
@@ -14737,9 +15849,7 @@ fn check_file_transfer_timeouts(state: &ToxState, tox: *mut c_void) {
             files.remove(&(friend_number, file_number));
         }
         let mut error = 0_i32;
-        unsafe {
-            let _ = tox_file_control(tox, friend_number, file_number, 2, &mut error);
-        }
+        let _ = tox.file_control(friend_number, file_number, 2, &mut error);
         if let Some(message_id) = transfer.message_id.clone() {
             if transfer.fully_sent {
                 set_attachment_transfer_error(
@@ -14763,7 +15873,7 @@ fn check_file_transfer_timeouts(state: &ToxState, tox: *mut c_void) {
                             &transfer,
                             message_id.clone(),
                             friend_number,
-                            tox_friend_public_key(tox, friend_number).unwrap_or_default(),
+                            tox_friend_public_key(Some(tox), friend_number).unwrap_or_default(),
                         ));
                     }
                     set_attachment_retrying(&state.messages, &message_id, transfer.retry_count + 1);
@@ -14799,9 +15909,7 @@ fn check_file_transfer_timeouts(state: &ToxState, tox: *mut c_void) {
             files.remove(&(friend_number, file_number));
         }
         let mut error = 0_i32;
-        unsafe {
-            let _ = tox_file_control(tox, friend_number, file_number, 2, &mut error);
-        }
+        let _ = tox.file_control(friend_number, file_number, 2, &mut error);
         let _ = profiles::remove_file(&transfer.path);
         if let Some(message_id) = transfer.message_id {
             set_attachment_transfer_error(
@@ -14817,12 +15925,12 @@ fn check_file_transfer_timeouts(state: &ToxState, tox: *mut c_void) {
             );
         }
         if transfer.kind != 1 {
-            resume_next_queued_incoming_for_state(tox, state);
+            resume_next_queued_incoming_for_state(Some(tox), state);
         }
     }
     // Also heals a slot released while the Tox handle was being rebuilt.
     // The helper is a no-op unless capacity and an auto-queued file coexist.
-    resume_next_queued_incoming_for_state(tox, state);
+    resume_next_queued_incoming_for_state(Some(tox), state);
     if outgoing_changed {
         persist_pending_files(&state.pending_files, &state.pending_files_path);
     }
@@ -14849,160 +15957,12 @@ fn check_file_transfer_timeouts(state: &ToxState, tox: *mut c_void) {
     }
 }
 
-const BOOTSTRAP_NODES: [(&str, u16, &str); 4] = [
-    (
-        "144.217.167.73",
-        33445,
-        "7E5668E0EE09E19F320AD47902419331FFEE147BB3606769CFBE921A2A2FD34C",
-    ),
-    (
-        "172.104.215.182",
-        33445,
-        "DA2BD927E01CD05EBCC2574EBE5BEBB10FF59AE0B2105A7D1E2B40E49BB20239",
-    ),
-    (
-        "tox.initramfs.io",
-        33445,
-        "3F0A45A268367C1BEA652F258C85F4A66DA76BCAA667A49E770BCC4917AB6A25",
-    ),
-    (
-        "tox1.mf-net.eu",
-        33445,
-        "B3E5FA80DC8EBD1149AD2AB35ED8B85BD546DEDE261CA593234C619249419506",
-    ),
-];
-
-#[derive(Clone)]
-struct ResolvedBootstrapNode {
-    address: String,
-    port: u16,
-    key: [u8; 32],
-}
-
-struct BootstrapNodeCache {
-    refreshed_at: Option<Instant>,
-    nodes: Vec<ResolvedBootstrapNode>,
-    refreshing: bool,
-}
-
-static DIRECT_BOOTSTRAP_CACHE: OnceLock<Mutex<BootstrapNodeCache>> = OnceLock::new();
-
-fn decode_bootstrap_key(key_hex: &str) -> Option<[u8; 32]> {
-    let mut key = [0_u8; 32];
-    for (index, byte) in key.iter_mut().enumerate() {
-        let offset = index * 2;
-        *byte = u8::from_str_radix(key_hex.get(offset..offset + 2)?, 16).ok()?;
-    }
-    Some(key)
-}
-
-fn literal_bootstrap_nodes() -> Vec<ResolvedBootstrapNode> {
-    BOOTSTRAP_NODES
-        .iter()
-        .filter(|(host, _, _)| host.parse::<std::net::IpAddr>().is_ok())
-        .filter_map(|(host, port, key_hex)| {
-            Some(ResolvedBootstrapNode {
-                address: (*host).to_string(),
-                port: *port,
-                key: decode_bootstrap_key(key_hex)?,
-            })
-        })
-        .collect()
-}
-
-fn resolved_bootstrap_nodes(allow_local_dns: bool) -> Vec<ResolvedBootstrapNode> {
-    if !allow_local_dns {
-        // Tor and explicit proxy routes must never leak bootstrap DNS queries.
-        return literal_bootstrap_nodes();
-    }
-
-    let cache = DIRECT_BOOTSTRAP_CACHE.get_or_init(|| {
-        Mutex::new(BootstrapNodeCache {
-            refreshed_at: None,
-            nodes: literal_bootstrap_nodes(),
-            refreshing: false,
-        })
-    });
-    let Ok(mut cache) = cache.lock() else {
-        return literal_bootstrap_nodes();
-    };
-    if cache
-        .refreshed_at
-        .is_some_and(|refreshed_at| refreshed_at.elapsed() < Duration::from_secs(300))
-    {
-        return cache.nodes.clone();
-    }
-    let available = cache.nodes.clone();
-    if cache.refreshing {
-        return available;
-    }
-    cache.refreshing = true;
-    drop(cache);
-
-    // Never make a profile's network loop, its Tox handle, or a Tauri command
-    // wait for Windows DNS. One resolver refresh is shared by every profile.
-    thread::spawn(refresh_direct_bootstrap_nodes);
-    available
-}
-
-fn refresh_direct_bootstrap_nodes() {
-    let mut nodes = literal_bootstrap_nodes();
-    let mut addresses = nodes
-        .iter()
-        .map(|node| (node.address.clone(), node.port, node.key))
-        .collect::<HashSet<_>>();
-    for (host, port, key_hex) in BOOTSTRAP_NODES {
-        if host.parse::<std::net::IpAddr>().is_ok() {
-            continue;
-        }
-        let Some(key) = decode_bootstrap_key(key_hex) else {
-            continue;
-        };
-        let Ok(resolved) = (host, port).to_socket_addrs() else {
-            continue;
-        };
-        for address in resolved.filter(|address| address.is_ipv4()) {
-            let entry = (address.ip().to_string(), port, key);
-            if addresses.insert(entry.clone()) {
-                nodes.push(ResolvedBootstrapNode {
-                    address: entry.0,
-                    port: entry.1,
-                    key: entry.2,
-                });
-            }
-        }
-    }
-    let Some(cache) = DIRECT_BOOTSTRAP_CACHE.get() else {
-        return;
-    };
-    if let Ok(mut cache) = cache.lock() {
-        cache.refreshed_at = Some(Instant::now());
-        cache.nodes = nodes;
-        cache.refreshing = false;
-    }
-}
-
-fn bootstrap_tox(tox: *mut c_void, nodes: &[ResolvedBootstrapNode]) {
-    // The connection state below is the source of truth; accepting a bootstrap
-    // packet only means it was queued, not that the DHT connection succeeded.
-    for node in nodes {
-        let Ok(host) = CString::new(node.address.as_str()) else {
-            continue;
-        };
-        let mut error = 0_i32;
-        unsafe {
-            let _ = tox_bootstrap(tox, host.as_ptr(), node.port, node.key.as_ptr(), &mut error);
-            // The same verified nodes expose TCP relay ports. Adding them lets
-            // toxcore establish a route even when local UDP is filtered.
-            let _ = tox_add_tcp_relay(tox, host.as_ptr(), node.port, node.key.as_ptr(), &mut error);
-        }
-    }
-}
-
 impl Drop for ToxState {
     fn drop(&mut self) {
         #[cfg(feature = "web-core")]
-        if self.web_finalized.load(Ordering::Acquire) { return; }
+        if self.web_finalized.load(Ordering::Acquire) {
+            return;
+        }
         if Arc::strong_count(&self.handle) != 1 {
             return;
         }
@@ -15018,7 +15978,7 @@ impl Drop for ToxState {
             if let Some(instance) = state.take() {
                 let _ = Self::save(&instance);
                 let _ = self.checkpoint_profile(true);
-                unsafe { tox_kill(instance.instance.as_ptr()) };
+                drop(instance);
             }
         }
     }
@@ -15037,9 +15997,11 @@ unsafe extern "C" {
     #[cfg(test)]
     fn tox_options_get_local_discovery_enabled(options: *const c_void) -> bool;
     fn tox_options_set_proxy_type(options: *mut c_void, proxy_type: i32);
+    #[cfg(test)]
     fn tox_options_get_proxy_type(options: *const c_void) -> i32;
     fn tox_options_set_proxy_host(options: *mut c_void, host: *const i8) -> bool;
     fn tox_options_set_proxy_port(options: *mut c_void, port: u16);
+    #[cfg(test)]
     fn tox_options_get_proxy_port(options: *const c_void) -> u16;
     fn tox_options_set_experimental_disable_dns(options: *mut c_void, enabled: bool);
     fn tox_options_set_savedata_type(options: *mut c_void, savedata_type: i32);
@@ -15136,6 +16098,7 @@ unsafe extern "C" {
         length: usize,
         error: *mut i32,
     ) -> bool;
+    #[cfg(all(test, feature = "desktop"))]
     fn tox_hash(hash: *mut u8, data: *const u8, length: usize) -> bool;
     fn tox_file_send(
         tox: *mut c_void,
@@ -15231,34 +16194,31 @@ unsafe extern "C" {
 #[cfg(all(test, feature = "desktop"))]
 mod tox_tests {
     use super::desktop_adapter::{
-        get_tox_friends_snapshot, import_qtox_avatars, validated_download_file,
+        get_tox_friends_snapshot, import_qtox_avatars, unavailable_download_attachment_ids,
+        validated_download_file,
     };
     use super::{
-        affected_friend_avatar_numbers, append_pq_history, apply_network_options,
-        avatar_data_url_from_path, chat_snapshot_revision, create_tox_handle,
-        current_self_avatar_matches, exact_loaded_profile, friend_message_connection_is_settled,
-        friend_message_snapshot, hex_upper, inactive_history_eviction_targets,
-        incoming_transfer_timed_out, incoming_transfer_timed_out_at,
-        initial_connection_preset_values, initialize_created_profile_offline,
-        local_notifications_enabled, message_matches_friend, next_queued_incoming,
-        normalize_status_message, note_friend_message_connection, note_outgoing_transport_loss,
-        outgoing_file_cache_path, outgoing_transfer_timed_out, outgoing_transfer_timed_out_at,
-        parse_webview2_runtime_max_relative_path, pending_file_retry,
-        persist_message_reaction_view, persist_tox_history, persist_unread_state,
-        portable_webview_data_dir, preferred_profile_avatar_from_directory,
+        affected_friend_avatar_numbers, append_pq_history_bound,
+        avatar_data_url_from_path, chat_snapshot_revision,
+        create_tox_handle, current_self_avatar_matches, exact_loaded_profile,
+        friend_message_connection_is_settled, friend_message_snapshot, hex_upper,
+        inactive_history_eviction_targets, incoming_transfer_timed_out,
+        incoming_transfer_timed_out_at, initial_connection_preset_values,
+        initialize_created_profile_offline, local_notifications_enabled, message_matches_friend,
+        next_queued_incoming, normalize_status_message, note_friend_message_connection,
+        note_outgoing_transport_loss, outgoing_file_cache_path, outgoing_transfer_timed_out,
+        outgoing_transfer_timed_out_at, parse_webview2_runtime_max_relative_path,
+        pending_file_retry, persist_message_reaction_view, persist_tox_history,
+        persist_unread_state, portable_webview_data_dir, preferred_profile_avatar_from_directory,
         prepare_outgoing_source, profile_local_state_preserving_avatar, profiles, qtox_history,
         reaction_target_policy, read_profile_local_state, rebase_portable_file,
         reconcile_friend_avatar_files, reconcile_reaction_targets, record_pq_active_history,
         record_pq_active_history_with_role_policy, refresh_history_residence,
         release_history_residence, remove_file_transfer_for_direction, remove_self_avatar_files,
-        resolved_bootstrap_nodes, safe_file_name, sanitize_untrusted_text, set_user_status_inner,
-        should_default_linux_dmabuf_renderer, text_chunk_end, tox_friend_add_norequest,
-        tox_friend_get_public_key, tox_get_savedata, tox_get_savedata_size, tox_kill,
-        tox_options_free, tox_options_get_ipv6_enabled, tox_options_get_local_discovery_enabled,
-        tox_options_get_udp_enabled, tox_options_new, tox_savedata_public_key,
-        tox_self_get_address, tox_self_get_friend_list, tox_self_get_friend_list_size,
-        tray_base_image, tray_image, unique_download_path, update_latest_pq_history,
-        validate_profile_avatar_update, webview2_runtime_paths_fit,
+        safe_file_name, sanitize_untrusted_text, set_user_status_inner,
+        should_default_linux_dmabuf_renderer, text_chunk_end, tox_savedata_public_key, ToxOptions,
+        tray_base_image, tray_image, unique_download_path,
+        update_latest_pq_history_bound, validate_profile_avatar_update, webview2_runtime_paths_fit,
         write_profile_avatar_local_state, write_profile_local_state,
         write_profile_local_state_preserving_avatar, write_profile_local_state_transaction,
         write_transfer_chunk, AppSettings, CachedFriendProfile, ChatProtocolEngine,
@@ -15281,7 +16241,7 @@ mod tox_tests {
         time::{Duration, Instant, SystemTime, UNIX_EPOCH},
     };
 
-    fn temporary_root(label: &str) -> std::path::PathBuf {
+    pub(super) fn temporary_root(label: &str) -> std::path::PathBuf {
         let suffix = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -15289,7 +16249,7 @@ mod tox_tests {
         std::env::temp_dir().join(format!("kaigen-{label}-{suffix}"))
     }
 
-    fn offline_test_state(
+    pub(super) fn offline_test_state(
         root: &std::path::Path,
         paths: ProfilePaths,
         savedata: Option<Vec<u8>>,
@@ -15324,7 +16284,7 @@ mod tox_tests {
         .unwrap()
     }
 
-    fn add_offline_test_friend(
+    pub(super) fn add_offline_test_friend(
         state: &ToxState,
         root: &std::path::Path,
         label: &str,
@@ -15337,21 +16297,18 @@ mod tox_tests {
             None,
         )
         .unwrap();
-        let mut address = [0_u8; 38];
-        unsafe { tox_self_get_address(peer.instance.as_ptr(), address.as_mut_ptr()) };
+        let address = peer.address();
         let public_key = hex_upper(&address[..32]);
         let mut error = 0_i32;
         let friend_number = {
             let state = state.handle.lock().unwrap();
             let instance = state.as_ref().unwrap();
-            let friend_number = unsafe {
-                tox_friend_add_norequest(instance.instance.as_ptr(), address.as_ptr(), &mut error)
-            };
+            let friend_number = instance.native().friend_add_norequest(address.first_chunk::<32>().unwrap(), &mut error);
             assert_eq!(error, 0, "could not add the offline test friend");
             ToxState::save(instance).unwrap();
             friend_number
         };
-        unsafe { tox_kill(peer.instance.as_ptr()) };
+        drop(peer);
         (friend_number, public_key)
     }
 
@@ -15413,20 +16370,9 @@ mod tox_tests {
             );
             let handle_guard = state.handle.lock().unwrap();
             let handle = handle_guard.as_ref().unwrap();
-            assert_eq!(
-                unsafe { tox_self_get_friend_list_size(handle.instance.as_ptr()) },
-                1
-            );
-            let mut address = [0_u8; 38];
-            unsafe {
-                tox_self_get_address(handle.instance.as_ptr(), address.as_mut_ptr());
-            }
-            assert_eq!(hex_upper(&address[..32]), identity);
-            let mut key = [0_u8; 32];
-            let mut error = 0_i32;
-            assert!(unsafe {
-                tox_friend_get_public_key(handle.instance.as_ptr(), 0, key.as_mut_ptr(), &mut error)
-            });
+            assert_eq!(handle.friend_numbers().len(), 1);
+            assert_eq!(hex_upper(&handle.address()[..32]), identity);
+            let key = handle.native().friend_public_key(0, &mut 0).unwrap();
             assert_eq!(hex_upper(&key), peer_key);
             drop(handle_guard);
             assert_eq!(
@@ -15469,13 +16415,14 @@ mod tox_tests {
             pq: Arc::clone(&state.pq),
             chat_protocol: Arc::clone(&state.chat_protocol),
             file_card_protocol: Arc::clone(&state.file_card_protocol),
-            pq_receipts: Arc::clone(&state.pq_receipts),
             file_receive_settings: Arc::clone(&state.file_receive_settings),
             unread_state: Arc::clone(&state.unread_state),
             unread_state_path: state.unread_state_path.clone(),
             friend_message_ready_at: Arc::clone(&state.friend_message_ready_at),
             friend_status_received: Arc::clone(&state.friend_status_received),
             network_enabled: Arc::clone(&state.network_enabled),
+            #[cfg(feature = "web-core")]
+            handle_generation: Arc::clone(&state.handle_generation),
             chat_transaction_gate: Arc::clone(&state.chat_transaction_gate),
             chat_transport_ready: Arc::clone(&state.chat_transport_ready),
             #[cfg(feature = "web-core")]
@@ -15638,21 +16585,15 @@ mod tox_tests {
         let context = callback_context_for(&state);
         let filename = b"activity.bin";
         let handle = state.handle.lock().unwrap();
-        let tox = handle.as_ref().unwrap().instance.as_ptr();
-        unsafe {
-            super::on_file_recv(
-                tox,
-                friend_number,
-                77,
-                0,
-                4,
-                filename.as_ptr(),
-                filename.len(),
-                (&context as *const super::CallbackContext)
-                    .cast_mut()
-                    .cast(),
-            )
-        };
+        super::handle_file_recv(
+            &context,
+            handle.as_ref().unwrap().native(),
+            friend_number,
+            77,
+            0,
+            4,
+            filename,
+        );
         drop(handle);
 
         let recorded_sequence = state
@@ -15886,7 +16827,8 @@ mod tox_tests {
         let root = temporary_root("reaction-history-archive");
         fs::create_dir_all(&root).unwrap();
         let history_path = root.join("chat-history.json");
-        let friend_public_key = "AABB";
+        let key = "AABB".repeat(16);
+        let friend_public_key = key.as_str();
         let rows = (1_u64..=51)
             .map(|index| ToxMessage {
                 id: format!("{index:032x}"),
@@ -16488,6 +17430,49 @@ mod tox_tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    #[test]
+    fn snapshot_marks_missing_download_until_payload_is_restored() {
+        let root = temporary_root("snapshot-download");
+        let paths = PortablePaths::from_root(root.clone()).unwrap();
+        let received = paths.downloads_dir.join("received.txt");
+        let message: ToxMessage = serde_json::from_value(serde_json::json!({
+            "id": "received",
+            "friend_number": 0,
+            "text": "",
+            "mine": false,
+            "timestamp": 0,
+            "attachment": {
+                "name": "received.txt",
+                "size": 8,
+                "mime": "text/plain",
+                "path": "C:\\Kaigen\\downloads\\received.txt",
+                "completed": true,
+                "transfer_state": "complete"
+            }
+        }))
+        .unwrap();
+        let mut outgoing = message.clone();
+        outgoing.id = "outgoing".into();
+        outgoing.mine = true;
+        let mut pending = message.clone();
+        pending.id = "pending".into();
+        pending.attachment.as_mut().unwrap().completed = false;
+        let mut browser = message.clone();
+        browser.id = "browser".into();
+        browser.attachment.as_mut().unwrap().path = "browser-stream://retained".into();
+        let messages = [message, outgoing, pending, browser];
+        let unavailable = || {
+            unavailable_download_attachment_ids(&root, &paths.downloads_dir, &messages)
+        };
+
+        assert_eq!(unavailable(), vec!["received".to_string()]);
+        fs::write(&received, b"short").unwrap();
+        assert_eq!(unavailable(), vec!["received".to_string()]);
+        fs::write(&received, b"received").unwrap();
+        assert!(unavailable().is_empty());
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[cfg(target_os = "windows")]
     #[test]
     fn windows_reveal_preserves_exact_unicode_drive_and_unc_paths() {
@@ -16648,7 +17633,8 @@ mod tox_tests {
             friend_public_key: String::new(),
             ..stable
         };
-        assert!(message_matches_friend(&legacy, 7, "ALICE"));
+        // A reused runtime number cannot bind an unkeyed legacy row to its current contact.
+        assert!(!message_matches_friend(&legacy, 7, "ALICE"));
         assert!(!message_matches_friend(&legacy, 99, "ALICE"));
     }
 
@@ -16705,16 +17691,12 @@ mod tox_tests {
         let path = temporary_root("savedata-public-key").join("identity.tox");
         let handle =
             create_tox_handle(path, None, None, &NetworkSettings::default(), None).unwrap();
-        let mut address = [0_u8; 38];
-        unsafe { tox_self_get_address(handle.instance.as_ptr(), address.as_mut_ptr()) };
-        let size = unsafe { tox_get_savedata_size(handle.instance.as_ptr()) };
-        let mut savedata = vec![0_u8; size];
-        unsafe { tox_get_savedata(handle.instance.as_ptr(), savedata.as_mut_ptr()) };
+        let address = handle.address();
+        let savedata = handle.savedata();
         assert_eq!(
             tox_savedata_public_key(&savedata).unwrap(),
             hex_upper(&address[..32])
         );
-        unsafe { tox_kill(handle.instance.as_ptr()) };
     }
 
     #[cfg(target_os = "windows")]
@@ -16750,29 +17732,17 @@ mod tox_tests {
             None,
         )
         .unwrap();
-        let mut self_address = [0_u8; 38];
-        let mut peer_address = [0_u8; 38];
-        unsafe {
-            tox_self_get_address(profile.instance.as_ptr(), self_address.as_mut_ptr());
-            tox_self_get_address(peer.instance.as_ptr(), peer_address.as_mut_ptr());
-        }
+        let self_address = profile.address();
+        let peer_address = peer.address();
         let mut self_public_key = [0_u8; 32];
         let mut peer_public_key = [0_u8; 32];
         self_public_key.copy_from_slice(&self_address[..32]);
         peer_public_key.copy_from_slice(&peer_address[..32]);
         let mut friend_error = 0_i32;
-        let friend_number = unsafe {
-            tox_friend_add_norequest(
-                profile.instance.as_ptr(),
-                peer_public_key.as_ptr(),
-                &mut friend_error,
-            )
-        };
+        let friend_number = profile.native().friend_add_norequest(&peer_public_key, &mut friend_error);
         assert_eq!(friend_error, 0);
         assert_eq!(friend_number, 0);
-        let savedata_size = unsafe { tox_get_savedata_size(profile.instance.as_ptr()) };
-        let mut savedata = vec![0_u8; savedata_size];
-        unsafe { tox_get_savedata(profile.instance.as_ptr(), savedata.as_mut_ptr()) };
+        let savedata = profile.savedata();
         let encrypted = profiles::ProfileCipher::new(password)
             .unwrap()
             .encrypt(&savedata)
@@ -16825,10 +17795,8 @@ mod tox_tests {
         assert_eq!(rows[0].chat_key, peer_public_key);
         assert_eq!(rows[0].sender_key, self_public_key);
         assert_eq!(rows[0].text, "disposable qTox SQLCipher history");
-        unsafe {
-            tox_kill(peer.instance.as_ptr());
-            tox_kill(profile.instance.as_ptr());
-        }
+        drop(peer);
+        drop(profile);
         if requested_output.is_none() {
             fs::remove_dir_all(root).unwrap();
         }
@@ -16888,7 +17856,6 @@ mod tox_tests {
             identity_waiting: false,
             auto_pending: false,
             manual_waiting_for_capability: false,
-            legacy_available: false,
             protocol_version: 2,
             shutdown_state: "idle".into(),
             shutdown_cancellable: false,
@@ -16900,7 +17867,15 @@ mod tox_tests {
             fingerprint_changed: false,
             error: None,
         };
-        append_pq_history(&messages, 7, &offered, "initiator", "offered", true);
+        append_pq_history_bound(
+            &messages,
+            7,
+            "PEER-PUBLIC-KEY",
+            &offered,
+            "initiator",
+            "offered",
+            true,
+        );
         let original_id = messages.lock().unwrap()[0].id.clone();
         let active = PqStatus {
             state: "active".to_string(),
@@ -16926,12 +17901,26 @@ mod tox_tests {
             assert_eq!(messages[0].event.as_ref().unwrap().role, "initiator");
             assert!(messages[0].text.contains("успешно"));
         }
-        append_pq_history(&messages, 7, &active, "initiator", "close_pending", true);
+        append_pq_history_bound(
+            &messages,
+            7,
+            "PEER-PUBLIC-KEY",
+            &active,
+            "initiator",
+            "close_pending",
+            true,
+        );
         let available = PqStatus {
             state: "available".to_string(),
             ..active
         };
-        assert!(update_latest_pq_history(&messages, 7, &available, "closed"));
+        assert!(update_latest_pq_history_bound(
+            &messages,
+            7,
+            "PEER-PUBLIC-KEY",
+            &available,
+            "closed"
+        ));
         let messages = messages.lock().unwrap();
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0].event.as_ref().unwrap().status, "active");
@@ -16955,7 +17944,6 @@ mod tox_tests {
                 identity_waiting: false,
                 auto_pending: true,
                 manual_waiting_for_capability: false,
-                legacy_available: false,
                 protocol_version: 2,
                 shutdown_state: "idle".into(),
                 shutdown_cancellable: false,
@@ -17033,7 +18021,6 @@ mod tox_tests {
             identity_waiting: false,
             auto_pending: false,
             manual_waiting_for_capability: false,
-            legacy_available: false,
             protocol_version: 2,
             shutdown_state: "idle".into(),
             shutdown_cancellable: false,
@@ -17075,7 +18062,15 @@ mod tox_tests {
         assert_eq!(messages.lock().unwrap()[0].id, first.id);
         assert_eq!(messages.lock().unwrap()[0].timestamp, first.timestamp);
 
-        append_pq_history(&messages, 7, &active, "initiator", "offered", true);
+        append_pq_history_bound(
+            &messages,
+            7,
+            "PEER-PUBLIC-KEY",
+            &active,
+            "initiator",
+            "offered",
+            true,
+        );
         assert!(record_pq_active_history_with_role_policy(
             &messages,
             &history_path,
@@ -17092,9 +18087,31 @@ mod tox_tests {
         .unwrap());
         assert_eq!(messages.lock().unwrap().len(), 1);
 
-        append_pq_history(&messages, 7, &active, "initiator", "close_pending", true);
-        assert!(update_latest_pq_history(&messages, 7, &active, "closed"));
-        append_pq_history(&messages, 7, &active, "initiator", "offered", true);
+        append_pq_history_bound(
+            &messages,
+            7,
+            "PEER-PUBLIC-KEY",
+            &active,
+            "initiator",
+            "close_pending",
+            true,
+        );
+        assert!(update_latest_pq_history_bound(
+            &messages,
+            7,
+            "PEER-PUBLIC-KEY",
+            &active,
+            "closed"
+        ));
+        append_pq_history_bound(
+            &messages,
+            7,
+            "PEER-PUBLIC-KEY",
+            &active,
+            "initiator",
+            "offered",
+            true,
+        );
         let after_manual_close = (notified.0.clone(), true, 1);
         assert!(record_pq_active_history_with_role_policy(
             &messages,
@@ -17139,6 +18156,11 @@ mod tox_tests {
 
     #[test]
     fn suppressed_pq_offer_is_removed_after_older_batched_history_snapshot() {
+        if super::deferred_persistence_tests::run_with_isolated_writers(
+            "tox_tests::suppressed_pq_offer_is_removed_after_older_batched_history_snapshot",
+        ) {
+            return;
+        }
         let root = temporary_root("pq-notice-fifo-remove");
         fs::create_dir_all(&root).unwrap();
         let history_path = root.join("chat-history.json");
@@ -17148,7 +18170,6 @@ mod tox_tests {
             identity_waiting: false,
             auto_pending: false,
             manual_waiting_for_capability: false,
-            legacy_available: false,
             protocol_version: 2,
             shutdown_state: "idle".into(),
             shutdown_cancellable: false,
@@ -17236,7 +18257,6 @@ mod tox_tests {
             identity_waiting: false,
             auto_pending: true,
             manual_waiting_for_capability: false,
-            legacy_available: false,
             protocol_version: 2,
             shutdown_state: "idle".into(),
             shutdown_cancellable: false,
@@ -17289,27 +18309,21 @@ mod tox_tests {
     #[test]
     fn shared_network_switches_reach_real_tox_options() {
         let mut error = 0_i32;
-        let options = unsafe { tox_options_new(&mut error) };
-        assert!(!options.is_null());
+        let mut options = ToxOptions::new(&mut error).expect("create Tox options");
         assert_eq!(error, 0);
         let requested = NetworkSettings {
             udp_enabled: true,
             ipv6_enabled: true,
             local_discovery_enabled: true,
         };
-        assert_eq!(apply_network_options(options, &requested, false), requested);
-        assert!(unsafe { tox_options_get_udp_enabled(options) });
-        assert!(unsafe { tox_options_get_ipv6_enabled(options) });
-        assert!(unsafe { tox_options_get_local_discovery_enabled(options) });
+        assert_eq!(options.apply_network(&requested, false), requested);
+        assert_eq!(options.network_flags(), (true, true, true));
 
-        let proxied = apply_network_options(options, &requested, true);
+        let proxied = options.apply_network(&requested, true);
         assert!(!proxied.udp_enabled);
         assert!(proxied.ipv6_enabled);
         assert!(!proxied.local_discovery_enabled);
-        assert!(!unsafe { tox_options_get_udp_enabled(options) });
-        assert!(unsafe { tox_options_get_ipv6_enabled(options) });
-        assert!(!unsafe { tox_options_get_local_discovery_enabled(options) });
-        unsafe { tox_options_free(options) };
+        assert_eq!(options.network_flags(), (false, true, false));
     }
 
     #[test]
@@ -18091,12 +19105,18 @@ mod tox_tests {
         )
         .unwrap();
         let tor = TorManager::new(root.clone(), global_data, logs).unwrap();
-        // A closed loopback SOCKS port keeps the regression test completely
-        // offline and makes hostname bootstrap attempts fail immediately.
+        // Own both endpoints for the entire test. Neither listener accepts or
+        // answers a SOCKS handshake, so neither route can connect to the network.
+        // Keeping them bound avoids a free-port race with other parallel cases.
+        let initial_proxy = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let replacement_proxy = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let initial_proxy_port = initial_proxy.local_addr().unwrap().port();
+        let replacement_proxy_port = replacement_proxy.local_addr().unwrap().port();
+        assert_ne!(initial_proxy_port, replacement_proxy_port);
         let proxy = Arc::new(Mutex::new(ProxySettings {
             mode: "socks5".to_string(),
             host: "127.0.0.1".to_string(),
-            port: 9,
+            port: initial_proxy_port,
             username: String::new(),
             password: String::new(),
         }));
@@ -18167,20 +19187,26 @@ mod tox_tests {
         assert!(first_iterations > 0, "first profile did not iterate");
         assert!(second_iterations > 0, "second profile did not iterate");
 
-        *proxy.lock().unwrap() = ProxySettings::default();
+        proxy.lock().unwrap().port = replacement_proxy_port;
         let first_generation = first
             .handle_generation
             .load(std::sync::atomic::Ordering::SeqCst);
         let second_generation = second
             .handle_generation
             .load(std::sync::atomic::Ordering::SeqCst);
-        let route_change_started = Instant::now();
         first.rebuild_network_route().unwrap();
         second.rebuild_network_route().unwrap();
-        assert!(
-            route_change_started.elapsed() < Duration::from_secs(2),
-            "route rebuild waited for a network connection"
-        );
+        // Rebuild must return while both actual native instances are offline.
+        // Local durability and scheduling are not a network-connect deadline.
+        for state in [&first, &second] {
+            let handle = state.handle.lock().unwrap();
+            let handle = handle.as_ref().expect("rebuilt Tox handle is missing");
+            assert_eq!(
+                handle.native().connection_status(),
+                0,
+                "route rebuild unexpectedly required an online connection"
+            );
+        }
         assert!(
             first
                 .handle_generation
@@ -18203,6 +19229,8 @@ mod tox_tests {
         thread::sleep(Duration::from_millis(300));
         drop(first);
         drop(second);
+        drop(initial_proxy);
+        drop(replacement_proxy);
         let _ = fs::remove_dir_all(root);
     }
 
@@ -18255,7 +19283,8 @@ mod tox_tests {
     #[test]
     fn bootstrap_dns_never_delays_a_profile_network_loop() {
         let started = Instant::now();
-        let nodes = resolved_bootstrap_nodes(true);
+        let bootstrap = super::bootstrap_nodes::State::load(None, false).unwrap();
+        let (_, nodes) = bootstrap.snapshot(true, true).unwrap();
         assert!(
             started.elapsed() < Duration::from_millis(500),
             "bootstrap resolution blocked the profile network loop"
@@ -18264,7 +19293,7 @@ mod tox_tests {
         assert!(
             nodes
                 .iter()
-                .all(|node| node.address.parse::<std::net::IpAddr>().is_ok()),
+                .all(|node| node.numeric_ip()),
             "toxcore received a hostname that could perform blocking DNS while its handle was locked"
         );
     }
@@ -18292,25 +19321,12 @@ mod tox_tests {
             None,
         )
         .unwrap();
-        let mut address = [0_u8; 38];
-        unsafe { tox_self_get_address(handle.instance.as_ptr(), address.as_mut_ptr()) };
+        let address = handle.address();
         let mut public_key = [0_u8; 32];
         public_key.copy_from_slice(&address[..32]);
-        let friend_count = unsafe { tox_self_get_friend_list_size(handle.instance.as_ptr()) };
-        let mut friend_numbers = vec![0_u32; friend_count];
-        unsafe { tox_self_get_friend_list(handle.instance.as_ptr(), friend_numbers.as_mut_ptr()) };
         let mut friends = HashMap::new();
-        for friend_number in friend_numbers {
-            let mut friend_key = [0_u8; 32];
-            let mut error = 0_i32;
-            if unsafe {
-                tox_friend_get_public_key(
-                    handle.instance.as_ptr(),
-                    friend_number,
-                    friend_key.as_mut_ptr(),
-                    &mut error,
-                )
-            } {
+        for friend_number in handle.friend_numbers() {
+            if let Some(friend_key) = handle.native().friend_public_key(friend_number, &mut 0) {
                 friends.insert(friend_key.to_vec(), friend_number);
             }
         }
@@ -18489,12 +19505,12 @@ fn profile_local_state_path(tox_state: &ToxState) -> Result<PathBuf, String> {
 }
 
 fn read_profile_local_state(path: &Path) -> Result<Option<Value>, String> {
-    if !profiles::file_exists(path) {
+    let Some(contents) = profiles::read_optional_file(path)
+        .map_err(|error| format!("Could not read profile local state: {error}"))?
+    else {
         return Ok(None);
-    }
-    let contents = profiles::read_text(path)
-        .map_err(|error| format!("Could not read profile local state: {error}"))?;
-    serde_json::from_str(&contents)
+    };
+    serde_json::from_slice(&contents)
         .map(Some)
         .map_err(|error| format!("PROFILE_LOCAL_STATE_INVALID: {error}"))
 }
@@ -18554,6 +19570,7 @@ where
     write_profile_local_state(path, &next)
 }
 
+#[cfg(test)]
 fn write_profile_local_state_preserving_avatar(
     local_state_lock: &Mutex<()>,
     path: &Path,
@@ -18584,20 +19601,10 @@ fn local_send_stable_keys(operation: &Value) -> (Option<String>, Option<String>)
     (expected, chat)
 }
 
-fn local_send_matches_friend(operation: &Value, friend_number: u32, public_key: &str) -> bool {
+fn local_send_matches_friend(operation: &Value, public_key: &str) -> bool {
     let (expected, chat) = local_send_stable_keys(operation);
-    if expected.is_some() || chat.is_some() {
-        expected
-            .as_deref()
-            .is_some_and(|key| key.eq_ignore_ascii_case(public_key))
-            || chat
-                .as_deref()
-                .is_some_and(|key| key.eq_ignore_ascii_case(public_key))
-    } else {
-        // Old UI records used numeric chat IDs (tox-7). They carry no stable
-        // key, so deletion must still purge them from this numeric slot.
-        operation.get("friendNumber").and_then(Value::as_u64) == Some(u64::from(friend_number))
-    }
+    expected.as_deref().is_some_and(|key| key.eq_ignore_ascii_case(public_key))
+        && expected == chat
 }
 
 fn rebind_saved_send_operation(
@@ -18606,12 +19613,12 @@ fn rebind_saved_send_operation(
     protocol: &ChatProtocolEngine,
 ) -> Result<bool, String> {
     let (expected, chat) = local_send_stable_keys(operation);
-    let stable_key = match (expected, chat) {
-        (Some(expected), Some(chat)) if expected != chat => return Ok(false),
-        (Some(expected), _) => expected,
-        (_, Some(chat)) => chat,
-        (None, None) => return Ok(false),
+    let (Some(stable_key), Some(chat)) = (expected, chat) else {
+        return Ok(false);
     };
+    if stable_key != chat {
+        return Ok(false);
+    }
     let Some((&friend_number, _)) = friends
         .iter()
         .find(|(_, key)| key.eq_ignore_ascii_case(&stable_key))
@@ -18638,7 +19645,6 @@ fn rebind_saved_send_operation(
 
 fn deleted_contact_local_operation_ids(
     local_state: Option<&Value>,
-    friend_number: u32,
     public_key: &str,
 ) -> Vec<String> {
     local_state
@@ -18646,7 +19652,7 @@ fn deleted_contact_local_operation_ids(
         .and_then(Value::as_object)
         .into_iter()
         .flat_map(|operations| operations.values())
-        .filter(|operation| local_send_matches_friend(operation, friend_number, public_key))
+        .filter(|operation| local_send_matches_friend(operation, public_key))
         .filter_map(|operation| operation.get("operationId").and_then(Value::as_str))
         .filter(|id| validate_send_operation_id(Some((*id).to_string())).is_ok())
         .map(str::to_string)
@@ -18753,7 +19759,6 @@ where
 
 fn remove_deleted_contact_from_local_state(
     state: &mut Value,
-    friend_number: u32,
     public_key: &str,
 ) -> Result<(), String> {
     let object = state
@@ -18763,9 +19768,7 @@ fn remove_deleted_contact_from_local_state(
         .get_mut("pendingSendOperations")
         .and_then(Value::as_object_mut)
     {
-        operations.retain(|_, operation| {
-            !local_send_matches_friend(operation, friend_number, public_key)
-        });
+        operations.retain(|_, operation| !local_send_matches_friend(operation, public_key));
     }
     if let Some(requests) = object
         .get_mut("outgoingFriendRequests")
@@ -18792,27 +19795,25 @@ fn remove_deleted_contact_from_local_state(
     Ok(())
 }
 
-fn retain_current_pending_send_owner(state: &mut Value, owner: Option<&str>) -> bool {
-    let Some(operations) = state
-        .get_mut("pendingSendOperations")
-        .and_then(Value::as_object_mut)
-    else {
-        return false;
-    };
-    let before = operations.len();
-    operations.retain(|id, row| {
-        let key = row
-            .get("expectedPublicKey")
-            .and_then(Value::as_str)
-            .filter(|key| key.len() == 64 && key.bytes().all(|b| b.is_ascii_hexdigit()));
-        let chat = key.map(|key| format!("tox-{}", key.to_ascii_uppercase()));
-        owner.is_some_and(|owner| row.get("profileId").and_then(Value::as_str) == Some(owner))
-            && row.get("operationId").and_then(Value::as_str) == Some(id.as_str())
-            && chat
-                .as_deref()
-                .is_some_and(|chat| row.get("chatId").and_then(Value::as_str) == Some(chat))
-    });
-    before != operations.len()
+fn pending_send_owner_matches(id: &str, row: &Value, owner: Option<&str>) -> bool {
+    let (expected, _) = local_send_stable_keys(row);
+    let chat = expected.map(|key| format!("tox-{key}"));
+    owner.is_some_and(|owner| row.get("profileId").and_then(Value::as_str) == Some(owner))
+        && row.get("operationId").and_then(Value::as_str) == Some(id)
+        && chat
+            .as_deref()
+            .is_some_and(|chat| row.get("chatId").and_then(Value::as_str) == Some(chat))
+}
+
+fn validate_pending_send_owners(state: &Value, owner: Option<&str>) -> Result<(), String> {
+    if state.get("pendingSendOperations").is_some_and(|operations| {
+        !operations.as_object().is_some_and(|operations| {
+            operations.iter().all(|(id, row)| pending_send_owner_matches(id, row, owner))
+        })
+    }) {
+        return Err("PROFILE_LOCAL_STATE_SEND_OWNER_INVALID".into());
+    }
+    Ok(())
 }
 
 fn read_profile_local_state_for_profile(profile: &ToxState) -> Result<Option<Value>, String> {
@@ -18824,9 +19825,11 @@ fn read_profile_local_state_for_profile(profile: &ToxState) -> Result<Option<Val
     let Some(mut value) = read_profile_local_state(&path)? else {
         return Ok(None);
     };
-    if retain_current_pending_send_owner(&mut value, profile.owner_profile_id.as_deref()) {
-        let bytes = serde_json::to_vec(&value).map_err(|_| "PROFILE_LOCAL_STATE_INVALID")?;
-        profiles::write_file_checkpointed(&path, &bytes)?;
+    validate_pending_send_owners(&value, profile.owner_profile_id.as_deref())?;
+    let previous_incarnations = value.get("contactIncarnations").cloned();
+    pending_contact::expose_incarnations(&mut value)?;
+    if value.get("contactIncarnations") != previous_incarnations.as_ref() {
+        write_profile_local_state(&path, &value)?;
     }
     Ok(Some(value))
 }
@@ -18839,13 +19842,11 @@ fn write_profile_local_state_for_profile(profile: &ToxState, state: &Value) -> R
         .lock()
         .map_err(|_| "TOX_PROFILE_LOCK_POISONED".to_string())?;
     let handle = guard.as_ref().ok_or("TOX_NOT_INITIALIZED")?;
-    let count = unsafe { tox_self_get_friend_list_size(handle.instance.as_ptr()) };
-    let mut numbers = vec![0_u32; count];
-    unsafe { tox_self_get_friend_list(handle.instance.as_ptr(), numbers.as_mut_ptr()) };
+    let numbers = handle.friend_numbers();
     let friends = numbers
         .into_iter()
         .filter_map(|number| {
-            tox_friend_public_key(handle.instance.as_ptr(), number).map(|key| (number, key))
+            tox_friend_public_key(Some(handle.native()), number).map(|key| (number, key))
         })
         .collect::<HashMap<_, _>>();
     let cached_friends = profile
@@ -18854,16 +19855,19 @@ fn write_profile_local_state_for_profile(profile: &ToxState, state: &Value) -> R
         .map_err(|_| "FRIEND_CACHE_UNAVAILABLE".to_string())?
         .clone();
     let mut filtered = state.clone();
-    retain_current_pending_send_owner(&mut filtered, profile.owner_profile_id.as_deref());
     let object = filtered
         .as_object_mut()
         .ok_or_else(|| "PROFILE_LOCAL_STATE_INVALID".to_string())?;
+    object.remove("retiredPendingContactKeys");
     if let Some(operations) = object
         .get_mut("pendingSendOperations")
         .and_then(Value::as_object_mut)
     {
         let mut blocked_error = None;
-        operations.retain(|_, operation| {
+        operations.retain(|id, operation| {
+            if !pending_send_owner_matches(id, operation, profile.owner_profile_id.as_deref()) {
+                return false;
+            }
             match rebind_saved_send_operation(operation, &friends, &profile.chat_protocol) {
                 Ok(keep) => keep,
                 Err(error) => {
@@ -18917,10 +19921,15 @@ fn write_profile_local_state_for_profile(profile: &ToxState, state: &Value) -> R
     sanitize_contact_groups(&mut filtered, |key| {
         friends.values().any(|live| live == key)
     });
+    pending_contact::restore_outgoing_requests(&mut filtered, &cached_friends, &friends)?;
+    let mut incarnation_changed = false;
     write_profile_local_state_transaction(
         &profile.local_state_lock,
         &profile_local_state_path(profile)?,
         |previous| {
+            if let Some(previous) = previous {
+                validate_pending_send_owners(previous, profile.owner_profile_id.as_deref())?;
+            }
             let epoch = profile_history_clear_epoch(previous);
             // Check under the same lock as clear. A renderer save started
             // before clear must not restore quotes, notices or scroll anchors.
@@ -18928,11 +19937,19 @@ fn write_profile_local_state_for_profile(profile: &ToxState, state: &Value) -> R
                 clear_profile_history_local_fields(&mut filtered)?;
             }
             filtered["historyClearEpoch"] = Value::from(epoch);
+            incarnation_changed = pending_contact::merge_local_incarnations(&mut filtered, previous, &friends)?;
+            sanitize_contact_groups(&mut filtered, |key| friends.values().any(|live| live == key));
             let authoritative_avatar =
                 preferred_profile_avatar_from_directory(Some(&profile.avatars_dir), None);
             profile_local_state_preserving_avatar(&filtered, authoritative_avatar.as_deref())
         },
-    )
+    )?;
+    if incarnation_changed {
+        // Unrelated preferences were saved, but the renderer must discard its
+        // old contact intent before loading and using the current incarnation.
+        return Err("CHAT_CONTACT_INCARNATION_CHANGED".into());
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -18952,7 +19969,7 @@ mod outbox_cancel_local_state_tests {
                 "collapsed": ["work", "__ungrouped__", "friends"]
             }, "sendOnEnter": false
         });
-        remove_deleted_contact_from_local_state(&mut state, 7, &removed).unwrap();
+        remove_deleted_contact_from_local_state(&mut state, &removed).unwrap();
         assert_eq!(
             state["contactGroups"]["groups"],
             serde_json::json!([{"id":"friends","name":"Friends"}])
@@ -19006,7 +20023,7 @@ mod outbox_cancel_local_state_tests {
             "version":1,"enabled":true,"groups":[{"id":"last","name":"Last"}],
             "assignments":{key.clone():"last"},"order":["last","__ungrouped__"],"collapsed":["last"]
         }});
-        remove_deleted_contact_from_local_state(&mut state, 42, &key.to_ascii_lowercase()).unwrap();
+        remove_deleted_contact_from_local_state(&mut state, &key.to_ascii_lowercase()).unwrap();
         assert_eq!(state["contactGroups"]["groups"], serde_json::json!([]));
         assert_eq!(state["contactGroups"]["assignments"], serde_json::json!({}));
         assert_eq!(
@@ -19061,6 +20078,11 @@ mod outbox_cancel_local_state_tests {
                     "friendNumber": 7,
                     "expectedPublicKey": other_key,
                     "chatId": format!("tox-{other_key}")
+                },
+                "keyless": {
+                    "operationId": "keyless-operation",
+                    "friendNumber": 7,
+                    "chatId": "tox-7"
                 }
             },
             "outgoingFriendRequests": [
@@ -19069,12 +20091,14 @@ mod outbox_cancel_local_state_tests {
             ]
         });
         assert_eq!(
-            deleted_contact_local_operation_ids(Some(&state), 7, &deleted_key),
+            deleted_contact_local_operation_ids(Some(&state), &deleted_key),
             vec!["deleted-operation"]
         );
-        remove_deleted_contact_from_local_state(&mut state, 7, &deleted_key).unwrap();
+        let keyless = state["pendingSendOperations"]["keyless"].clone();
+        remove_deleted_contact_from_local_state(&mut state, &deleted_key).unwrap();
         assert!(state["pendingSendOperations"].get("deleted").is_none());
         assert!(state["pendingSendOperations"].get("reusedSlot").is_some());
+        assert_eq!(state["pendingSendOperations"]["keyless"], keyless);
         assert_eq!(state["outgoingFriendRequests"].as_array().unwrap().len(), 1);
         assert_eq!(
             state["outgoingFriendRequests"][0]["message"],
@@ -19094,10 +20118,18 @@ mod outbox_cancel_local_state_tests {
         let friends = HashMap::from([(9_u32, key.clone()), (7_u32, "BB".repeat(32))]);
         let mut operation = serde_json::json!({
             "operationId": "rebind-operation",
+            "profileId": "profile-a",
             "friendNumber": 7,
             "expectedPublicKey": key,
             "chatId": format!("tox-{key}")
         });
+        assert_eq!(
+            validate_pending_send_owners(
+                &serde_json::json!({"pendingSendOperations":{"rebind-operation": operation.clone()}}),
+                Some("profile-a"),
+            ),
+            Ok(())
+        );
         assert!(rebind_saved_send_operation(&mut operation, &friends, &protocol).unwrap());
         assert_eq!(operation["friendNumber"], 9);
         protocol
@@ -19109,11 +20141,19 @@ mod outbox_cancel_local_state_tests {
             "friendNumber": 7,
             "chatId": "tox-7"
         });
-        assert!(local_send_matches_friend(&legacy, 7, &key));
+        assert!(!local_send_matches_friend(&legacy, &key));
+        assert_eq!(
+            validate_pending_send_owners(
+                &serde_json::json!({"pendingSendOperations":{"legacy-operation": legacy}}),
+                Some("profile-a"),
+            ),
+            Err("PROFILE_LOCAL_STATE_SEND_OWNER_INVALID".into())
+        );
         fs::remove_dir_all(root).unwrap();
     }
 }
 
+#[cfg(test)]
 fn write_profile_avatar_local_state(
     local_state_lock: &Mutex<()>,
     path: &Path,
@@ -19138,6 +20178,9 @@ fn apply_profile_avatar_update(
     tox_state: &ToxState,
     update: ProfileAvatarUpdate,
 ) -> Result<usize, String> {
+    // Match draft persistence: acquire the native handle before local state.
+    // A missing/poisoned handle must not reject an already durable avatar.
+    let native_handle = tox_state.handle.lock().ok();
     let _guard = tox_state
         .local_state_lock
         .lock()
@@ -19214,16 +20257,19 @@ fn apply_profile_avatar_update(
             return Err(error);
         }
     }
-    if let Some(updates) = &tox_state.updates {
-        updates.changed();
-    }
     // Persistence owns the acknowledgement. Offline/closing peers must not turn an
     // already committed avatar into a rejected UI update; reconnect resends it.
-    let notification = match image {
-        Some((path, bytes)) => send_tox_avatar_bytes_for_shared_state(tox_state, path, bytes),
-        None => send_tox_avatar_removal_for_shared_state(tox_state),
+    drop(_guard);
+    let notification = match native_handle.as_ref().and_then(|guard| guard.as_ref()) {
+        Some(handle) => match image {
+            Some((path, bytes)) => {
+                send_tox_avatar_bytes_with_handle(tox_state, handle.native(), path, bytes)
+            }
+            None => send_tox_avatar_removal_with_handle(tox_state, handle.native()),
+        },
+        None => Err("TOX_PROFILE_UNAVAILABLE".to_string()),
     };
-    match notification {
+    let result = match notification {
         Ok(started) => Ok(started),
         Err(error) => {
             log_transfer(
@@ -19232,9 +20278,15 @@ fn apply_profile_avatar_update(
             );
             Ok(0)
         }
+    };
+    drop(native_handle);
+    if let Some(updates) = &tox_state.updates {
+        updates.changed();
     }
+    result
 }
 
+#[cfg(test)]
 fn remove_self_avatar_files(avatars_dir: &Path) -> Result<(), String> {
     if !profiles::directory_exists(avatars_dir) {
         return Ok(());
@@ -19265,35 +20317,27 @@ fn send_tox_avatar_for_shared_state(
     apply_profile_avatar_update(tox_state, update)
 }
 
-fn send_tox_avatar_bytes_for_shared_state(
+/// ToxCore hashes avatar contents with SHA-256 before sending the file ID.
+fn tox_avatar_digest(bytes: &[u8]) -> [u8; 32] {
+    Sha256::digest(bytes).into()
+}
+
+fn send_tox_avatar_bytes_with_handle(
     tox_state: &ToxState,
+    tox: ToxRef<'_>,
     avatar_path: PathBuf,
     bytes: Vec<u8>,
 ) -> Result<usize, String> {
-    let state = tox_state
-        .handle
-        .lock()
-        .map_err(|_| "Не удалось получить доступ к профилю Tox".to_string())?;
-    let instance = state
-        .as_ref()
-        .ok_or_else(|| "Профиль Tox не ициализирован".to_string())?;
-    let count = unsafe { tox_self_get_friend_list_size(instance.instance.as_ptr()) };
-    let mut numbers = vec![0_u32; count];
-    unsafe { tox_self_get_friend_list(instance.instance.as_ptr(), numbers.as_mut_ptr()) };
-    let mut hash = [0_u8; 32];
-    unsafe {
-        let _ = tox_hash(hash.as_mut_ptr(), bytes.as_ptr(), bytes.len());
+    if !local_transport_ready(tox_state) {
+        return Ok(0);
     }
+    let numbers = tox.friend_numbers();
+    let hash = tox_avatar_digest(&bytes);
     let mut started = Vec::new();
     for friend_number in numbers {
         let mut connection_error = 0_i32;
-        if unsafe {
-            tox_friend_get_connection_status(
-                instance.instance.as_ptr(),
-                friend_number,
-                &mut connection_error,
-            )
-        } == 0
+        if tox.friend_connection_status(friend_number, &mut connection_error)
+            == 0
         {
             log_transfer(
                 &tox_state.transfer_log_path,
@@ -19302,18 +20346,7 @@ fn send_tox_avatar_bytes_for_shared_state(
             continue;
         }
         let mut error = 0_i32;
-        let number = unsafe {
-            tox_file_send(
-                instance.instance.as_ptr(),
-                friend_number,
-                1,
-                bytes.len() as u64,
-                hash.as_ptr(),
-                hash.as_ptr(),
-                hash.len(),
-                &mut error,
-            )
-        };
+        let number = tox.file_send(friend_number, 1, bytes.len() as u64, Some(&hash), hash.as_ref(), &mut error);
         log_transfer(
             &tox_state.transfer_log_path,
             format!(
@@ -19325,7 +20358,6 @@ fn send_tox_avatar_bytes_for_shared_state(
             started.push((friend_number, number));
         }
     }
-    drop(state);
     let mut outgoing = tox_state
         .outgoing_files
         .lock()
@@ -19356,29 +20388,21 @@ fn send_tox_avatar_bytes_for_shared_state(
     Ok(started.len())
 }
 
-fn send_tox_avatar_removal_for_shared_state(tox_state: &ToxState) -> Result<usize, String> {
-    let state = tox_state
-        .handle
-        .lock()
-        .map_err(|_| "Не удалось получить доступ к профилю Tox".to_string())?;
-    let instance = state
-        .as_ref()
-        .ok_or_else(|| "Профиль Tox не ициализирован".to_string())?;
-    let count = unsafe { tox_self_get_friend_list_size(instance.instance.as_ptr()) };
-    let mut numbers = vec![0_u32; count];
-    unsafe { tox_self_get_friend_list(instance.instance.as_ptr(), numbers.as_mut_ptr()) };
+fn send_tox_avatar_removal_with_handle(
+    tox_state: &ToxState,
+    tox: ToxRef<'_>,
+) -> Result<usize, String> {
+    if !local_transport_ready(tox_state) {
+        return Ok(0);
+    }
+    let numbers = tox.friend_numbers();
     let empty_id = [0_u8; 32];
     let empty_name = b"";
     let mut started = 0;
     for friend_number in numbers {
         let mut connection_error = 0_i32;
-        if unsafe {
-            tox_friend_get_connection_status(
-                instance.instance.as_ptr(),
-                friend_number,
-                &mut connection_error,
-            )
-        } == 0
+        if tox.friend_connection_status(friend_number, &mut connection_error)
+            == 0
         {
             log_transfer(
                 &tox_state.transfer_log_path,
@@ -19387,18 +20411,7 @@ fn send_tox_avatar_removal_for_shared_state(tox_state: &ToxState) -> Result<usiz
             continue;
         }
         let mut error = 0_i32;
-        let number = unsafe {
-            tox_file_send(
-                instance.instance.as_ptr(),
-                friend_number,
-                1,
-                0,
-                empty_id.as_ptr(),
-                empty_name.as_ptr(),
-                0,
-                &mut error,
-            )
-        };
+        let number = tox.file_send(friend_number, 1, 0, Some(&empty_id), empty_name, &mut error);
         log_transfer(
             &tox_state.transfer_log_path,
             format!("AVATAR_REMOVE_SEND friend={friend_number} file={number} error={error}"),
@@ -19436,9 +20449,12 @@ mod desktop_adapter {
 
     #[cfg(unix)]
     fn install_termination_signal_bridge(app: tauri::AppHandle) -> Result<(), String> {
+        // SAFETY: the Unix sigaction structure supports zero initialization.
+        // Set its handler and initialize the signal mask before registration.
         let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
-        action.sa_sigaction = record_termination_signal as usize;
+        action.sa_sigaction = record_termination_signal as *const () as usize;
         action.sa_flags = libc::SA_RESTART;
+        // SAFETY: sa_mask is writable and belongs to this local action.
         if unsafe { libc::sigemptyset(&mut action.sa_mask) } != 0 {
             return Err(format!(
                 "Could not initialise the termination signal mask: {}",
@@ -19446,6 +20462,7 @@ mod desktop_adapter {
             ));
         }
         for signal in [libc::SIGTERM, libc::SIGINT] {
+            // SAFETY: action is initialized, and a null output ignores the old action.
             if unsafe { libc::sigaction(signal, &action, std::ptr::null_mut()) } != 0 {
                 return Err(format!(
                     "Could not register termination signal {signal}: {}",
@@ -19559,10 +20576,6 @@ mod desktop_adapter {
         }
     }
 
-    fn state_path(app_state: &AppState, profile_id: &str) -> Result<PathBuf, String> {
-        profile_local_state_path(app_state.loaded_profile(profile_id)?.as_ref())
-    }
-
     fn layout_state_path(app_state: &AppState) -> PathBuf {
         app_state.data_dir.join("layout-state.json")
     }
@@ -19592,15 +20605,57 @@ mod desktop_adapter {
             .to_lowercase()
     }
 
+    async fn run_desktop_blocking<T, F>(
+        admission: DesktopWorkLease,
+        operation: F,
+    ) -> Result<T, String>
+    where
+        T: Send + 'static,
+        F: FnOnce() -> Result<T, String> + Send + 'static,
+    {
+        tauri::async_runtime::spawn_blocking(move || {
+            let _admission = admission;
+            operation()
+        })
+        .await
+        .map_err(|error| format!("Desktop task stopped unexpectedly: {error}"))?
+    }
+
+    fn ensure_queued_profile_current(
+        app_state: &AppState,
+        profile: &Arc<ToxState>,
+    ) -> Result<(), String> {
+        if !profile.running.load(Ordering::Acquire) {
+            return Err("PROFILE_NOT_LOADED".into());
+        }
+        if let Some(id) = profile.owner_profile_id.as_deref() {
+            let profiles = app_state
+                .profiles
+                .lock()
+                .map_err(|_| "Could not access loaded profiles")?;
+            if !profiles
+                .get(id)
+                .is_some_and(|current| Arc::ptr_eq(current, profile))
+            {
+                return Err("PROFILE_OWNER_CHANGED".into());
+            }
+        }
+        Ok(())
+    }
+
     #[tauri::command]
     async fn get_startup_state(
         app: tauri::AppHandle,
         app_state: tauri::State<'_, AppState>,
     ) -> Result<StartupState, String> {
+        let admission = app_state.desktop_work.admit()?;
         let app_state = app_state.inner().clone();
-        tauri::async_runtime::spawn_blocking(move || get_startup_state_blocking(app, &app_state))
-            .await
-            .map_err(|error| format!("Startup state task stopped unexpectedly: {error}"))?
+        tauri::async_runtime::spawn_blocking(move || {
+            let _admission = admission;
+            get_startup_state_blocking(app, &app_state)
+        })
+        .await
+        .map_err(|error| format!("Startup state task stopped unexpectedly: {error}"))?
     }
 
     fn get_startup_state_blocking(
@@ -19633,38 +20688,50 @@ mod desktop_adapter {
     }
 
     #[tauri::command]
-    fn set_app_language(
+    async fn set_app_language(
         app: tauri::AppHandle,
         app_state: tauri::State<'_, AppState>,
         tray_items: tauri::State<'_, TrayMenuItems>,
         language: String,
     ) -> Result<String, String> {
-        if language != "ru" && language != "en" {
-            return Err("UNSUPPORTED_LANGUAGE".to_string());
-        }
-        app_state
-            .settings
-            .lock()
-            .map_err(|_| "Could not access application settings".to_string())?
-            .language = language.clone();
-        app_state.save_settings()?;
-        tray_items.apply_language(&language);
-        update_tray(&app, &app_state);
-        Ok(language)
+        let app_state = app_state.inner().clone();
+        let admission = app_state.desktop_work.admit()?;
+        let tray_items = tray_items.inner().clone();
+        run_desktop_blocking(admission, move || {
+            if language != "ru" && language != "en" {
+                return Err("UNSUPPORTED_LANGUAGE".to_string());
+            }
+            app_state
+                .settings
+                .lock()
+                .map_err(|_| "Could not access application settings".to_string())?
+                .language = language.clone();
+            app_state.save_settings()?;
+            tray_items.apply_language(&language);
+            update_tray(&app, &app_state);
+            Ok(language)
+        })
+        .await
     }
 
     #[tauri::command]
-    fn set_close_to_tray(
+    async fn set_close_to_tray(
         app_state: tauri::State<'_, AppState>,
         enabled: bool,
     ) -> Result<bool, String> {
-        app_state
-            .settings
-            .lock()
-            .map_err(|_| "Could not access application settings".to_string())?
-            .close_to_tray = enabled;
-        app_state.save_settings()?;
-        Ok(enabled)
+        let app_state = app_state.inner().clone();
+        let admission = app_state.desktop_work.admit()?;
+        run_desktop_blocking(admission, move || {
+            app_state
+                .settings
+                .lock()
+                .map_err(|_| "Could not access application settings".to_string())?
+                .close_to_tray = enabled;
+            app_state.close_to_tray.store(enabled, Ordering::Release);
+            app_state.save_settings()?;
+            Ok(enabled)
+        })
+        .await
     }
 
     #[derive(Serialize)]
@@ -19682,8 +20749,11 @@ mod desktop_adapter {
         app_state: tauri::State<'_, AppState>,
         preset: String,
     ) -> Result<InitialConnectionPresetResult, String> {
+        let admission = app_state.desktop_work.admit()?;
         let app_state = app_state.inner().clone();
         tauri::async_runtime::spawn_blocking(move || {
+            let _admission = admission;
+
             apply_initial_connection_preset_blocking(&app_state, &preset)
         })
         .await
@@ -19804,44 +20874,58 @@ mod desktop_adapter {
     }
 
     #[tauri::command]
-    fn unlock_profile(
+    async fn unlock_profile(
         app: tauri::AppHandle,
         app_state: tauri::State<'_, AppState>,
         profile_id: String,
         password: String,
     ) -> Result<Vec<ProfileSummary>, String> {
+        let app_state = app_state.inner().clone();
+        let admission = app_state.desktop_work.admit()?;
         let record = app_state.record(&profile_id)?;
-        if !record.enabled {
-            return Err("PROFILE_DISABLED_REIMPORT_REQUIRED".to_string());
-        }
-        app_state.load_record(&record, Some(&password))?;
-        let summaries = app_state.summaries()?;
-        update_tray(&app, &app_state);
-        Ok(summaries)
+        run_desktop_blocking(admission, move || {
+            if !record.enabled {
+                return Err("PROFILE_DISABLED_REIMPORT_REQUIRED".to_string());
+            }
+            app_state.load_record(&record, Some(&password))?;
+            let summaries = app_state.summaries()?;
+            update_tray(&app, &app_state);
+            Ok(summaries)
+        })
+        .await
     }
 
     #[tauri::command]
-    fn continue_with_loaded_profiles(
+    async fn continue_with_loaded_profiles(
         app: tauri::AppHandle,
         app_state: tauri::State<'_, AppState>,
     ) -> Result<Vec<ProfileSummary>, String> {
-        let loaded_ids: HashSet<String> = app_state
-            .profiles
-            .lock()
-            .map_err(|_| "Could not access loaded profiles".to_string())?
-            .keys()
-            .cloned()
-            .collect();
-        let mut registry = app_state
-            .registry
-            .lock()
-            .map_err(|_| "Could not access the profile registry".to_string())?;
-        registry.prefer_loaded_active(&loaded_ids);
-        registry.save(&app_state.data_dir)?;
-        drop(registry);
-        let summaries = app_state.summaries()?;
-        update_tray(&app, &app_state);
-        Ok(summaries)
+        let app_state = app_state.inner().clone();
+        let admission = app_state.desktop_work.admit()?;
+        run_desktop_blocking(admission, move || {
+            let _route_guard = app_state
+                .shared_route_gate
+                .lock()
+                .map_err(|_| "SHARED_ROUTE_TRANSACTION_UNAVAILABLE")?;
+            let loaded_ids: HashSet<String> = app_state
+                .profiles
+                .lock()
+                .map_err(|_| "Could not access loaded profiles".to_string())?
+                .keys()
+                .cloned()
+                .collect();
+            let mut registry = app_state
+                .registry
+                .lock()
+                .map_err(|_| "Could not access the profile registry".to_string())?;
+            registry.prefer_loaded_active(&loaded_ids);
+            registry.save(&app_state.data_dir)?;
+            drop(registry);
+            let summaries = app_state.summaries()?;
+            update_tray(&app, &app_state);
+            Ok(summaries)
+        })
+        .await
     }
 
     #[tauri::command]
@@ -19850,8 +20934,11 @@ mod desktop_adapter {
         app_state: tauri::State<'_, AppState>,
         profile_id: String,
     ) -> Result<Vec<ProfileSummary>, String> {
+        let admission = app_state.desktop_work.admit()?;
         let app_state = app_state.inner().clone();
         tauri::async_runtime::spawn_blocking(move || {
+            let _admission = admission;
+
             disable_profile_blocking(&app, &app_state, profile_id)
         })
         .await
@@ -19914,38 +21001,48 @@ mod desktop_adapter {
     }
 
     #[tauri::command]
-    fn switch_profile(
+    async fn switch_profile(
         app: tauri::AppHandle,
         app_state: tauri::State<'_, AppState>,
         profile_id: String,
     ) -> Result<Vec<ProfileSummary>, String> {
-        if !app_state
+        let app_state = app_state.inner().clone();
+        let admission = app_state.desktop_work.admit()?;
+        let admitted_profile = app_state
             .profiles
             .lock()
             .map_err(|_| "Could not access loaded profiles".to_string())?
-            .contains_key(&profile_id)
-        {
-            return Err("PROFILE_LOCKED".to_string());
-        }
-        let mut registry = app_state
-            .registry
-            .lock()
-            .map_err(|_| "Could not access the profile registry".to_string())?;
-        if !registry
-            .profiles
-            .iter()
-            .any(|profile| profile.id == profile_id)
-        {
-            return Err("PROFILE_NOT_FOUND".to_string());
-        }
-        registry.active_profile_id = Some(profile_id);
-        registry.save(&app_state.data_dir)?;
-        drop(registry);
-        if let Ok(mut grants) = app_state.native_file_grants.lock() {
-            grants.clear_all();
-        }
-        update_tray(&app, &app_state);
-        app_state.summaries()
+            .get(&profile_id)
+            .cloned()
+            .ok_or_else(|| "PROFILE_LOCKED".to_string())?;
+        run_desktop_blocking(admission, move || {
+            let _route_guard = app_state
+                .shared_route_gate
+                .lock()
+                .map_err(|_| "SHARED_ROUTE_TRANSACTION_UNAVAILABLE")?;
+            ensure_queued_profile_current(&app_state, &admitted_profile)?;
+
+            let mut registry = app_state
+                .registry
+                .lock()
+                .map_err(|_| "Could not access the profile registry".to_string())?;
+            if !registry
+                .profiles
+                .iter()
+                .any(|profile| profile.id == profile_id)
+            {
+                return Err("PROFILE_NOT_FOUND".to_string());
+            }
+            registry.active_profile_id = Some(profile_id);
+            registry.save(&app_state.data_dir)?;
+            drop(registry);
+            if let Ok(mut grants) = app_state.native_file_grants.lock() {
+                grants.clear_all();
+            }
+            update_tray(&app, &app_state);
+            app_state.summaries()
+        })
+        .await
     }
 
     #[tauri::command]
@@ -19965,31 +21062,42 @@ mod desktop_adapter {
     }
 
     #[tauri::command]
-    fn mark_friend_read(
+    async fn mark_friend_read(
         app: tauri::AppHandle,
         app_state: tauri::State<'_, AppState>,
         profile_id: Option<String>,
         friend_number: u32,
         expected_public_key: Option<String>,
     ) -> Result<(), String> {
+        let app_state = app_state.inner().clone();
+        let admission = app_state.desktop_work.admit()?;
         let active = match profile_id {
             Some(id) => app_state.loaded_profile(&id)?,
             None => app_state.active()?,
         };
-        let (public_key, _transaction) = lock_chat_transaction_for_friend_bound(
-            &active,
-            friend_number,
-            expected_public_key.as_deref(),
-        )?;
-        active
-            .unread_state
-            .lock()
-            .map_err(|_| "Could not access unread events".to_string())?
-            .friends
-            .remove(&unread_target_key(friend_number, &public_key));
-        persist_unread_state(&active.unread_state, &active.unread_state_path);
-        update_tray(&app, &app_state);
-        Ok(())
+        run_desktop_blocking(admission, move || {
+            let _route_guard = app_state
+                .shared_route_gate
+                .lock()
+                .map_err(|_| "SHARED_ROUTE_TRANSACTION_UNAVAILABLE")?;
+            ensure_queued_profile_current(&app_state, &active)?;
+            let (public_key, _transaction) = lock_chat_transaction_for_friend_bound(
+                &active,
+                friend_number,
+                expected_public_key.as_deref(),
+            )?;
+            active
+                .unread_state
+                .lock()
+                .map_err(|_| "Could not access unread events".to_string())?
+                .friends
+                .remove(&unread_target_key(friend_number, &public_key));
+            persist_unread_state(&active.unread_state, &active.unread_state_path);
+            drop(_transaction);
+            update_tray(&app, &app_state);
+            Ok(())
+        })
+        .await
     }
 
     #[tauri::command]
@@ -20001,12 +21109,27 @@ mod desktop_adapter {
         expected_public_key: Option<String>,
         message_ids: Vec<String>,
     ) -> Result<UnreadStateView, String> {
+        let admission = app_state.desktop_work.admit()?;
         let app_state = app_state.inner().clone();
+        let (profile_id, profile) = match profile_id {
+            Some(id) => {
+                let profile = app_state.loaded_profile(&id)?;
+                (id, profile)
+            }
+            None => app_state.active_snapshot()?,
+        };
         tauri::async_runtime::spawn_blocking(move || {
+            let _admission = admission;
+            let _route_guard = app_state
+                .shared_route_gate
+                .lock()
+                .map_err(|_| "SHARED_ROUTE_TRANSACTION_UNAVAILABLE")?;
+            ensure_queued_profile_current(&app_state, &profile)?;
+
             acknowledge_local_messages_blocking(
                 &app,
                 &app_state,
-                profile_id,
+                Some(profile_id),
                 friend_number,
                 expected_public_key,
                 message_ids,
@@ -20070,29 +21193,41 @@ mod desktop_adapter {
         }
         persist_unread_state_required(&profile.unread_state, &profile.unread_state_path)?;
         bump_chat_view_revision(&profile.history_path, friend_number, &public_key);
+        let view = unread_state_view(&profile)?;
+        drop(_transaction);
         update_tray(app, app_state);
-        unread_state_view(&profile)
+        Ok(view)
     }
 
     #[tauri::command]
-    fn mark_requests_read(
+    async fn mark_requests_read(
         app: tauri::AppHandle,
         app_state: tauri::State<'_, AppState>,
         profile_id: Option<String>,
     ) -> Result<(), String> {
+        let app_state = app_state.inner().clone();
+        let admission = app_state.desktop_work.admit()?;
         let active = match profile_id {
             Some(id) => app_state.loaded_profile(&id)?,
             None => app_state.active()?,
         };
-        active
-            .unread_state
-            .lock()
-            .map_err(|_| "Could not access unread events".to_string())?
-            .requests
-            .clear();
-        persist_unread_state(&active.unread_state, &active.unread_state_path);
-        update_tray(&app, &app_state);
-        Ok(())
+        run_desktop_blocking(admission, move || {
+            let _route_guard = app_state
+                .shared_route_gate
+                .lock()
+                .map_err(|_| "SHARED_ROUTE_TRANSACTION_UNAVAILABLE")?;
+            ensure_queued_profile_current(&app_state, &active)?;
+            active
+                .unread_state
+                .lock()
+                .map_err(|_| "Could not access unread events".to_string())?
+                .requests
+                .clear();
+            persist_unread_state(&active.unread_state, &active.unread_state_path);
+            update_tray(&app, &app_state);
+            Ok(())
+        })
+        .await
     }
 
     fn discard_unregistered_created_profile(
@@ -20121,113 +21256,131 @@ mod desktop_adapter {
         drop(volume);
         let data_cleanup = directory
             .as_deref()
-            .map(|path| !path.exists() || fs::remove_dir_all(path).is_ok())
+            .map(|path| {
+                retire_profile_logs_under(path).is_ok()
+                    && (!path.exists() || fs::remove_dir_all(path).is_ok())
+            })
             .unwrap_or(true);
         format!("{error}; rollback settings={settings_rollback}; profile_data={data_cleanup}")
     }
 
     #[tauri::command]
-    fn create_profile(
+    async fn create_profile(
         app: tauri::AppHandle,
         app_state: tauri::State<'_, AppState>,
         name: String,
         password: Option<String>,
     ) -> Result<CreatedProfileResult, String> {
-        let _route_guard = lock_shared_route_gate(&app_state.shared_route_gate)?;
-        let mut registry = app_state
-            .registry
-            .lock()
-            .map_err(|_| "Could not access the profile registry".to_string())?
-            .clone();
-        let first_registered_profile = registry.profiles.is_empty();
-        let initial_connection_preset_required = {
-            let settings = app_state
-                .settings
+        let app_state = app_state.inner().clone();
+        let admission = app_state.desktop_work.admit()?;
+        run_desktop_blocking(admission, move || {
+            let _route_guard = lock_shared_route_gate(&app_state.shared_route_gate)?;
+            let mut registry = app_state
+                .registry
                 .lock()
-                .map_err(|_| "Could not access application settings".to_string())?;
-            if first_registered_profile {
-                settings.initial_connection_preset_required
-                    || settings.initial_connection_preset.is_none()
-            } else {
-                settings.initial_connection_preset_required
-            }
-        };
-        let mut record = profiles::create_record(&app_state.root_dir, &registry, &name)?;
-        let password = password.as_deref().filter(|password| !password.is_empty());
-        record.encrypted = password.is_some();
-        let container_path = app_state.root_dir.join(&record.file);
-        let volume = KaiProfileVolume::create(container_path, password)?;
-        let namespace = volume.namespace_root().to_path_buf();
-        let paths = ProfilePaths::new_with_volume(
-            app_state.root_dir.clone(),
-            namespace.join("data"),
-            namespace.join("profile.tox"),
-            Some(Arc::clone(&volume)),
-        )?;
-        let tox = match ToxState::new_for_profile(
-            paths.with_legacy_033_owner(&record.id),
-            app_state.tor.clone(),
-            Arc::clone(&app_state.proxy_settings),
-            Arc::clone(&app_state.network_settings),
-            app_state.updates_for(&record.id),
-            None,
-            None,
-            Some(&name),
-        ) {
-            Ok(tox) => {
-                Arc::new(tox.with_shared_route_gate(Arc::clone(&app_state.shared_route_gate)))
-            }
-            Err(error) => {
-                volume.discard();
-                if let Some(directory) = volume.container_path().parent() {
-                    let _ = fs::remove_dir_all(directory);
-                }
-                return Err(error);
-            }
-        };
-        // A newly created identity must not send bootstrap traffic before the
-        // user has reviewed the initial connection preset and explicitly
-        // selected an online status. The durable flag is the same one used by
-        // ordinary status changes, so later launches inherit the last choice.
-        if let Err(error) = (|| {
-            initialize_created_profile_offline(&tox)?;
-            tox.checkpoint_profile(true)?;
-            app_state.allow_profile_media(&tox)?;
-            Ok::<_, String>(())
-        })() {
-            return Err(discard_unregistered_created_profile(
-                &app_state, tox, volume, None, error,
-            ));
-        }
-        let record_id = record.id.clone();
-        registry.active_profile_id = Some(record_id.clone());
-        registry.profiles.push(record);
-        let previous_app_settings = match (|| -> Result<Option<AppSettings>, String> {
-            if first_registered_profile && initial_connection_preset_required {
-                let mut settings = app_state
+                .map_err(|_| "Could not access the profile registry".to_string())?
+                .clone();
+            let first_registered_profile = registry.profiles.is_empty();
+            let initial_connection_preset_required = {
+                let settings = app_state
                     .settings
                     .lock()
                     .map_err(|_| "Could not access application settings".to_string())?;
-                if settings.initial_connection_preset.is_none() {
-                    let previous = settings.clone();
-                    settings.initial_connection_preset_required = true;
-                    Ok(Some(previous))
+                if first_registered_profile {
+                    settings.initial_connection_preset_required
+                        || settings.initial_connection_preset.is_none()
                 } else {
-                    Ok(None)
+                    settings.initial_connection_preset_required
                 }
-            } else {
-                Ok(None)
-            }
-        })() {
-            Ok(previous) => previous,
-            Err(error) => {
+            };
+            let mut record = profiles::create_record(&app_state.root_dir, &registry, &name)?;
+            let password = password.as_deref().filter(|password| !password.is_empty());
+            record.encrypted = password.is_some();
+            let container_path = app_state.root_dir.join(&record.file);
+            let volume = KaiProfileVolume::create(container_path, password)?;
+            let namespace = volume.namespace_root().to_path_buf();
+            let paths = ProfilePaths::new_with_volume(
+                app_state.root_dir.clone(),
+                namespace.join("data"),
+                namespace.join("profile.tox"),
+                Some(Arc::clone(&volume)),
+            )?;
+            let tox = match ToxState::new_for_profile(
+                paths.with_profile_owner(&record.id, Arc::clone(&app_state.bootstrap_nodes)),
+                app_state.tor.clone(),
+                Arc::clone(&app_state.proxy_settings),
+                Arc::clone(&app_state.network_settings),
+                app_state.updates_for(&record.id),
+                None,
+                None,
+                Some(&name),
+            ) {
+                Ok(tox) => {
+                    Arc::new(tox.with_shared_route_gate(Arc::clone(&app_state.shared_route_gate)))
+                }
+                Err(error) => {
+                    volume.discard();
+                    if let Some(directory) = volume.container_path().parent() {
+                        if retire_profile_logs_under(directory).is_ok() {
+                            let _ = fs::remove_dir_all(directory);
+                        }
+                    }
+                    return Err(error);
+                }
+            };
+            // A newly created identity must not send bootstrap traffic before the
+            // user has reviewed the initial connection preset and explicitly
+            // selected an online status. The durable flag is the same one used by
+            // ordinary status changes, so later launches inherit the last choice.
+            if let Err(error) = (|| {
+                initialize_created_profile_offline(&tox)?;
+                tox.checkpoint_profile(true)?;
+                app_state.allow_profile_media(&tox)?;
+                Ok::<_, String>(())
+            })() {
                 return Err(discard_unregistered_created_profile(
                     &app_state, tox, volume, None, error,
                 ));
             }
-        };
-        if previous_app_settings.is_some() {
-            if let Err(error) = app_state.save_settings() {
+            let record_id = record.id.clone();
+            registry.active_profile_id = Some(record_id.clone());
+            registry.profiles.push(record);
+            let previous_app_settings = match (|| -> Result<Option<AppSettings>, String> {
+                if first_registered_profile && initial_connection_preset_required {
+                    let mut settings = app_state
+                        .settings
+                        .lock()
+                        .map_err(|_| "Could not access application settings".to_string())?;
+                    if settings.initial_connection_preset.is_none() {
+                        let previous = settings.clone();
+                        settings.initial_connection_preset_required = true;
+                        Ok(Some(previous))
+                    } else {
+                        Ok(None)
+                    }
+                } else {
+                    Ok(None)
+                }
+            })() {
+                Ok(previous) => previous,
+                Err(error) => {
+                    return Err(discard_unregistered_created_profile(
+                        &app_state, tox, volume, None, error,
+                    ));
+                }
+            };
+            if previous_app_settings.is_some() {
+                if let Err(error) = app_state.save_settings() {
+                    return Err(discard_unregistered_created_profile(
+                        &app_state,
+                        tox,
+                        volume,
+                        previous_app_settings,
+                        error,
+                    ));
+                }
+            }
+            if let Err(error) = registry.save(&app_state.data_dir) {
                 return Err(discard_unregistered_created_profile(
                     &app_state,
                     tox,
@@ -20236,35 +21389,27 @@ mod desktop_adapter {
                     error,
                 ));
             }
-        }
-        if let Err(error) = registry.save(&app_state.data_dir) {
-            return Err(discard_unregistered_created_profile(
-                &app_state,
-                tox,
-                volume,
-                previous_app_settings,
-                error,
-            ));
-        }
-        *app_state
-            .registry
-            .lock()
-            .map_err(|_| "Could not access the profile registry".to_string())? = registry;
-        if let Ok(mut grants) = app_state.native_file_grants.lock() {
-            grants.clear_all();
-        }
-        app_state
-            .profiles
-            .lock()
-            .map_err(|_| "Could not access loaded profiles".to_string())?
-            .insert(record_id, Arc::clone(&tox));
-        tox.start_network_loop();
-        let summaries = app_state.summaries()?;
-        update_tray(&app, &app_state);
-        Ok(CreatedProfileResult {
-            profiles: summaries,
-            initial_connection_preset_required,
+            *app_state
+                .registry
+                .lock()
+                .map_err(|_| "Could not access the profile registry".to_string())? = registry;
+            if let Ok(mut grants) = app_state.native_file_grants.lock() {
+                grants.clear_all();
+            }
+            app_state
+                .profiles
+                .lock()
+                .map_err(|_| "Could not access loaded profiles".to_string())?
+                .insert(record_id, Arc::clone(&tox));
+            tox.start_network_loop();
+            let summaries = app_state.summaries()?;
+            update_tray(&app, &app_state);
+            Ok(CreatedProfileResult {
+                profiles: summaries,
+                initial_connection_preset_required,
+            })
         })
+        .await
     }
 
     fn collect_qtox_candidates(directory: &Path, candidates: &mut Vec<QtoxProfileCandidate>) {
@@ -20311,8 +21456,7 @@ mod desktop_adapter {
         }
     }
 
-    #[tauri::command]
-    fn discover_qtox_profiles(
+    fn discover_qtox_profiles_blocking(
         location: Option<String>,
     ) -> Result<Vec<QtoxProfileCandidate>, String> {
         // Discovery is deliberately manual. In particular, a missing location
@@ -20362,6 +21506,16 @@ mod desktop_adapter {
         Ok(candidates)
     }
 
+    #[tauri::command]
+    async fn discover_qtox_profiles(
+        app_state: tauri::State<'_, AppState>,
+        location: Option<String>,
+    ) -> Result<Vec<QtoxProfileCandidate>, String> {
+        let app_state = app_state.inner().clone();
+        let admission = app_state.desktop_work.admit()?;
+        run_desktop_blocking(admission, move || discover_qtox_profiles_blocking(location)).await
+    }
+
     #[cfg(test)]
     mod qtox_manual_discovery_tests {
         use super::*;
@@ -20379,8 +21533,8 @@ mod desktop_adapter {
 
         #[test]
         fn missing_location_never_discovers_standard_profile_directories() {
-            assert!(discover_qtox_profiles(None).unwrap().is_empty());
-            assert!(discover_qtox_profiles(Some("   ".to_string()))
+            assert!(discover_qtox_profiles_blocking(None).unwrap().is_empty());
+            assert!(discover_qtox_profiles_blocking(Some("   ".to_string()))
                 .unwrap()
                 .is_empty());
         }
@@ -20391,7 +21545,7 @@ mod desktop_adapter {
             let folder_profile = root.join("FolderProfile.tox");
             fs::write(&folder_profile, b"folder savedata").unwrap();
             let candidates =
-                discover_qtox_profiles(Some(root.to_string_lossy().into_owned())).unwrap();
+                discover_qtox_profiles_blocking(Some(root.to_string_lossy().into_owned())).unwrap();
             assert_eq!(candidates.len(), 1);
             assert_eq!(PathBuf::from(&candidates[0].profile_path), folder_profile);
             assert_eq!(fs::read(&folder_profile).unwrap(), b"folder savedata");
@@ -20404,7 +21558,8 @@ mod desktop_adapter {
             .unwrap();
             fs::write(&archive, &archive_bytes).unwrap();
             let candidates =
-                discover_qtox_profiles(Some(archive.to_string_lossy().into_owned())).unwrap();
+                discover_qtox_profiles_blocking(Some(archive.to_string_lossy().into_owned()))
+                    .unwrap();
             assert_eq!(candidates.len(), 1);
             assert_eq!(PathBuf::from(&candidates[0].profile_path), archive);
             assert_eq!(fs::read(&archive).unwrap(), archive_bytes);
@@ -20661,10 +21816,10 @@ mod desktop_adapter {
                         .map_err(|_| "KAI_VOLUME_PATH_INVALID".to_string())?;
                     if relative != Path::new("profile.tox") {
                         let result = profiles::write_file(&namespace.join(relative), &bytes);
-                        wipe_sensitive_bytes(&mut bytes);
+                        wipe_secret_bytes(&mut bytes);
                         result?;
                     } else {
-                        wipe_sensitive_bytes(&mut bytes);
+                        wipe_secret_bytes(&mut bytes);
                     }
                 }
             }
@@ -20677,20 +21832,20 @@ mod desktop_adapter {
                     let mut bytes = fs::read(history)
                         .map_err(|error| format!("Could not copy qTox history: {error}"))?;
                     let result = profiles::write_file(&import_directory.join("history.db"), &bytes);
-                    wipe_sensitive_bytes(&mut bytes);
+                    wipe_secret_bytes(&mut bytes);
                     result?;
                 }
                 let settings_source = source.with_extension("ini");
                 if settings_source.is_file() {
                     if let Ok(mut bytes) = fs::read(settings_source) {
                         let _ = profiles::write_file(&import_directory.join("profile.ini"), &bytes);
-                        wipe_sensitive_bytes(&mut bytes);
+                        wipe_secret_bytes(&mut bytes);
                     }
                 }
             }
             let tox = Arc::new(
                 ToxState::new_for_profile(
-                    paths.with_legacy_033_owner(&record.id),
+                    paths.with_profile_owner(&record.id, Arc::clone(&app_state.bootstrap_nodes)),
                     app_state.tor.clone(),
                     Arc::clone(&app_state.proxy_settings),
                     Arc::clone(&app_state.network_settings),
@@ -20709,27 +21864,12 @@ mod desktop_adapter {
                 let instance = state
                     .as_ref()
                     .ok_or_else(|| "The imported Tox profile was not initialized".to_string())?;
-                let mut address = [0_u8; 38];
-                unsafe { tox_self_get_address(instance.instance.as_ptr(), address.as_mut_ptr()) };
+                let address = instance.address();
                 let mut self_key = [0_u8; 32];
                 self_key.copy_from_slice(&address[..32]);
-                let count = unsafe { tox_self_get_friend_list_size(instance.instance.as_ptr()) };
-                let mut numbers = vec![0_u32; count];
-                unsafe {
-                    tox_self_get_friend_list(instance.instance.as_ptr(), numbers.as_mut_ptr())
-                };
                 let mut friends = HashMap::<Vec<u8>, u32>::new();
-                for number in numbers {
-                    let mut key = [0_u8; 32];
-                    let mut error = 0_i32;
-                    if unsafe {
-                        tox_friend_get_public_key(
-                            instance.instance.as_ptr(),
-                            number,
-                            key.as_mut_ptr(),
-                            &mut error,
-                        )
-                    } {
+                for number in instance.friend_numbers() {
+                    if let Some(key) = instance.native().friend_public_key(number, &mut 0) {
                         friends.insert(key.to_vec(), number);
                     }
                 }
@@ -20747,11 +21887,15 @@ mod desktop_adapter {
                 )?;
             }
             if let Some(contacts) = imported_contacts.as_ref() {
+                let runtime_root = history_source
+                    .as_ref()
+                    .map(|_| qtox_history::native_runtime_root(&app_state.root_dir))
+                    .transpose()?;
                 qtox_import::import_profile_data(
                     &tox,
                     contacts,
                     history_source.as_deref(),
-                    &app_state.root_dir,
+                    runtime_root.as_deref().unwrap_or(&app_state.root_dir),
                     password,
                     &self_key,
                     &friends,
@@ -20775,7 +21919,8 @@ mod desktop_adapter {
                     grants.clear_all();
                 }
                 let cleaned = volume.container_path().parent().is_none_or(|directory| {
-                    !directory.exists() || fs::remove_dir_all(directory).is_ok()
+                    retire_profile_logs_under(directory).is_ok()
+                        && (!directory.exists() || fs::remove_dir_all(directory).is_ok())
                 });
                 return Err(format!("{error}; rollback profile_data={cleaned}"));
             }
@@ -20797,11 +21942,10 @@ mod desktop_adapter {
             if let Ok(profile_path) = app_state.persistent_profile_path(&replaced) {
                 if let Some(directory) = profile_path.parent() {
                     let profiles_root = app_state.root_dir.join("profiles");
-                    if directory.starts_with(&profiles_root)
-                        && directory != profiles_root
-                        && directory.is_dir()
-                    {
-                        let _ = fs::remove_dir_all(directory);
+                    if directory.starts_with(&profiles_root) && directory != profiles_root {
+                        if retire_profile_logs_under(directory).is_ok() && directory.is_dir() {
+                            let _ = fs::remove_dir_all(directory);
+                        }
                     }
                 }
             }
@@ -20819,8 +21963,11 @@ mod desktop_adapter {
         history_path: Option<String>,
         password: Option<String>,
     ) -> Result<Vec<ProfileSummary>, String> {
+        let admission = app_state.desktop_work.admit()?;
         let owned_state = app_state.inner().clone();
         tauri::async_runtime::spawn_blocking(move || {
+            let _admission = admission;
+
             import_qtox_profile_blocking(app, owned_state, profile_path, history_path, password)
         })
         .await
@@ -20873,30 +22020,15 @@ mod desktop_adapter {
             let handle = handle
                 .as_ref()
                 .ok_or_else(|| "NO_ACTIVE_PROFILE".to_string())?;
-            let length = unsafe { tox_get_savedata_size(handle.instance.as_ptr()) };
-            let mut savedata = vec![0_u8; length];
-            unsafe { tox_get_savedata(handle.instance.as_ptr(), savedata.as_mut_ptr()) };
-            let mut address = [0_u8; 38];
-            unsafe { tox_self_get_address(handle.instance.as_ptr(), address.as_mut_ptr()) };
+            let savedata = handle.savedata();
+            let address = handle.address();
             let mut self_key = [0_u8; 32];
             self_key.copy_from_slice(&address[..32]);
-            let count = unsafe { tox_self_get_friend_list_size(handle.instance.as_ptr()) };
-            let mut numbers = vec![0_u32; count];
-            unsafe { tox_self_get_friend_list(handle.instance.as_ptr(), numbers.as_mut_ptr()) };
-            let friends = numbers
+            let friends = handle
+                .friend_numbers()
                 .into_iter()
                 .filter_map(|number| {
-                    let mut key = [0_u8; 32];
-                    let mut error = 0_i32;
-                    unsafe {
-                        tox_friend_get_public_key(
-                            handle.instance.as_ptr(),
-                            number,
-                            key.as_mut_ptr(),
-                            &mut error,
-                        )
-                    }
-                    .then_some((number, key))
+                    handle.native().friend_public_key(number, &mut 0).map(|key| (number, key))
                 })
                 .collect::<Vec<_>>();
             (savedata, self_key, friends)
@@ -20904,7 +22036,7 @@ mod desktop_adapter {
         let tox_bytes = match export_cipher.as_ref() {
             Some(cipher) => {
                 let encrypted = cipher.encrypt(&savedata)?;
-                wipe_sensitive_bytes(&mut savedata);
+                wipe_secret_bytes(&mut savedata);
                 encrypted
             }
             None => savedata,
@@ -20923,7 +22055,7 @@ mod desktop_adapter {
             let bytes = match export_cipher.as_ref() {
                 Some(cipher) => {
                     let encrypted = cipher.encrypt(&bytes);
-                    wipe_sensitive_bytes(&mut bytes);
+                    wipe_secret_bytes(&mut bytes);
                     encrypted?
                 }
                 None => bytes,
@@ -20972,12 +22104,15 @@ mod desktop_adapter {
         profile_id: Option<String>,
         password: Option<String>,
     ) -> Result<QtoxProfileExport, String> {
+        let admission = app_state.desktop_work.admit()?;
         let registry = Arc::clone(&app_state.registry);
         let profiles = Arc::clone(&app_state.profiles);
         let profile_id = profile_id
             .or_else(|| active_profile_id(&app_state))
             .ok_or_else(|| "NO_ACTIVE_PROFILE".to_string())?;
         tauri::async_runtime::spawn_blocking(move || {
+            let _admission = admission;
+
             export_qtox_profile_blocking(registry, profiles, Some(profile_id), password)
         })
         .await
@@ -20995,11 +22130,14 @@ mod desktop_adapter {
         profile_id: Option<String>,
         password: Option<String>,
     ) -> Result<QtoxProfileExport, String> {
+        let admission = app_state.desktop_work.admit()?;
         let owner = profile_id
             .or_else(|| active_profile_id(&app_state))
             .ok_or_else(|| "NO_ACTIVE_PROFILE".to_string())?;
         let owned_state = app_state.inner().clone();
         tauri::async_runtime::spawn_blocking(move || {
+            let _admission = admission;
+
             let record = owned_state.record(&owner)?;
             let state = exact_loaded_profile(&owned_state.profiles, &owner)?;
             let volume = state
@@ -21032,11 +22170,14 @@ mod desktop_adapter {
         current_password: Option<String>,
         new_password: Option<String>,
     ) -> Result<Vec<ProfileSummary>, String> {
+        let admission = app_state.desktop_work.admit()?;
         let owned_state = app_state.inner().clone();
         let owner = profile_id
             .or_else(|| active_profile_id(&owned_state))
             .ok_or_else(|| "NO_ACTIVE_PROFILE".to_string())?;
         tauri::async_runtime::spawn_blocking(move || {
+            let _admission = admission;
+
             change_profile_password_blocking(owned_state, owner, current_password, new_password)
         })
         .await
@@ -21049,231 +22190,194 @@ mod desktop_adapter {
         current_password: Option<String>,
         new_password: Option<String>,
     ) -> Result<Vec<ProfileSummary>, String> {
-        let record = app_state.record(&active_id)?;
         let state = app_state.loaded_profile(&active_id)?;
-        if let Some(volume) = state.profile_volume.as_ref() {
-            let current = current_password
-                .as_deref()
-                .filter(|password| !password.is_empty());
-            let replacement = new_password
-                .as_deref()
-                .filter(|password| !password.is_empty());
-            let mut registry = app_state
-                .registry
-                .lock()
-                .map_err(|_| "Could not access the profile registry".to_string())?;
-            registry.change_volume_password(
-                &app_state.data_dir,
-                &active_id,
-                volume,
-                current,
-                replacement,
-            )?;
-            drop(registry);
-            return app_state.summaries();
-        }
-        let paths = app_state.paths_for(&record)?;
-        if record.encrypted {
-            let bytes = fs::read(&paths.profile_path)
-                .map_err(|error| format!("Could not read the encrypted profile: {error}"))?;
-            ProfileCipher::unlock(
-                &bytes,
-                current_password
-                    .as_deref()
-                    .ok_or_else(|| "PROFILE_PASSWORD_REQUIRED".to_string())?,
-            )?;
-        }
-        let cipher = new_password
+        let volume = state
+            .profile_volume
+            .as_ref()
+            .ok_or_else(|| "PROFILE_VOLUME_UNAVAILABLE".to_string())?;
+        let current = current_password
             .as_deref()
-            .filter(|password| !password.is_empty())
-            .map(ProfileCipher::new)
-            .transpose()?;
-        let mut handle_guard = state
-            .handle
-            .lock()
-            .map_err(|_| "Could not access the active Tox profile".to_string())?;
-        let handle = handle_guard
-            .as_mut()
-            .ok_or_else(|| "NO_ACTIVE_PROFILE".to_string())?;
-        let previous_cipher = std::mem::replace(&mut handle.cipher, cipher);
-        if let Err(error) = ToxState::save(handle) {
-            handle.cipher = previous_cipher;
-            return Err(error);
-        }
-        let mut registry = match app_state.registry.lock() {
-            Ok(registry) => registry,
-            Err(_) => {
-                handle.cipher = previous_cipher;
-                let rollback = ToxState::save(handle);
-                return Err(match rollback {
-                    Ok(()) => "Could not access the profile registry".to_string(),
-                    Err(error) => format!(
-                    "Could not access the profile registry; profile rollback also failed: {error}"
-                ),
-                });
-            }
-        };
-        let previous_encrypted = match registry
-            .profiles
-            .iter_mut()
-            .find(|record| record.id == active_id)
-        {
-            Some(record) => {
-                let previous = record.encrypted;
-                record.encrypted = handle.cipher.is_some();
-                previous
-            }
-            None => {
-                drop(registry);
-                handle.cipher = previous_cipher;
-                let rollback = ToxState::save(handle);
-                return Err(match rollback {
-                    Ok(()) => "ACTIVE_PROFILE_NOT_REGISTERED".to_string(),
-                    Err(error) => {
-                        format!(
-                            "ACTIVE_PROFILE_NOT_REGISTERED; profile rollback also failed: {error}"
-                        )
-                    }
-                });
-            }
-        };
-        if let Err(error) = registry.save(&app_state.data_dir) {
-            if let Some(record) = registry
-                .profiles
-                .iter_mut()
-                .find(|record| record.id == active_id)
-            {
-                record.encrypted = previous_encrypted;
-            }
-            drop(registry);
-            handle.cipher = previous_cipher;
-            let rollback = ToxState::save(handle);
-            return Err(match rollback {
-                Ok(()) => error,
-                Err(rollback_error) => {
-                    format!("{error}; profile rollback also failed: {rollback_error}")
-                }
-            });
-        }
-        drop(registry);
-        drop(handle_guard);
-        app_state.summaries()
-    }
-
-    #[tauri::command]
-    fn destroy_active_profile(
-        app: tauri::AppHandle,
-        app_state: tauri::State<'_, AppState>,
-    ) -> Result<Vec<ProfileSummary>, String> {
-        let _route_guard = app_state
-            .shared_route_gate
-            .lock()
-            .map_err(|_| "SHARED_ROUTE_TRANSACTION_UNAVAILABLE")?;
-        let active_id = app_state
-            .registry
-            .lock()
-            .map_err(|_| "Could not access the profile registry".to_string())?
-            .active_profile_id
-            .clone()
-            .ok_or_else(|| "NO_ACTIVE_PROFILE".to_string())?;
-        let record = app_state.record(&active_id)?;
-        let imported_source = record.imported_from.as_deref().map(import_source_key);
-        let records_to_destroy = app_state
-            .registry
-            .lock()
-            .map_err(|_| "Could not access the profile registry".to_string())?
-            .profiles
-            .iter()
-            .filter(|candidate| {
-                candidate.id == active_id
-                    || imported_source.as_ref().is_some_and(|source| {
-                        candidate
-                            .imported_from
-                            .as_deref()
-                            .is_some_and(|value| import_source_key(value) == *source)
-                    })
-            })
-            .cloned()
-            .collect::<Vec<_>>();
-        let destroyed_ids = records_to_destroy
-            .iter()
-            .map(|record| record.id.clone())
-            .collect::<HashSet<_>>();
-        {
-            let mut loaded = app_state
-                .profiles
-                .lock()
-                .map_err(|_| "Could not access loaded profiles".to_string())?;
-            for profile_id in &destroyed_ids {
-                if let Some(state) = loaded.remove(profile_id) {
-                    state.stop_without_save()?;
-                }
-            }
-        }
-        let profiles_root = app_state.root_dir.join("profiles");
-        for doomed in &records_to_destroy {
-            let profile_path = app_state.persistent_profile_path(doomed)?;
-            let profile_parent = profile_path.parent().unwrap_or(&app_state.root_dir);
-            if profile_parent.starts_with(&profiles_root)
-                && profile_parent != profiles_root
-                && profile_parent.is_dir()
-            {
-                fs::remove_dir_all(profile_parent)
-                    .map_err(|error| format!("Could not remove active profile data: {error}"))?;
-            }
-        }
-        let loaded_ids: HashSet<String> = app_state
-            .profiles
-            .lock()
-            .map_err(|_| "Could not access loaded profiles".to_string())?
-            .keys()
-            .cloned()
-            .collect();
+            .filter(|password| !password.is_empty());
+        let replacement = new_password
+            .as_deref()
+            .filter(|password| !password.is_empty());
         let mut registry = app_state
             .registry
             .lock()
             .map_err(|_| "Could not access the profile registry".to_string())?;
-        registry
-            .profiles
-            .retain(|profile| !destroyed_ids.contains(&profile.id));
-        registry.active_profile_id = registry
-            .profiles
-            .iter()
-            .find(|profile| profile.enabled && loaded_ids.contains(&profile.id))
-            .or_else(|| registry.profiles.iter().find(|profile| profile.enabled))
-            .map(|profile| profile.id.clone());
-        registry.save(&app_state.data_dir)?;
+        registry.change_volume_password(
+            &app_state.data_dir,
+            &active_id,
+            volume,
+            current,
+            replacement,
+        )?;
         drop(registry);
-        if let Ok(mut errors) = app_state.load_errors.lock() {
-            errors.retain(|profile_id, _| !destroyed_ids.contains(profile_id));
-        }
-        if let Ok(mut grants) = app_state.native_file_grants.lock() {
-            for profile_id in &destroyed_ids {
-                grants.clear_for_profile(profile_id);
-            }
-        }
-        let summaries = app_state.summaries()?;
-        update_tray(&app, &app_state);
-        Ok(summaries)
+        app_state.summaries()
     }
 
     #[tauri::command]
-    fn load_local_state(
+    async fn destroy_active_profile(
+        app: tauri::AppHandle,
+        app_state: tauri::State<'_, AppState>,
+    ) -> Result<Vec<ProfileSummary>, String> {
+        let app_state = app_state.inner().clone();
+        let admission = app_state.desktop_work.admit()?;
+        let admitted_records = {
+            let registry = app_state
+                .registry
+                .lock()
+                .map_err(|_| "Could not access the profile registry".to_string())?;
+            let active_id = registry
+                .active_profile_id
+                .as_ref()
+                .ok_or("NO_ACTIVE_PROFILE")?;
+            let record = registry
+                .profiles
+                .iter()
+                .find(|record| &record.id == active_id)
+                .ok_or("PROFILE_NOT_FOUND")?;
+            let imported_source = record.imported_from.as_deref().map(import_source_key);
+            registry
+                .profiles
+                .iter()
+                .filter(|candidate| {
+                    &candidate.id == active_id
+                        || imported_source.as_ref().is_some_and(|source| {
+                            candidate
+                                .imported_from
+                                .as_deref()
+                                .is_some_and(|value| import_source_key(value) == *source)
+                        })
+                })
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        run_desktop_blocking(admission, move || {
+            let _route_guard = app_state
+                .shared_route_gate
+                .lock()
+                .map_err(|_| "SHARED_ROUTE_TRANSACTION_UNAVAILABLE")?;
+            for expected in &admitted_records {
+                let current = app_state.record(&expected.id)?;
+                if current.file != expected.file
+                    || current.data_directory != expected.data_directory
+                    || current.imported_from != expected.imported_from
+                {
+                    return Err("PROFILE_OWNER_CHANGED".into());
+                }
+            }
+            let records_to_destroy = admitted_records;
+            let destroyed_ids = records_to_destroy
+                .iter()
+                .map(|record| record.id.clone())
+                .collect::<HashSet<_>>();
+            for profile_id in &destroyed_ids {
+                let removed_profile = app_state
+                    .profiles
+                    .lock()
+                    .map_err(|_| "Could not access loaded profiles".to_string())?
+                    .remove(profile_id);
+                // A failed stop must leave every unattempted sibling registered.
+                // The map guard is gone before waiting for this profile's worker.
+                if let Some(state) = removed_profile {
+                    state.stop_without_save()?;
+                }
+            }
+            let profiles_root = app_state.root_dir.join("profiles");
+            for doomed in &records_to_destroy {
+                let profile_path = app_state.persistent_profile_path(doomed)?;
+                let profile_parent = profile_path.parent().unwrap_or(&app_state.root_dir);
+                if profile_parent.starts_with(&profiles_root) && profile_parent != profiles_root {
+                    // Includes locked/unloaded records and old normal-close logs.
+                    retire_profile_logs_under(profile_parent)?;
+                    if profile_parent.is_dir() {
+                        fs::remove_dir_all(profile_parent).map_err(|error| {
+                            format!("Could not remove active profile data: {error}")
+                        })?;
+                    }
+                }
+            }
+            let loaded_ids: HashSet<String> = app_state
+                .profiles
+                .lock()
+                .map_err(|_| "Could not access loaded profiles".to_string())?
+                .keys()
+                .cloned()
+                .collect();
+            let mut registry = app_state
+                .registry
+                .lock()
+                .map_err(|_| "Could not access the profile registry".to_string())?;
+            registry
+                .profiles
+                .retain(|profile| !destroyed_ids.contains(&profile.id));
+            if registry
+                .active_profile_id
+                .as_ref()
+                .is_none_or(|id| destroyed_ids.contains(id))
+            {
+                registry.active_profile_id = registry
+                    .profiles
+                    .iter()
+                    .find(|profile| profile.enabled && loaded_ids.contains(&profile.id))
+                    .or_else(|| registry.profiles.iter().find(|profile| profile.enabled))
+                    .map(|profile| profile.id.clone());
+            }
+            registry.save(&app_state.data_dir)?;
+            drop(registry);
+            if let Ok(mut errors) = app_state.load_errors.lock() {
+                errors.retain(|profile_id, _| !destroyed_ids.contains(profile_id));
+            }
+            if let Ok(mut grants) = app_state.native_file_grants.lock() {
+                for profile_id in &destroyed_ids {
+                    grants.clear_for_profile(profile_id);
+                }
+            }
+            let summaries = app_state.summaries()?;
+            update_tray(&app, &app_state);
+            Ok(summaries)
+        })
+        .await
+    }
+
+    #[tauri::command]
+    async fn load_local_state(
         app_state: tauri::State<'_, AppState>,
         profile_id: String,
     ) -> Result<Option<Value>, String> {
+        let app_state = app_state.inner().clone();
+        let admission = app_state.desktop_work.admit()?;
         let state = app_state.loaded_profile(&profile_id)?;
-        read_profile_local_state_for_profile(state.as_ref())
+        run_desktop_blocking(admission, move || {
+            let _route_guard = app_state
+                .shared_route_gate
+                .lock()
+                .map_err(|_| "SHARED_ROUTE_TRANSACTION_UNAVAILABLE")?;
+            ensure_queued_profile_current(&app_state, &state)?;
+            read_profile_local_state_for_profile(state.as_ref())
+        })
+        .await
     }
 
     #[tauri::command]
-    fn save_local_state(
+    async fn save_local_state(
         app_state: tauri::State<'_, AppState>,
         profile_id: String,
         state: Value,
     ) -> Result<(), String> {
+        let app_state = app_state.inner().clone();
+        let admission = app_state.desktop_work.admit()?;
         let tox_state = app_state.loaded_profile(&profile_id)?;
-        write_profile_local_state_for_profile(&tox_state, &state)
+        run_desktop_blocking(admission, move || {
+            let _route_guard = app_state
+                .shared_route_gate
+                .lock()
+                .map_err(|_| "SHARED_ROUTE_TRANSACTION_UNAVAILABLE")?;
+            ensure_queued_profile_current(&app_state, &tox_state)?;
+            write_profile_local_state_for_profile(&tox_state, &state)
+        })
+        .await
     }
 
     #[derive(Clone, Deserialize)]
@@ -21427,11 +22531,25 @@ mod desktop_adapter {
         }
     }
 
+    fn lock_native_file_target<'a>(
+        state: &'a ToxState,
+        friend_number: u32,
+        expected_public_key: Option<&str>,
+        expected_contact_incarnation: Option<u64>,
+    ) -> Result<(String, std::sync::MutexGuard<'a, ()>), String> {
+        let (key, transaction) = lock_chat_transaction_for_friend_bound(
+            state, friend_number, expected_public_key,
+        )?;
+        pending_contact::require_incarnation(state, &key, expected_contact_incarnation)?;
+        Ok((key, transaction))
+    }
+
     fn issue_native_file_batch(
         app_state: &AppState,
         paths: Vec<PathBuf>,
         profile_id: String,
         recipient_public_key: String,
+        contact_incarnation: u64,
     ) -> Result<NativeFileBatchSelection, String> {
         let selected_count = paths.len();
         if selected_count > MAX_CHAT_FILE_QUEUE {
@@ -21472,11 +22590,12 @@ mod desktop_adapter {
                 });
                 continue;
             }
-            match grants.issue(
+            match grants.issue_with_incarnation(
                 &path,
                 profile_id.clone(),
                 recipient_public_key.clone(),
                 MAX_CHAT_FILE_BYTES,
+                contact_incarnation,
             ) {
                 Ok(selection) => accepted.push(selection),
                 Err(_) => rejected.push(NativeFileRejection {
@@ -21498,12 +22617,16 @@ mod desktop_adapter {
         app: tauri::AppHandle,
         app_state: tauri::State<'_, AppState>,
         friend_number: u32,
+        expected_public_key: Option<String>,
+        expected_contact_incarnation: Option<u64>,
     ) -> Result<NativeFileBatchSelection, String> {
         let (profile_id, tox_state) = app_state.active_snapshot()?;
-        let recipient_public_key = tox_state.stable_friend_public_key(friend_number);
-        if recipient_public_key.is_empty() {
-            return Err("FRIEND_NOT_FOUND".to_string());
-        }
+        let recipient_public_key = {
+            let (key, _transaction) = lock_native_file_target(
+                &tox_state, friend_number, expected_public_key.as_deref(), expected_contact_incarnation,
+            )?;
+            key
+        };
         let _guard = app_state.begin_native_dialog()?;
         let options = NativeDialogOptions {
             directory: false,
@@ -21516,10 +22639,10 @@ mod desktop_adapter {
         if current_profile_id != profile_id || !Arc::ptr_eq(&current_state, &tox_state) {
             return Err("ACTIVE_PROFILE_CHANGED".to_string());
         }
-        if current_state.stable_friend_public_key(friend_number) != recipient_public_key {
-            return Err("FILE_GRANT_RECIPIENT_CHANGED".to_string());
-        }
-        issue_native_file_batch(&app_state, paths, profile_id, recipient_public_key)
+        let (_, _transaction) = lock_native_file_target(
+            &current_state, friend_number, Some(&recipient_public_key), expected_contact_incarnation,
+        )?;
+        issue_native_file_batch(&app_state, paths, profile_id, recipient_public_key, expected_contact_incarnation.unwrap_or(0))
     }
 
     fn clipboard_image_temp_path() -> Result<PathBuf, String> {
@@ -21689,7 +22812,10 @@ function run(argv) {
         app_state: tauri::State<'_, AppState>,
         profile_id: Option<String>,
         friend_number: u32,
+        expected_public_key: Option<String>,
+        expected_contact_incarnation: Option<u64>,
     ) -> Result<NativeFileBatchSelection, String> {
+        let admission = app_state.desktop_work.admit()?;
         let app_state = app_state.inner().clone();
         let (profile_id, profile) = match profile_id {
             Some(profile_id) => {
@@ -21698,18 +22824,23 @@ function run(argv) {
             }
             None => app_state.active_snapshot()?,
         };
-        let recipient_public_key = profile.stable_friend_public_key(friend_number);
-        if recipient_public_key.is_empty() {
-            return Err("FRIEND_NOT_FOUND".to_string());
-        }
+        let recipient_public_key = {
+            let (key, _transaction) = lock_native_file_target(
+                &profile, friend_number, expected_public_key.as_deref(), expected_contact_incarnation,
+            )?;
+            key
+        };
         let path = clipboard_image_temp_path()?;
         let capture_path = path.clone();
         let captured = tauri::async_runtime::spawn_blocking(move || {
+            let _admission = admission;
+
             capture_native_clipboard_image(&capture_path)?;
             validate_captured_clipboard_image(&capture_path)
         })
         .await
-        .map_err(|_| "CLIPBOARD_IMAGE_TASK_FAILED".to_string())?;
+        .map_err(|_| "CLIPBOARD_IMAGE_TASK_FAILED".to_string())
+        .and_then(|result| result);
         if let Err(error) = captured {
             let _ = fs::remove_file(&path);
             return Err(error);
@@ -21717,18 +22848,19 @@ function run(argv) {
         // Recheck the exact owner and recipient after the clipboard service
         // returns. The scoped token can never be redirected by a profile/chat
         // switch while capture was running.
-        let current = app_state.loaded_profile(&profile_id)?;
-        if !Arc::ptr_eq(&current, &profile)
-            || current.stable_friend_public_key(friend_number) != recipient_public_key
-        {
-            let _ = fs::remove_file(&path);
-            return Err("FILE_GRANT_RECIPIENT_CHANGED".to_string());
-        }
-        let selection = app_state
-            .native_file_grants
-            .lock()
-            .map_err(|_| "Could not access native file grants".to_string())?
-            .issue_owned(&path, profile_id, recipient_public_key, MAX_CHAT_FILE_BYTES);
+        let selection = (|| {
+            let current = app_state.loaded_profile(&profile_id)?;
+            if !Arc::ptr_eq(&current, &profile) {
+                return Err("FILE_GRANT_RECIPIENT_CHANGED".to_string());
+            }
+            let (_, _transaction) = lock_native_file_target(
+                &current, friend_number, Some(&recipient_public_key), expected_contact_incarnation,
+            )?;
+            app_state.native_file_grants.lock()
+                .map_err(|_| "Could not access native file grants".to_string())?
+                .issue_owned_with_incarnation(&path, profile_id, recipient_public_key,
+                    MAX_CHAT_FILE_BYTES, expected_contact_incarnation.unwrap_or(0))
+        })();
         match selection {
             Ok(selection) => Ok(NativeFileBatchSelection {
                 accepted: vec![selection],
@@ -21743,33 +22875,98 @@ function run(argv) {
         }
     }
 
+    fn current_remote_drop_target(app_state: &AppState, target: &NativeFileDropTarget) -> Result<(), String> {
+        let remote = target.remote.as_ref().ok_or("FILE_DROP_TARGET_INVALID")?;
+        let current = app_state.remote_profiles.get(&target.profile_id).ok_or("FILE_DROP_TARGET_CHANGED")?;
+        if !Arc::ptr_eq(remote, &current) || !remote.is_connected()
+            || app_state.native_file_drop_revision.load(Ordering::Acquire) != target.revision {
+            return Err("FILE_DROP_TARGET_CHANGED".into());
+        }
+        Ok(())
+    }
+
+    fn drop_read_context(target: &NativeFileDropTarget) -> String {
+        format!("{}:{}", target.revision, target.view_lease_id.as_deref().unwrap_or(""))
+    }
+
     #[tauri::command]
-    fn set_native_file_drop_target(
+    async fn set_native_file_drop_target(
         app_state: tauri::State<'_, AppState>,
         profile_id: Option<String>,
         friend_number: Option<u32>,
+        expected_public_key: Option<String>,
+        expected_contact_incarnation: Option<u64>,
+        view_lease_id: Option<String>,
     ) -> Result<(), String> {
-        let target = match (profile_id, friend_number) {
-            (None, None) => None,
-            (Some(profile_id), Some(friend_number)) => {
-                let tox_state = app_state.loaded_profile(&profile_id)?;
-                let recipient_public_key = tox_state.stable_friend_public_key(friend_number);
-                if recipient_public_key.is_empty() {
-                    return Err("FRIEND_NOT_FOUND".to_string());
+        let app_state = app_state.inner().clone();
+        let admission = app_state.desktop_work.admit()?;
+        let revision = app_state.native_file_drop_revision.fetch_add(1, Ordering::AcqRel).wrapping_add(1);
+        *app_state.native_file_drop_target.lock().map_err(|_| "FILE_DROP_TARGET_INVALID")? = None;
+        run_desktop_blocking(admission, move || {
+            let target = match (profile_id, friend_number) {
+                (None, None) => None,
+                (Some(profile_id), Some(friend_number)) => {
+                    let expected = expected_public_key.as_deref().ok_or("FILE_DROP_TARGET_INVALID")?;
+                    if expected.len() != 64 || !expected.bytes().all(|b| b.is_ascii_hexdigit()) {
+                        return Err("FILE_DROP_TARGET_INVALID".into());
+                    }
+                    let recipient_public_key = expected.to_ascii_uppercase();
+                    if profile_id.starts_with("wg-") {
+                        let view = view_lease_id.as_deref().ok_or("FILE_DROP_TARGET_INVALID")?;
+                        if view.is_empty() || view.len() > 128 || !view.is_ascii() { return Err("FILE_DROP_TARGET_INVALID".into()); }
+                        let remote = app_state.remote_profiles.get(&profile_id).ok_or("WEBGATE_PROFILE_NOT_FOUND")?;
+                        // No registry/route/grant lock is held over the scoped request.
+                        let friends = remote.invoke("get_tox_friends", serde_json::json!({}), None)?;
+                        if !friends.as_array().is_some_and(|friends| friends.iter().any(|friend| {
+                            friend.get("number").and_then(serde_json::Value::as_u64) == Some(u64::from(friend_number))
+                                && friend.get("public_key").and_then(serde_json::Value::as_str).is_some_and(|key| key.eq_ignore_ascii_case(expected))
+                        })) { return Err("CHAT_CONTACT_IDENTITY_CHANGED".into()); }
+                        let target = NativeFileDropTarget { profile_id, friend_number, recipient_public_key, contact_incarnation: expected_contact_incarnation.unwrap_or(0), view_lease_id, revision, remote: Some(remote) };
+                        current_remote_drop_target(&app_state, &target)?;
+                        Some(target)
+                    } else {
+                        let _route_guard = app_state.shared_route_gate.lock().map_err(|_| "SHARED_ROUTE_TRANSACTION_UNAVAILABLE")?;
+                        let profile = app_state.loaded_profile(&profile_id)?;
+                        ensure_queued_profile_current(&app_state, &profile)?;
+                        let (_, _transaction) = lock_native_file_target(&profile, friend_number, Some(expected), expected_contact_incarnation)?;
+                        Some(NativeFileDropTarget { profile_id, friend_number, recipient_public_key, contact_incarnation: expected_contact_incarnation.unwrap_or(0), view_lease_id, revision, remote: None })
+                    }
                 }
-                Some(NativeFileDropTarget {
-                    profile_id,
-                    friend_number,
-                    recipient_public_key,
-                })
+                _ => return Err("FILE_DROP_TARGET_INVALID".into()),
+            };
+            let mut current = app_state.native_file_drop_target.lock().map_err(|_| "FILE_DROP_TARGET_INVALID")?;
+            if app_state.native_file_drop_revision.load(Ordering::Acquire) != revision {
+                return Err("FILE_DROP_TARGET_CHANGED".into());
             }
-            _ => return Err("FILE_DROP_TARGET_INVALID".to_string()),
-        };
-        *app_state
-            .native_file_drop_target
-            .lock()
-            .map_err(|_| "Could not update the native file drop target".to_string())? = target;
-        Ok(())
+            *current = target;
+            Ok(())
+        }).await
+    }
+
+    #[tauri::command]
+    async fn read_webgate_file_grant(
+        app_state: tauri::State<'_, AppState>, profile_id: String, friend_number: u32,
+        expected_public_key: String, view_lease_id: String, target_revision: u64,
+        expected_contact_incarnation: Option<u64>,
+        grant_token: String, position: u64, length: usize,
+    ) -> Result<serde_json::Value, String> {
+        let app_state = app_state.inner().clone();
+        let admission = app_state.desktop_work.admit()?;
+        run_desktop_blocking(admission, move || {
+            let target_guard = app_state.native_file_drop_target.lock().map_err(|_| "FILE_DROP_TARGET_CHANGED")?;
+            let target = target_guard.as_ref().ok_or("FILE_DROP_TARGET_CHANGED")?;
+            if target.profile_id != profile_id || target.friend_number != friend_number
+                || target.recipient_public_key != expected_public_key || target.view_lease_id.as_deref() != Some(view_lease_id.as_str())
+                || target.revision != target_revision
+                || target.contact_incarnation != expected_contact_incarnation.unwrap_or(0) { return Err("FILE_DROP_TARGET_CHANGED".into()); }
+            current_remote_drop_target(&app_state, target)?;
+            let (mut bytes, eof) = app_state.native_file_grants.lock().map_err(|_| "NATIVE_FILE_GRANT_INVALID")?
+                .read_chunk(&grant_token, &profile_id, &expected_public_key, target.contact_incarnation, &drop_read_context(target), position, length)?;
+            use base64::Engine;
+            let data = base64::prelude::BASE64_STANDARD.encode(&bytes);
+            bytes.fill(0);
+            Ok(serde_json::json!({ "position": position, "data": data, "eof": eof }))
+        }).await
     }
 
     #[tauri::command]
@@ -21842,6 +23039,7 @@ function run(argv) {
         }
     }
 
+    #[cfg(test)]
     fn set_profile_avatar_blocking(
         profiles: Arc<Mutex<HashMap<String, Arc<ToxState>>>>,
         profile_id: String,
@@ -21868,56 +23066,85 @@ function run(argv) {
         filename: Option<String>,
         bytes: Option<Vec<u8>>,
     ) -> Result<Vec<ProfileSummary>, String> {
-        let profiles = Arc::clone(&app_state.profiles);
-        tauri::async_runtime::spawn_blocking(move || {
-            set_profile_avatar_blocking(profiles, profile_id, data_url, filename, bytes)
+        let app_state = app_state.inner().clone();
+        let admission = app_state.desktop_work.admit()?;
+        let profile = app_state.loaded_profile(&profile_id)?;
+        run_desktop_blocking(admission, move || {
+            let _route_guard = app_state
+                .shared_route_gate
+                .lock()
+                .map_err(|_| "SHARED_ROUTE_TRANSACTION_UNAVAILABLE")?;
+            ensure_queued_profile_current(&app_state, &profile)?;
+            let update = validate_profile_avatar_update(data_url, filename, bytes)?;
+            apply_profile_avatar_update(&profile, update)?;
+            let summaries = app_state.summaries()?;
+            update_tray(&app, &app_state);
+            Ok(summaries)
         })
         .await
-        .map_err(|error| format!("The avatar worker stopped unexpectedly: {error}"))??;
-        let summaries = app_state.summaries()?;
-        update_tray(&app, &app_state);
-        Ok(summaries)
     }
 
     #[tauri::command]
-    fn load_layout_state(app_state: tauri::State<'_, AppState>) -> Result<Option<Value>, String> {
-        let path = layout_state_path(&app_state);
-        if !path.exists() {
-            return Ok(None);
-        }
-        let contents = fs::read_to_string(&path)
-            .map_err(|error| format!("Could not read the shared interface layout: {error}"))?;
-        serde_json::from_str(&contents)
-            .map(Some)
-            .map_err(|error| format!("The shared interface layout is invalid: {error}"))
+    async fn load_layout_state(
+        app_state: tauri::State<'_, AppState>,
+    ) -> Result<Option<Value>, String> {
+        let app_state = app_state.inner().clone();
+        let admission = app_state.desktop_work.admit()?;
+        run_desktop_blocking(admission, move || {
+            let path = layout_state_path(&app_state);
+            if !path.exists() {
+                return Ok(None);
+            }
+            let contents = fs::read_to_string(&path)
+                .map_err(|error| format!("Could not read the shared interface layout: {error}"))?;
+            serde_json::from_str(&contents)
+                .map(Some)
+                .map_err(|error| format!("The shared interface layout is invalid: {error}"))
+        })
+        .await
     }
 
     #[tauri::command]
-    fn save_layout_state(
+    async fn save_layout_state(
         app_state: tauri::State<'_, AppState>,
         state: Value,
     ) -> Result<(), String> {
-        let serialized = serde_json::to_vec_pretty(&state)
-            .map_err(|error| format!("Could not encode the shared interface layout: {error}"))?;
-        atomic_write(&layout_state_path(&app_state), &serialized)
-            .map_err(|error| format!("Could not save the shared interface layout: {error}"))
+        let app_state = app_state.inner().clone();
+        let admission = app_state.desktop_work.admit()?;
+        run_desktop_blocking(admission, move || {
+            let serialized = serde_json::to_vec_pretty(&state).map_err(|error| {
+                format!("Could not encode the shared interface layout: {error}")
+            })?;
+            atomic_write(&layout_state_path(&app_state), &serialized)
+                .map_err(|error| format!("Could not save the shared interface layout: {error}"))
+        })
+        .await
     }
 
     #[tauri::command]
-    fn get_tox_id(app_state: tauri::State<'_, AppState>) -> Result<String, String> {
+    async fn get_tox_id(app_state: tauri::State<'_, AppState>) -> Result<String, String> {
+        let app_state = app_state.inner().clone();
+        let admission = app_state.desktop_work.admit()?;
         let tox_state = app_state.active()?;
-        let state = tox_state
-            .handle
-            .lock()
-            .map_err(|_| "Не удалось получить доступ к профилю Tox".to_string())?;
-        let instance = state
-            .as_ref()
-            .ok_or_else(|| "Профиль Tox не инициализирован".to_string())?;
+        run_desktop_blocking(admission, move || {
+            let _route_guard = app_state
+                .shared_route_gate
+                .lock()
+                .map_err(|_| "SHARED_ROUTE_TRANSACTION_UNAVAILABLE")?;
+            ensure_queued_profile_current(&app_state, &tox_state)?;
+            let state = tox_state
+                .handle
+                .lock()
+                .map_err(|_| "Не удалось получить доступ к профилю Tox".to_string())?;
+            let instance = state
+                .as_ref()
+                .ok_or_else(|| "Профиль Tox не инициализирован".to_string())?;
 
-        let mut address = [0_u8; 38];
-        unsafe { tox_self_get_address(instance.instance.as_ptr(), address.as_mut_ptr()) };
-        ToxState::save(instance)?;
-        Ok(address.iter().map(|byte| format!("{byte:02X}")).collect())
+            let address = instance.address();
+            ToxState::save(instance)?;
+            Ok(address.iter().map(|byte| format!("{byte:02X}")).collect())
+        })
+        .await
     }
 
     fn parse_tox_id(value: &str) -> Result<[u8; 38], String> {
@@ -21938,98 +23165,105 @@ function run(argv) {
     }
 
     #[tauri::command]
-    fn add_tox_friend(
+    async fn add_tox_friend(
         app_state: tauri::State<'_, AppState>,
+        profile_id: Option<String>,
         tox_id: String,
         message: String,
     ) -> Result<u32, String> {
-        let tox_state = app_state.active()?;
-        let address = parse_tox_id(&tox_id)?;
-        let message = if message.trim().is_empty() {
-            "Привет! Добавь меня, пожалуйста."
-        } else {
-            message.trim()
+        let app_state = app_state.inner().clone();
+        let admission = app_state.desktop_work.admit()?;
+        let tox_state = match profile_id.as_deref() {
+            Some(profile_id) => app_state.loaded_profile(profile_id)?,
+            None => app_state.active()?,
         };
+        run_desktop_blocking(admission, move || {
+            let _route_guard = app_state.shared_route_gate.lock().map_err(|_| "SHARED_ROUTE_TRANSACTION_UNAVAILABLE")?;
+            ensure_queued_profile_current(&app_state, &tox_state)?;
+    let address = parse_tox_id(&tox_id)?;
+            let message = if message.trim().is_empty() {
+                "Привет! Добавь меня, пожалуйста."
+            } else {
+                message.trim()
+            };
 
-        let state = tox_state
-            .handle
-            .lock()
-            .map_err(|_| "Не удалось получить доступ к профилю Tox".to_string())?;
-        let instance = state
-            .as_ref()
-            .ok_or_else(|| "Профиль Tox не инициализирован".to_string())?;
-        let mut error = 0_i32;
-        let friend_number = unsafe {
-            tox_friend_add(
-                instance.instance.as_ptr(),
-                address.as_ptr(),
-                message.as_bytes().as_ptr(),
-                message.len(),
-                &mut error,
-            )
-        };
-        log_network(&tox_state.network_log_path, format!("FRIEND_ADD_REQUEST result_friend={friend_number} error={error} message_bytes={} fingerprint={}", message.len(), event_fingerprint(message.as_bytes())));
-        let public_key = hex_upper(&address[..32]);
-        let friend_number = match resolve_native_friend_add_result(
-            instance.instance.as_ptr(),
-            &public_key,
-            friend_number,
-            error,
-            true,
-        ) {
-            Ok(number) => number,
-            Err(error) => {
-                let message = match error {
-                    2 => "Сообщение для авторизации слишком длинное",
-                    3 => "Нужно указать сообщение для авторизации",
-                    4 => "Нельзя добавить собственный Tox ID",
-                    5 => "Запрос уже был отправлен или контакт уже добавлен",
-                    6 => "Tox ID не прошёл проверку контрольной суммы",
-                    7 => "У этого контакта изменился no-spam идентификатор; обновите Tox ID",
-                    8 => "Не удалось выделить память для нового контакта",
-                    _ => "Не удалось отправить запрос авторизации Tox",
-                };
-                return Err(message.to_string());
-            }
-        };
-        let added_at = unix_timestamp();
-        let added_event_sequence = next_chat_event_sequence();
-        let cache_write = {
-            let mut cache = tox_state
-                .friend_cache
+            let state = tox_state
+                .handle
                 .lock()
-                .map_err(|_| "FRIEND_CACHE_UNAVAILABLE".to_string())?;
-            let entry = cache.entry(public_key.clone()).or_default();
-            entry.tox_id = tox_id
-                .chars()
-                .filter(|character| !character.is_whitespace())
-                .collect::<String>()
-                .to_uppercase();
-            entry.friend_number = Some(friend_number);
-            entry.pending_authorization = !entry.authorized;
-            if !entry.pending_authorization {
-                entry.authorization_message.clear();
-            } else if error == 0 {
-                entry.authorization_message = message.to_string();
+                .map_err(|_| "Не удалось получить доступ к профилю Tox".to_string())?;
+            let instance = state
+                .as_ref()
+                .ok_or_else(|| "Профиль Tox не инициализирован".to_string())?;
+            if !installed_route_matches_settings(&tox_state) {
+                return Err("SHARED_ROUTE_RESTART_REQUIRED".to_string());
             }
-            entry.authorization_last_refreshed_at = added_at;
-            if entry.added_at.is_none() {
-                entry.added_at = Some(added_at);
-                entry.added_event_sequence = added_event_sequence;
-            }
-            enqueue_friend_cache_write_required(&cache, &tox_state.friend_cache_path)?
-        };
-        wait_for_atomic_write(cache_write)?;
-        ToxState::save(instance)?;
-        if error == 0 {
-            tox_state.pq.bind_contact(
-                friend_number,
+            let mut error = 0_i32;
+            let friend_number = instance.native().friend_add(&address, message.as_bytes(), &mut error);
+            log_network(&tox_state.network_log_path, format!("FRIEND_ADD_REQUEST result_friend={friend_number} error={error} message_bytes={} fingerprint={}", message.len(), event_fingerprint(message.as_bytes())));
+            let public_key = hex_upper(&address[..32]);
+            let friend_number = match resolve_native_friend_add_result(
+                instance.native(),
                 &public_key,
-                &pq_tox_owner(instance.instance.as_ptr()),
-                false,
-            )?;
-        }
-        Ok(friend_number)
+                friend_number,
+                error,
+                true,
+            ) {
+                Ok(number) => number,
+                Err(error) => {
+                    let message = match error {
+                        2 => "Сообщение для авторизации слишком длинное",
+                        3 => "Нужно указать сообщение для авторизации",
+                        4 => "Нельзя добавить собственный Tox ID",
+                        5 => "Запрос уже был отправлен или контакт уже добавлен",
+                        6 => "Tox ID не прошёл проверку контрольной суммы",
+                        7 => "У этого контакта изменился no-spam идентификатор; обновите Tox ID",
+                        8 => "Не удалось выделить память для нового контакта",
+                        _ => "Не удалось отправить запрос авторизации Tox",
+                    };
+                    return Err(message.to_string());
+                }
+            };
+            let added_at = unix_timestamp();
+            let added_event_sequence = next_chat_event_sequence();
+            let cache_write = {
+                let mut cache = tox_state
+                    .friend_cache
+                    .lock()
+                    .map_err(|_| "FRIEND_CACHE_UNAVAILABLE".to_string())?;
+                let entry = cache.entry(public_key.clone()).or_default();
+                entry.tox_id = tox_id
+                    .chars()
+                    .filter(|character| !character.is_whitespace())
+                    .collect::<String>()
+                    .to_uppercase();
+                entry.friend_number = Some(friend_number);
+                entry.pending_authorization = !entry.authorized;
+                if !entry.pending_authorization {
+                    entry.authorization_message.clear();
+                } else if error == 0 {
+                    entry.authorization_message = message.to_string();
+                }
+                entry.authorization_last_refreshed_at = added_at;
+                if entry.added_at.is_none() {
+                    entry.added_at = Some(added_at);
+                    entry.added_event_sequence = added_event_sequence;
+                }
+                enqueue_friend_cache_write_required(&cache, &tox_state.friend_cache_path)?
+            };
+            wait_for_atomic_write(cache_write)?;
+            pending_contact::persist_outgoing_requests(&tox_state, instance)?;
+            ToxState::save(instance)?;
+            if error == 0 {
+                tox_state.pq.bind_contact(
+                    friend_number,
+                    &public_key,
+                    &pq_tox_owner(instance.native()),
+                    false,
+                )?;
+            }
+            Ok(friend_number)
+        })
+        .await
     }
 
     #[tauri::command]
@@ -22037,27 +23271,36 @@ function run(argv) {
         app_state: tauri::State<'_, AppState>,
         profile_id: Option<String>,
     ) -> Result<Vec<ToxFriend>, String> {
+        let admission = app_state.desktop_work.admit()?;
         let profile = match profile_id {
             Some(id) => app_state.loaded_profile(&id)?,
             None => app_state.active()?,
         };
-        tauri::async_runtime::spawn_blocking(move || get_tox_friends_snapshot(&profile))
-            .await
-            .map_err(|error| format!("Tox contact refresh task failed: {error}"))?
-    }
-
-    fn get_tox_friends_blocking(app_state: &AppState) -> Result<Vec<ToxFriend>, String> {
-        let tox_state = app_state.active()?;
-        get_tox_friends_snapshot(&tox_state)
+        tauri::async_runtime::spawn_blocking(move || {
+            let _admission = admission;
+            get_tox_friends_snapshot(&profile)
+        })
+        .await
+        .map_err(|error| format!("Tox contact refresh task failed: {error}"))?
     }
 
     pub(super) fn get_tox_friends_snapshot(tox_state: &ToxState) -> Result<Vec<ToxFriend>, String> {
-        let (last_events_by_key, last_events_by_number) = last_event_maps_for_state(tox_state)?;
+        // Refuse a busy native owner before preparing history or avatar metadata.
+        // The probe is released before any store/FS work; the actual snapshot
+        // below still acquires its own guard and rechecks concurrent changes.
+        {
+            let _available = tox_state.handle.try_lock().map_err(|error| match error {
+                std::sync::TryLockError::WouldBlock => "Tox profile is busy".to_string(),
+                std::sync::TryLockError::Poisoned(_) => {
+                    "Не удалось получить доступ к профилю Tox".to_string()
+                }
+            })?;
+        }
+        let last_events_by_key = last_events_for_state(tox_state)?;
         let avatar_sources = latest_friend_avatar_sources(&tox_state.avatars_dir);
         // When deliberately disconnected, toxcore can still hold an old connection
         // value. Never expose that stale value as a live contact presence.
-        let network_enabled =
-            tox_state.network_enabled.load(Ordering::Relaxed) && tox_state.tor.is_ready();
+        let network_enabled = local_transport_ready(tox_state);
         // This is a periodic UI snapshot. If toxcore is in the middle of an
         // iteration or a route replacement, keep the previous frontend snapshot
         // and retry on the next tick instead of waiting behind the network.
@@ -22070,33 +23313,22 @@ function run(argv) {
         let instance = state
             .as_ref()
             .ok_or_else(|| "Профиль Tox не инициализирован".to_string())?;
-        let count = unsafe { tox_self_get_friend_list_size(instance.instance.as_ptr()) };
-        let mut numbers = vec![0_u32; count];
-        unsafe { tox_self_get_friend_list(instance.instance.as_ptr(), numbers.as_mut_ptr()) };
+        let native = instance.native();
+        let numbers = native.friend_numbers();
 
         let mut friend_cache = tox_state
             .friend_cache
             .lock()
             .map_err(|_| "Не удалось прочитать кэш контактов".to_string())?;
         let mut friend_cache_changed = false;
-        let mut friends = Vec::with_capacity(count);
+        let mut friends = Vec::with_capacity(numbers.len());
         for number in numbers {
-            let mut key = [0_u8; 32];
-            let mut error = 0_i32;
-            if !unsafe {
-                tox_friend_get_public_key(
-                    instance.instance.as_ptr(),
-                    number,
-                    key.as_mut_ptr(),
-                    &mut error,
-                )
-            } {
+            let Some(key) = native.friend_public_key(number, &mut 0) else {
                 continue;
-            }
+            };
+            let mut error = 0;
             let connection = if network_enabled {
-                match unsafe {
-                    tox_friend_get_connection_status(instance.instance.as_ptr(), number, &mut error)
-                } {
+                match instance.native().friend_connection_status(number, &mut error) {
                     1 | 2 => "online",
                     _ => "offline",
                 }
@@ -22106,7 +23338,7 @@ function run(argv) {
             };
             error = 0;
             let raw_status =
-                unsafe { tox_friend_get_status(instance.instance.as_ptr(), number, &mut error) };
+                instance.native().friend_status(number, &mut error);
             let status = if connection == "offline" {
                 "offline"
             } else if raw_status == 0 {
@@ -22117,28 +23349,10 @@ function run(argv) {
                 "busy"
             }
             .to_string();
-            let name_size =
-                unsafe { tox_friend_get_name_size(instance.instance.as_ptr(), number, &mut error) };
-            let received_name = if error == 0 && name_size > 0 {
-                let mut bytes = vec![0_u8; name_size];
-                error = 0;
-                if unsafe {
-                    tox_friend_get_name(
-                        instance.instance.as_ptr(),
-                        number,
-                        bytes.as_mut_ptr(),
-                        &mut error,
-                    )
-                } {
-                    sanitize_untrusted_text(&String::from_utf8_lossy(&bytes))
-                        .trim()
-                        .to_string()
-                } else {
-                    String::new()
-                }
-            } else {
-                String::new()
-            };
+            let received_name = native
+                .friend_name_bytes(number, &mut error)
+                .map(|bytes| sanitize_untrusted_text(&String::from_utf8_lossy(&bytes)).trim().to_string())
+                .unwrap_or_default();
             let public_key = key
                 .iter()
                 .map(|byte| format!("{byte:02X}"))
@@ -22165,29 +23379,10 @@ function run(argv) {
             };
             let name = sanitize_untrusted_text(&name);
             error = 0;
-            let status_size = unsafe {
-                tox_friend_get_status_message_size(instance.instance.as_ptr(), number, &mut error)
-            };
-            let received_status_message = if error == 0 && status_size > 0 {
-                let mut bytes = vec![0_u8; status_size];
-                error = 0;
-                if unsafe {
-                    tox_friend_get_status_message(
-                        instance.instance.as_ptr(),
-                        number,
-                        bytes.as_mut_ptr(),
-                        &mut error,
-                    )
-                } {
-                    sanitize_untrusted_text(&String::from_utf8_lossy(&bytes))
-                        .trim()
-                        .to_string()
-                } else {
-                    String::new()
-                }
-            } else {
-                String::new()
-            };
+            let received_status_message = native
+                .friend_status_bytes(number, &mut error)
+                .map(|bytes| sanitize_untrusted_text(&String::from_utf8_lossy(&bytes)).trim().to_string())
+                .unwrap_or_default();
             let status_message = if !received_status_message.is_empty() || connection == "online" {
                 let entry = friend_cache.entry(public_key.clone()).or_default();
                 if !name.trim().is_empty() && entry.name != name {
@@ -22215,12 +23410,7 @@ function run(argv) {
                 .filter(|tox_id| !tox_id.is_empty())
                 .unwrap_or_else(|| public_key.clone());
             let authorized = cached.authorized;
-            let last_event = last_events_by_key
-                .get(&public_key)
-                .copied()
-                .into_iter()
-                .chain(last_events_by_number.get(&number).copied())
-                .max();
+            let last_event = last_events_by_key.get(&public_key).copied();
             friends.push(ToxFriend {
                 number,
                 public_key,
@@ -22249,24 +23439,36 @@ function run(argv) {
     }
 
     #[tauri::command]
-    fn get_tox_nickname(
+    async fn get_tox_nickname(
         app_state: tauri::State<'_, AppState>,
         profile_id: Option<String>,
     ) -> Result<String, String> {
+        let app_state = app_state.inner().clone();
+        let admission = app_state.desktop_work.admit()?;
         let state = match profile_id {
             Some(profile_id) => app_state.loaded_profile(&profile_id)?,
             None => app_state.active_snapshot()?.1,
         };
-        tox_nickname_for_state(&state)
+        run_desktop_blocking(admission, move || {
+            let _route_guard = app_state
+                .shared_route_gate
+                .lock()
+                .map_err(|_| "SHARED_ROUTE_TRANSACTION_UNAVAILABLE")?;
+            ensure_queued_profile_current(&app_state, &state)?;
+            tox_nickname_for_state(&state)
+        })
+        .await
     }
 
     #[tauri::command]
-    fn set_tox_nickname(
+    async fn set_tox_nickname(
         app: tauri::AppHandle,
         app_state: tauri::State<'_, AppState>,
         nickname: String,
         profile_id: Option<String>,
     ) -> Result<(), String> {
+        let app_state = app_state.inner().clone();
+        let admission = app_state.desktop_work.admit()?;
         let (profile_id, tox_state) = match profile_id {
             Some(profile_id) => {
                 let state = app_state.loaded_profile(&profile_id)?;
@@ -22274,47 +23476,48 @@ function run(argv) {
             }
             None => app_state.active_snapshot()?,
         };
-        let nickname = nickname.trim();
-        if nickname.len() > 128 {
-            return Err("Ник Tox не может быть длиннее 128 байт".to_string());
-        }
-        let state = tox_state
-            .handle
-            .lock()
-            .map_err(|_| "Не удалось получить доступ к профилю Tox".to_string())?;
-        let instance = state
-            .as_ref()
-            .ok_or_else(|| "Профиль Tox не инициализирован".to_string())?;
-        let mut error = 0_i32;
-        let bytes = nickname.as_bytes();
-        if !unsafe {
-            tox_self_set_name(
-                instance.instance.as_ptr(),
-                bytes.as_ptr(),
-                bytes.len(),
-                &mut error,
-            )
-        } {
-            return Err(format!("Не удалось установить ник Tox (код {error})"));
-        }
-        ToxState::save(instance)?;
-        drop(state);
-        {
-            let mut registry = app_state
-                .registry
+        run_desktop_blocking(admission, move || {
+            let _route_guard = app_state
+                .shared_route_gate
                 .lock()
-                .map_err(|_| "Could not access the profile registry".to_string())?;
-            if let Some(record) = registry
-                .profiles
-                .iter_mut()
-                .find(|record| record.id == profile_id)
-            {
-                record.name = nickname.to_string();
+                .map_err(|_| "SHARED_ROUTE_TRANSACTION_UNAVAILABLE")?;
+            ensure_queued_profile_current(&app_state, &tox_state)?;
+            let nickname = nickname.trim();
+            if nickname.len() > 128 {
+                return Err("Ник Tox не может быть длиннее 128 байт".to_string());
             }
-            registry.save(&app_state.data_dir)?;
-        }
-        update_tray(&app, &app_state);
-        Ok(())
+            let state = tox_state
+                .handle
+                .lock()
+                .map_err(|_| "Не удалось получить доступ к профилю Tox".to_string())?;
+            let instance = state
+                .as_ref()
+                .ok_or_else(|| "Профиль Tox не инициализирован".to_string())?;
+            let mut error = 0_i32;
+            let bytes = nickname.as_bytes();
+            if !instance.native().self_set_name(bytes.as_ref(), &mut error) {
+                return Err(format!("Не удалось установить ник Tox (код {error})"));
+            }
+            ToxState::save(instance)?;
+            drop(state);
+            {
+                let mut registry = app_state
+                    .registry
+                    .lock()
+                    .map_err(|_| "Could not access the profile registry".to_string())?;
+                if let Some(record) = registry
+                    .profiles
+                    .iter_mut()
+                    .find(|record| record.id == profile_id)
+                {
+                    record.name = nickname.to_string();
+                }
+                registry.save(&app_state.data_dir)?;
+            }
+            update_tray(&app, &app_state);
+            Ok(())
+        })
+        .await
     }
 
     #[tauri::command]
@@ -22324,11 +23527,14 @@ function run(argv) {
         friend_number: u32,
         limit: Option<usize>,
     ) -> Result<Vec<ToxMessage>, String> {
+        let admission = app_state.desktop_work.admit()?;
         let tox_state = match profile_id.as_deref() {
             Some(profile_id) => app_state.loaded_profile(profile_id)?,
             None => app_state.active()?,
         };
         tauri::async_runtime::spawn_blocking(move || {
+            let _admission = admission;
+
             let friend_public_key = tox_state.stable_friend_public_key(friend_number);
             let cap = match limit {
                 Some(0) => 1_000,
@@ -22374,6 +23580,8 @@ function run(argv) {
     struct ToxMessagesSnapshot {
         revision: u64,
         messages: Option<Vec<ToxMessage>>,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        unavailable_attachment_ids: Vec<String>,
         total: usize,
         window_start: usize,
         has_more: bool,
@@ -22402,11 +23610,15 @@ function run(argv) {
         peer_reaction_after: Option<u64>,
         ack_peer_reaction_through: Option<u64>,
     ) -> Result<ToxMessagesSnapshot, String> {
+        let admission = app_state.desktop_work.admit()?;
         let tox_state = match profile_id.as_deref() {
             Some(profile_id) => app_state.loaded_profile(profile_id)?,
             None => app_state.active()?,
         };
+        let root_dir = app_state.root_dir.clone();
         tauri::async_runtime::spawn_blocking(move || {
+            let _admission = admission;
+
             let friend_public_key = tox_state.stable_friend_public_key(friend_number);
             mark_chat_history_active(
                 &tox_state,
@@ -22434,6 +23646,7 @@ function run(argv) {
                 return Ok(ToxMessagesSnapshot {
                     revision,
                     messages: None,
+                    unavailable_attachment_ids: Vec::new(),
                     total: 0,
                     window_start: 0,
                     has_more: false,
@@ -22475,6 +23688,8 @@ function run(argv) {
                 };
             decorate_message_reactions(&tox_state, &mut messages);
             hydrate_attachment_preview_sources(&mut messages);
+            let unavailable_attachment_ids =
+                unavailable_download_attachment_ids(&root_dir, &tox_state.downloads_dir, &messages);
             let (
                 reaction_eligible_ids,
                 latest_message_id,
@@ -22487,6 +23702,7 @@ function run(argv) {
             Ok(ToxMessagesSnapshot {
                 revision,
                 messages: Some(messages),
+                unavailable_attachment_ids,
                 total,
                 window_start,
                 has_more: has_more_before,
@@ -22513,11 +23729,14 @@ function run(argv) {
         friend_number: u32,
         view_lease_id: Option<String>,
     ) -> Result<(), String> {
+        let admission = app_state.desktop_work.admit()?;
         let profile = match profile_id.as_deref() {
             Some(profile_id) => app_state.loaded_profile(profile_id)?,
             None => app_state.active()?,
         };
         tauri::async_runtime::spawn_blocking(move || {
+            let _admission = admission;
+
             release_chat_history_for_state(&profile, friend_number, view_lease_id.as_deref())
         })
         .await
@@ -22531,11 +23750,14 @@ function run(argv) {
         friend_number: u32,
         view_lease_id: String,
     ) -> Result<(), String> {
+        let admission = app_state.desktop_work.admit()?;
         let profile = match profile_id.as_deref() {
             Some(profile_id) => app_state.loaded_profile(profile_id)?,
             None => app_state.active()?,
         };
         tauri::async_runtime::spawn_blocking(move || {
+            let _admission = admission;
+
             refresh_chat_history_lease_for_state(&profile, friend_number, &view_lease_id)
         })
         .await
@@ -22551,6 +23773,7 @@ function run(argv) {
         cursor: Option<String>,
         limit: Option<usize>,
     ) -> Result<MessageSearchPage, String> {
+        let admission = app_state.desktop_work.admit()?;
         let profile = match profile_id.as_deref() {
             Some(profile_id) => app_state.loaded_profile(profile_id)?,
             None => app_state.active()?,
@@ -22562,6 +23785,8 @@ function run(argv) {
         let friend_public_key = profile.stable_friend_public_key(friend_number);
         let history_path = profile.history_path.clone();
         tauri::async_runtime::spawn_blocking(move || {
+            let _admission = admission;
+
             let page = chat_history_store::search_registered(
                 &history_path,
                 friend_number,
@@ -22597,16 +23822,20 @@ function run(argv) {
         profile_id: Option<String>,
         friend_number: u32,
         expected_public_key: Option<String>,
+        expected_contact_incarnation: Option<u64>,
         text: String,
         operation_id: Option<String>,
         quote: Option<ChatQuote>,
         formatting: Option<Vec<TextFormatSpan>>,
     ) -> Result<SendMessageResult, String> {
+        let admission = app_state.desktop_work.admit()?;
         let tox_state = match profile_id.as_deref() {
             Some(profile_id) => app_state.loaded_profile(profile_id)?,
             None => app_state.active()?,
         };
         tauri::async_runtime::spawn_blocking(move || {
+            let _admission = admission;
+
             send_chat_message_for_state_bound(
                 &tox_state,
                 friend_number,
@@ -22615,6 +23844,7 @@ function run(argv) {
                 quote,
                 formatting.unwrap_or_default(),
                 expected_public_key.as_deref(),
+                expected_contact_incarnation,
             )
         })
         .await
@@ -22629,11 +23859,14 @@ function run(argv) {
         expected_public_key: Option<String>,
         message_id: String,
     ) -> Result<DeleteMessageResult, String> {
+        let admission = app_state.desktop_work.admit()?;
         let state = match profile_id.as_deref() {
             Some(profile) => app_state.loaded_profile(profile)?,
             None => app_state.active()?,
         };
         tauri::async_runtime::spawn_blocking(move || {
+            let _admission = admission;
+
             delete_chat_message_for_state(
                 &state,
                 friend_number,
@@ -22653,11 +23886,14 @@ function run(argv) {
         expected_public_key: Option<String>,
         message_id: String,
     ) -> Result<CancelMessageResult, String> {
+        let admission = app_state.desktop_work.admit()?;
         let tox_state = match profile_id.as_deref() {
             Some(profile_id) => app_state.loaded_profile(profile_id)?,
             None => app_state.active()?,
         };
         tauri::async_runtime::spawn_blocking(move || {
+            let _admission = admission;
+
             cancel_chat_message_for_state(
                 &tox_state,
                 friend_number,
@@ -22695,11 +23931,14 @@ function run(argv) {
         reactions: Vec<ReactionCode>,
         operation_id: Option<String>,
     ) -> Result<ReactionView, String> {
+        let admission = app_state.desktop_work.admit()?;
         let tox_state = match profile_id.as_deref() {
             Some(profile_id) => app_state.loaded_profile(profile_id)?,
             None => app_state.active()?,
         };
         tauri::async_runtime::spawn_blocking(move || {
+            let _admission = admission;
+
             set_message_reactions_for_state(
                 &tox_state,
                 friend_number,
@@ -22719,11 +23958,14 @@ function run(argv) {
         friend_number: u32,
         expected_public_key: Option<String>,
     ) -> Result<PqStatus, String> {
+        let admission = app_state.desktop_work.admit()?;
         let state = match profile_id {
             Some(profile_id) => app_state.loaded_profile(&profile_id)?,
             None => app_state.active()?,
         };
         tauri::async_runtime::spawn_blocking(move || {
+            let _admission = admission;
+
             pq_status_for_state_bound(&state, friend_number, expected_public_key.as_deref())
         })
         .await
@@ -22737,11 +23979,14 @@ function run(argv) {
         friend_number: u32,
         expected_public_key: Option<String>,
     ) -> Result<u64, String> {
+        let admission = app_state.desktop_work.admit()?;
         let state = match profile_id {
             Some(profile_id) => app_state.loaded_profile(&profile_id)?,
             None => app_state.active()?,
         };
         tauri::async_runtime::spawn_blocking(move || {
+            let _admission = admission;
+
             let (_, _transaction) = lock_chat_transaction_for_friend_bound(
                 &state,
                 friend_number,
@@ -22761,6 +24006,7 @@ function run(argv) {
         expected_public_key: Option<String>,
         mut extra_noise: Vec<u8>,
     ) -> Result<PqStatus, String> {
+        let admission = app_state.desktop_work.admit()?;
         if !extra_noise.is_empty() && extra_noise.len() != 32 {
             return Err("PQ_NOISE_DIGEST_INVALID".into());
         }
@@ -22769,6 +24015,8 @@ function run(argv) {
             None => app_state.active()?,
         };
         tauri::async_runtime::spawn_blocking(move || {
+            let _admission = admission;
+
             let (_, _transaction) = lock_chat_transaction_for_friend_bound(
                 &state,
                 friend_number,
@@ -22790,11 +24038,14 @@ function run(argv) {
         friend_number: u32,
         expected_public_key: Option<String>,
     ) -> Result<PqStatus, String> {
+        let admission = app_state.desktop_work.admit()?;
         let state = match profile_id {
             Some(profile_id) => app_state.loaded_profile(&profile_id)?,
             None => app_state.active()?,
         };
         tauri::async_runtime::spawn_blocking(move || {
+            let _admission = admission;
+
             skip_pq_auto_for_state_bound(&state, friend_number, expected_public_key.as_deref())
         })
         .await
@@ -22802,6 +24053,7 @@ function run(argv) {
     }
 
     async fn run_pq_control(
+        app_state: AppState,
         tox_state: Arc<ToxState>,
         friend_number: u32,
         expected_public_key: Option<String>,
@@ -22809,7 +24061,14 @@ function run(argv) {
         history_state: &'static str,
         append: bool,
     ) -> Result<PqStatus, String> {
+        let admission = app_state.desktop_work.admit()?;
         tauri::async_runtime::spawn_blocking(move || {
+            let _admission = admission;
+            let _route_guard = app_state
+                .shared_route_gate
+                .lock()
+                .map_err(|_| "SHARED_ROUTE_TRANSACTION_UNAVAILABLE")?;
+            ensure_queued_profile_current(&app_state, &tox_state)?;
             let (public_key, _transaction) = lock_chat_transaction_for_friend_bound(
                 &tox_state,
                 friend_number,
@@ -22900,21 +24159,17 @@ function run(argv) {
         profile_id: Option<String>,
         friend_number: u32,
         expected_public_key: Option<String>,
-        allow_legacy: Option<bool>,
     ) -> Result<PqStatus, String> {
         let tox_state = match profile_id.as_deref() {
             Some(profile_id) => app_state.loaded_profile(profile_id)?,
             None => app_state.active()?,
         };
         run_pq_control(
+            app_state.inner().clone(),
             tox_state,
             friend_number,
             expected_public_key,
-            if allow_legacy.unwrap_or(false) {
-                PqEngine::request_legacy
-            } else {
-                PqEngine::request
-            },
+            PqEngine::request,
             "offered",
             true,
         )
@@ -22933,6 +24188,7 @@ function run(argv) {
             None => app_state.active()?,
         };
         run_pq_control(
+            app_state.inner().clone(),
             tox_state,
             friend_number,
             expected_public_key,
@@ -22955,6 +24211,7 @@ function run(argv) {
             None => app_state.active()?,
         };
         run_pq_control(
+            app_state.inner().clone(),
             tox_state,
             friend_number,
             expected_public_key,
@@ -22977,6 +24234,7 @@ function run(argv) {
             None => app_state.active()?,
         };
         run_pq_control(
+            app_state.inner().clone(),
             tox_state,
             friend_number,
             expected_public_key,
@@ -22999,6 +24257,7 @@ function run(argv) {
             None => app_state.active()?,
         };
         run_pq_control(
+            app_state.inner().clone(),
             tox_state,
             friend_number,
             expected_public_key,
@@ -23021,6 +24280,7 @@ function run(argv) {
             None => app_state.active()?,
         };
         run_pq_control(
+            app_state.inner().clone(),
             tox_state,
             friend_number,
             expected_public_key,
@@ -23038,16 +24298,17 @@ function run(argv) {
         filename: String,
         mime: String,
         mut bytes: Vec<u8>,
+        expected_contact_incarnation: Option<u64>,
     ) -> Result<u32, String> {
         let (peer_online, revision) = match observe_chat_peer_connection(&tox_state, friend_number)
         {
             Ok(observation) => observation,
             Err(error) => {
-                wipe_sensitive_bytes(&mut bytes);
+                wipe_secret_bytes(&mut bytes);
                 return Err(error);
             }
         };
-        queue_tox_file_for_state_with_connection_observation(
+        queue_tox_file_for_state_with_connection_observation_bound(
             &tox_state,
             friend_number,
             expected_friend_public_key,
@@ -23056,10 +24317,28 @@ function run(argv) {
             bytes,
             peer_online,
             Some(revision),
+            expected_contact_incarnation,
         )
     }
 
+    #[cfg(test)]
     pub(super) fn queue_tox_file_for_state_with_connection_observation(
+        tox_state: &ToxState,
+        friend_number: u32,
+        expected_friend_public_key: Option<String>,
+        filename: String,
+        mime: String,
+        bytes: Vec<u8>,
+        peer_online: bool,
+        connection_revision: Option<u64>,
+    ) -> Result<u32, String> {
+        queue_tox_file_for_state_with_connection_observation_bound(
+            tox_state, friend_number, expected_friend_public_key, filename, mime,
+            bytes, peer_online, connection_revision, None,
+        )
+    }
+
+    fn queue_tox_file_for_state_with_connection_observation_bound(
         tox_state: &ToxState,
         friend_number: u32,
         expected_friend_public_key: Option<String>,
@@ -23068,31 +24347,38 @@ function run(argv) {
         mut bytes: Vec<u8>,
         peer_online: bool,
         connection_revision: Option<u64>,
+        expected_contact_incarnation: Option<u64>,
     ) -> Result<u32, String> {
         if bytes.is_empty() {
-            wipe_sensitive_bytes(&mut bytes);
+            wipe_secret_bytes(&mut bytes);
             return Err("Нельзя отправить пустой файл".to_string());
         }
         if bytes.len() as u64 > MAX_CHAT_FILE_BYTES {
-            wipe_sensitive_bytes(&mut bytes);
+            wipe_secret_bytes(&mut bytes);
             return Err("TRANSFER_FILE_TOO_LARGE".to_string());
         }
         let (current_friend_public_key, _transaction) =
             match lock_chat_transaction_for_friend(&tox_state, friend_number) {
                 Ok(value) => value,
                 Err(error) => {
-                    wipe_sensitive_bytes(&mut bytes);
+                    wipe_secret_bytes(&mut bytes);
                     return Err(error);
                 }
             };
         let friend_public_key = match expected_friend_public_key {
             Some(expected) if expected == current_friend_public_key => expected,
             Some(_) => {
-                wipe_sensitive_bytes(&mut bytes);
+                wipe_secret_bytes(&mut bytes);
                 return Err("FILE_GRANT_RECIPIENT_CHANGED".to_string());
             }
             None => current_friend_public_key,
         };
+        if let Err(error) = pending_contact::require_incarnation(
+            tox_state, &friend_public_key, expected_contact_incarnation,
+        ) {
+            wipe_secret_bytes(&mut bytes);
+            return Err(error);
+        }
         let queued = tox_state
             .pending_files
             .lock()
@@ -23106,7 +24392,7 @@ function run(argv) {
             .filter(|transfer| transfer.message_id.is_some())
             .count();
         if queued.saturating_add(active) >= MAX_CHAT_FILE_QUEUE {
-            wipe_sensitive_bytes(&mut bytes);
+            wipe_secret_bytes(&mut bytes);
             return Err("TRANSFER_QUEUE_LIMIT".to_string());
         }
         if current_self_avatar_matches(&tox_state.avatars_dir, &bytes) {
@@ -23114,7 +24400,7 @@ function run(argv) {
                 &tox_state.transfer_log_path,
                 format!("AVATAR_COMMAND_SKIP_UNCHANGED bytes={}", bytes.len()),
             );
-            wipe_sensitive_bytes(&mut bytes);
+            wipe_secret_bytes(&mut bytes);
             return Ok(0);
         }
         let filename = safe_file_name(&filename);
@@ -23128,12 +24414,12 @@ function run(argv) {
         ) {
             Ok(protected) => protected,
             Err(error) => {
-                wipe_sensitive_bytes(&mut bytes);
+                wipe_secret_bytes(&mut bytes);
                 return Err(error);
             }
         };
         let protocol_version = (tox_state.chat_protocol.supports(friend_number)
-            || pq_pending && tox_state.pq.is_v2(friend_number))
+            || pq_pending && tox_state.pq.owns_session(friend_number))
         .then_some(file_card_protocol::VERSION);
         let id = if protocol_version.is_some() {
             chat_protocol::new_common_message_id()?
@@ -23144,7 +24430,7 @@ function run(argv) {
         let size = bytes.len() as u64;
         let write_result = profiles::write_file(&source_path, &bytes)
             .map_err(|error| format!("Не удалось подготовить файл: {error}"));
-        wipe_sensitive_bytes(&mut bytes);
+        wipe_secret_bytes(&mut bytes);
         write_result?;
         let timestamp = unix_timestamp();
         let path = source_path.to_string_lossy().into_owned();
@@ -23265,32 +24551,37 @@ function run(argv) {
         filename: String,
         mime: String,
         mut bytes: Vec<u8>,
+        expected_public_key: Option<String>,
+        expected_contact_incarnation: Option<u64>,
     ) -> Result<u32, String> {
+        let admission = app_state.desktop_work.admit()?;
         let tox_state = match app_state.loaded_profile(&profile_id) {
             Ok(state) => state,
             Err(error) => {
-                wipe_sensitive_bytes(&mut bytes);
+                wipe_secret_bytes(&mut bytes);
                 return Err(error);
             }
         };
         tauri::async_runtime::spawn_blocking(move || {
-            queue_tox_file_for_state(tox_state, friend_number, None, filename, mime, bytes)
+            let _admission = admission;
+
+            queue_tox_file_for_state(tox_state, friend_number, expected_public_key, filename, mime, bytes, expected_contact_incarnation)
         })
         .await
         .map_err(|error| format!("File queue task stopped unexpectedly: {error}"))?
     }
 
-    fn validated_portable_file(paths: &PortablePaths, path: &str) -> Result<PathBuf, String> {
+    fn validated_portable_file(root: &Path, path: &str) -> Result<PathBuf, String> {
         let source = PathBuf::from(path);
         let source = if source.is_absolute() {
             source
         } else {
-            paths.root_dir.join(source)
+            root.join(source)
         };
         let source = fs::canonicalize(&source).map_err(|error| {
             format!("Could not locate attachment {}: {error}", source.display())
         })?;
-        let portable_root = fs::canonicalize(&paths.root_dir)
+        let portable_root = fs::canonicalize(root)
             .map_err(|error| format!("Could not verify portable directory: {error}"))?;
         if !source.starts_with(&portable_root) || !source.is_file() {
             return Err("Attachment is outside the portable application directory".to_string());
@@ -23298,12 +24589,209 @@ function run(argv) {
         Ok(source)
     }
 
+    async fn save_download_copy(
+        app: tauri::AppHandle,
+        source: PathBuf,
+        title: Option<String>,
+    ) -> Result<bool, String> {
+        save_download_copy_verified(app, title, move || {
+            validated_download_file(&PortablePaths::discover()?, &source.to_string_lossy())
+        }).await
+    }
+
+    async fn save_download_copy_verified(
+        app: tauri::AppHandle,
+        title: Option<String>,
+        resolve_source: impl FnOnce() -> Result<PathBuf, String> + Send + 'static,
+    ) -> Result<bool, String> {
+        let selected = select_native_dialog_paths(app, &NativeDialogOptions {
+            directory: true,
+            multiple: false,
+            title,
+            filters: Vec::new(),
+        }).await?;
+        let Some(directory) = selected.into_iter().next() else { return Ok(false); };
+        tauri::async_runtime::spawn_blocking(move || {
+            // The dialog may remain open while the original is moved or replaced.
+            let source = resolve_source()?;
+            super::attachment_copy::save(&source, &directory).map(|_| true)
+        }).await.map_err(|error| format!("Could not save the file copy: {error}"))?
+    }
+
+    #[derive(Clone)]
+    struct ChatAttachmentOwner {
+        profile: Arc<ToxState>,
+        profile_id: String,
+        friend_number: u32,
+        friend_public_key: String,
+        message_id: String,
+        requested_path: String,
+    }
+
+    struct ResolvedChatAttachment {
+        path: PathBuf,
+        volume: Option<Arc<kai::KaiProfileVolume>>,
+    }
+
+    impl ChatAttachmentOwner {
+        fn capture(
+            app_state: &AppState,
+            profile_id: String,
+            friend_number: u32,
+            message_id: String,
+            requested_path: String,
+        ) -> Result<Self, String> {
+            let profile = app_state.loaded_profile(&profile_id)?;
+            let friend_public_key = profile.stable_friend_public_key(friend_number);
+            if friend_public_key.is_empty() {
+                return Err("CHAT_CONTACT_NOT_FOUND".into());
+            }
+            Ok(Self { profile, profile_id, friend_number, friend_public_key, message_id, requested_path })
+        }
+
+        fn resolve(
+            &self,
+            app_state: &AppState,
+            allow_outgoing: bool,
+        ) -> Result<ResolvedChatAttachment, String> {
+            let current = app_state.loaded_profile(&self.profile_id)?;
+            if !Arc::ptr_eq(&current, &self.profile) {
+                return Err("ATTACHMENT_PROFILE_CHANGED".into());
+            }
+            if !current.stable_friend_public_key(self.friend_number)
+                .eq_ignore_ascii_case(&self.friend_public_key)
+            {
+                return Err("CHAT_CONTACT_IDENTITY_CHANGED".into());
+            }
+            let live_message = current.messages.lock()
+                .map_err(|_| "CHAT_HISTORY_LOCK_POISONED".to_string())?
+                .iter()
+                .find(|message| message.id == self.message_id
+                    && message_matches_friend(message, self.friend_number, &self.friend_public_key))
+                .cloned();
+            let message = match live_message {
+                Some(message) => Some(message),
+                None if chat_history_store::contains_registered(&current.history_path) => {
+                    chat_history_store::find_message_registered(
+                        &current.history_path, self.friend_number, &self.friend_public_key, &self.message_id,
+                    )?
+                }
+                None => None,
+            }.ok_or_else(|| "CHAT_MESSAGE_NOT_FOUND".to_string())?;
+            if message.mine && !allow_outgoing {
+                return Err("ATTACHMENT_NOT_RECEIVED".into());
+            }
+            let attachment = message.attachment.ok_or_else(|| "ATTACHMENT_NOT_FOUND".to_string())?;
+            if !attachment.completed || attachment.transfer_state != "complete" {
+                return Err("ATTACHMENT_NOT_COMPLETE".into());
+            }
+            if attachment.size > MAX_CHAT_FILE_BYTES {
+                return Err("ATTACHMENT_MEDIA_SIZE_LIMIT".into());
+            }
+            if attachment.path.is_empty() || attachment.path.starts_with("browser-stream://") {
+                return Err("ATTACHMENT_LOCAL_PATH_UNAVAILABLE".into());
+            }
+            // Resolve the backend-owned history path in this portable installation.
+            // The caller's path only checks identity; it never selects another file.
+            let resolved = if message.mine {
+                let rebased = rebase_portable_file(&attachment.path, &current.outgoing_files_dir);
+                let path = PathBuf::from(&rebased);
+                if path.parent() != Some(current.outgoing_files_dir.as_path())
+                    || path != Path::new(&self.requested_path)
+                {
+                    return Err("ATTACHMENT_PATH_CHANGED".into());
+                }
+                if let Some(volume) = kai::managed_volume(&path) {
+                    if !current.profile_volume.as_ref().is_some_and(|owner| Arc::ptr_eq(owner, &volume)) {
+                        return Err("ATTACHMENT_PROFILE_CHANGED".into());
+                    }
+                    ResolvedChatAttachment { path, volume: Some(volume) }
+                } else {
+                    let path = validated_portable_file(&app_state.root_dir, &rebased)?;
+                    let directory = fs::canonicalize(&current.outgoing_files_dir)
+                        .map_err(|error| error.to_string())?;
+                    if !path.starts_with(directory) {
+                        return Err("ATTACHMENT_PATH_CHANGED".into());
+                    }
+                    ResolvedChatAttachment { path, volume: None }
+                }
+            } else {
+                let paths = PortablePaths::discover()?;
+                let rebased = rebase_portable_file(&attachment.path, &current.downloads_dir);
+                let path = validated_download_file(&paths, &rebased)?;
+                if path != validated_download_file(&paths, &self.requested_path)? {
+                    return Err("ATTACHMENT_PATH_CHANGED".into());
+                }
+                ResolvedChatAttachment { path, volume: None }
+            };
+            if profiles::metadata_len(&resolved.path)? != attachment.size {
+                return Err("ATTACHMENT_SIZE_CHANGED".into());
+            }
+            Ok(resolved)
+        }
+    }
+
+    #[tauri::command]
+    async fn save_attachment_copy(
+        app: tauri::AppHandle,
+        state: tauri::State<'_, AppState>,
+        profile_id: String,
+        friend_number: u32,
+        message_id: String,
+        path: String,
+        title: Option<String>,
+    ) -> Result<bool, String> {
+        let _admission = state.desktop_work.admit()?;
+        let _dialog = state.begin_native_dialog()?;
+        let app_state = state.inner().clone();
+        let owner = ChatAttachmentOwner::capture(&app_state, profile_id, friend_number, message_id, path)?;
+        let initial_owner = owner.clone();
+        let initial_state = app_state.clone();
+        tauri::async_runtime::spawn_blocking(move || initial_owner.resolve(&initial_state, false))
+            .await.map_err(|error| format!("Could not resolve the attachment: {error}"))??;
+        save_download_copy_verified(app, title, move || owner.resolve(&app_state, false).map(|source| source.path)).await
+    }
+
+    #[tauri::command]
+    async fn read_attachment_media(
+        state: tauri::State<'_, AppState>,
+        profile_id: String,
+        friend_number: u32,
+        message_id: String,
+        path: String,
+    ) -> Result<tauri::ipc::Response, String> {
+        let _admission = state.desktop_work.admit()?;
+        let app_state = state.inner().clone();
+        let owner = ChatAttachmentOwner::capture(&app_state, profile_id, friend_number, message_id, path)?;
+        tauri::async_runtime::spawn_blocking(move || {
+            let source = owner.resolve(&app_state, true)?;
+            let extension = source.path.extension().and_then(|value| value.to_str())
+                .unwrap_or("").to_ascii_lowercase();
+            if !matches!(extension.as_str(), "mov" | "mp4" | "mkv" | "wmv" | "mp3" | "flac" | "m4a" | "wma" | "wav") {
+                return Err("ATTACHMENT_MEDIA_TYPE_UNSUPPORTED".to_string());
+            }
+            let bytes = match source.volume {
+                Some(volume) => volume.read(&source.path)?,
+                None => super::attachment_copy::read_original(&source.path)?,
+            };
+            Ok(tauri::ipc::Response::new(bytes))
+        }).await.map_err(|error| format!("Could not read attachment media: {error}"))?
+    }
+
     pub(super) fn validated_download_file(
         paths: &PortablePaths,
         path: &str,
     ) -> Result<PathBuf, String> {
-        let source = validated_portable_file(paths, path)?;
-        let downloads = fs::canonicalize(&paths.downloads_dir)
+        validated_download_file_in(&paths.root_dir, &paths.downloads_dir, path)
+    }
+
+    fn validated_download_file_in(
+        root: &Path,
+        downloads: &Path,
+        path: &str,
+    ) -> Result<PathBuf, String> {
+        let source = validated_portable_file(root, path)?;
+        let downloads = fs::canonicalize(downloads)
             .map_err(|error| format!("Could not verify downloads directory: {error}"))?;
         if !source.starts_with(&downloads) {
             return Err(
@@ -23311,6 +24799,36 @@ function run(argv) {
             );
         }
         Ok(source)
+    }
+
+    pub(super) fn unavailable_download_attachment_ids(
+        root: &Path,
+        downloads: &Path,
+        messages: &[ToxMessage],
+    ) -> Vec<String> {
+        messages
+            .iter()
+            .filter_map(|message| {
+                let attachment = message.attachment.as_ref()?;
+                if message.mine
+                    || !attachment.completed
+                    || attachment.transfer_state != "complete"
+                    || attachment.path.starts_with("browser-stream://")
+                {
+                    return None;
+                }
+                let available = !attachment.path.is_empty()
+                    && validated_download_file_in(
+                        root,
+                        downloads,
+                        &rebase_portable_file(&attachment.path, downloads),
+                    )
+                    .ok()
+                    .and_then(|path| fs::metadata(path).ok())
+                    .is_some_and(|metadata| metadata.is_file() && metadata.len() == attachment.size);
+                (!available).then(|| message.id.clone())
+            })
+            .collect()
     }
 
     #[cfg(target_os = "windows")]
@@ -23371,6 +24889,7 @@ function run(argv) {
         impl Drop for Apartment {
             fn drop(&mut self) {
                 if self.0 {
+                    // SAFETY: this scope successfully initialized COM on the same thread.
                     unsafe { CoUninitialize() };
                 }
             }
@@ -23378,10 +24897,12 @@ function run(argv) {
         struct ShellItem(*mut c_void);
         impl Drop for ShellItem {
             fn drop(&mut self) {
+                // SAFETY: the Shell allocated this item with the COM allocator.
                 unsafe { CoTaskMemFree(self.0) };
             }
         }
         let name = windows_shell_path(source)?;
+        // SAFETY: the reserved argument must be null and 2 selects the STA.
         let initialized = unsafe { CoInitializeEx(std::ptr::null_mut(), 2) };
         // A preinitialized worker apartment is usable, but must not be uninitialized here.
         if initialized < 0 && initialized != 0x80010106u32 as i32 {
@@ -23391,6 +24912,7 @@ function run(argv) {
         }
         let _apartment = Apartment(initialized >= 0);
         let mut item = ShellItem(std::ptr::null_mut());
+        // SAFETY: name is terminated and the output points into the local owner.
         let parsed = unsafe {
             SHParseDisplayName(
                 name.as_ptr(),
@@ -23405,7 +24927,8 @@ function run(argv) {
                 "Could not locate attachment in Windows Shell: {parsed:#010x}"
             ));
         }
-        // With no child array, Shell opens this exact item's parent and selects the item.
+        // SAFETY: item is live and a zero child count permits a null array.
+        // Shell opens this item's parent and selects the item.
         let shown = unsafe { SHOpenFolderAndSelectItems(item.0, 0, std::ptr::null(), 0) };
         if shown < 0 {
             return Err(format!(
@@ -23478,7 +25001,7 @@ function run(argv) {
     #[tauri::command]
     async fn copy_attachment_to_clipboard(path: String, image: bool) -> Result<(), String> {
         let paths = PortablePaths::discover()?;
-        let source = validated_portable_file(&paths, &path)?;
+        let source = validated_portable_file(&paths.root_dir, &path)?;
         tauri::async_runtime::spawn_blocking(move || copy_file_to_native_clipboard(&source, image))
             .await
             .map_err(|error| format!("Clipboard task failed: {error}"))?
@@ -23603,7 +25126,7 @@ function run(argv) {
         Err("Install wl-clipboard or xclip to copy files to the clipboard".to_string())
     }
 
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(target_os = "linux")]
     fn file_uri(path: &Path) -> String {
         let raw = path.to_string_lossy();
         let mut encoded = String::with_capacity(raw.len() + 8);
@@ -23635,24 +25158,163 @@ function run(argv) {
     }
 
     #[tauri::command]
+    async fn webgate_local_download_action(
+        state: tauri::State<'_, AppState>,
+        profile_id: String,
+        message_id: String,
+        transfer_id: String,
+        action: String,
+        image: Option<bool>,
+    ) -> Result<(), String> {
+        let _admission = state.desktop_work.admit()?;
+        if !matches!(action.as_str(), "open" | "reveal" | "copy") {
+            return Err("COMMAND_ARGUMENT_INVALID".into());
+        }
+        let app_state = state.inner().clone();
+        let source = tauri::async_runtime::spawn_blocking(move || {
+            webgate_downloads::resolve_saved(
+                &app_state,
+                &profile_id,
+                &message_id,
+                &transfer_id,
+                None,
+                None,
+                true,
+            )?
+            .ok_or_else(|| "WEBGATE_LOCAL_DOWNLOAD_UNAVAILABLE".to_string())
+        })
+        .await
+        .map_err(|_| "WEBGATE_TASK_FAILED".to_string())??;
+        match action.as_str() {
+            "reveal" => show_attachment_in_folder(source.to_string_lossy().into_owned()).await,
+            "copy" => {
+                copy_attachment_to_clipboard(
+                    source.to_string_lossy().into_owned(),
+                    image.unwrap_or(false),
+                )
+                .await
+            }
+            _ => tauri::async_runtime::spawn_blocking(move || open_with_system(&source))
+                .await
+                .map_err(|_| "WEBGATE_TASK_FAILED".to_string())?,
+        }
+    }
+
+    #[tauri::command]
+    async fn webgate_save_download_copy(
+        app: tauri::AppHandle,
+        state: tauri::State<'_, AppState>,
+        profile_id: String,
+        message_id: String,
+        transfer_id: String,
+        title: Option<String>,
+    ) -> Result<bool, String> {
+        let _admission = state.desktop_work.admit()?;
+        let _dialog = state.begin_native_dialog()?;
+        let app_state = state.inner().clone();
+        let source = tauri::async_runtime::spawn_blocking(move || {
+            webgate_downloads::resolve_saved(&app_state, &profile_id, &message_id, &transfer_id, None, None, true)?
+                .ok_or_else(|| "WEBGATE_LOCAL_DOWNLOAD_UNAVAILABLE".to_string())
+        }).await.map_err(|_| "WEBGATE_TASK_FAILED".to_string())??;
+        save_download_copy(app, source, title).await
+    }
+
+    #[tauri::command]
     fn open_downloads_directory() -> Result<(), String> {
         let downloads_dir = PortablePaths::discover()?.downloads_dir;
         open_with_system(&downloads_dir)
     }
 
-    #[tauri::command]
-    fn open_logs_directory(app_state: tauri::State<'_, AppState>) -> Result<(), String> {
-        let active = app_state.active()?;
-        let logs = active
-            .network_log_path
-            .parent()
-            .ok_or_else(|| "Logs directory is unavailable".to_string())?;
-        if kai::managed_volume(logs).is_some() {
-            return Err("KAI_LOGS_STORED_IN_ENCRYPTED_CONTAINER".to_string());
+    #[derive(Serialize)]
+    struct ProfileLogsView {
+        network: ProfileLogTail,
+        transfers: ProfileLogTail,
+    }
+
+    #[derive(Serialize)]
+    #[serde(tag = "status", rename_all = "camelCase")]
+    enum ProfileLogTail {
+        Available { text: String },
+        TooLarge,
+        Unavailable,
+    }
+
+    impl ProfileLogTail {
+        fn read(log: &ProfileLogPath) -> Self {
+            match read_managed_log_tail(log) {
+                Ok(text) => Self::Available { text },
+                Err(error) if error == "PROFILE_LOG_TOO_LARGE" => Self::TooLarge,
+                Err(_) => Self::Unavailable,
+            }
         }
-        profiles::create_dir_all(logs)
-            .map_err(|error| format!("Could not create logs directory: {error}"))?;
-        open_with_system(logs)
+    }
+
+    fn read_managed_log_tail(log: &ProfileLogPath) -> Result<String, String> {
+        // KAI authenticates each logical file as a whole. Bound that read before
+        // decrypting and keep rotation from replacing it between size and read.
+        const MAX_MANAGED_LOG_BYTES: u64 = 5 * 1024 * 1024;
+        const MAX_VIEW_BYTES: usize = 32 * 1024;
+        let _guard = log
+            .epoch
+            .gate
+            .lock()
+            .map_err(|_| "PROFILE_LOG_PATH_UNAVAILABLE")?;
+        let path = log.path();
+        if log.epoch.retired.load(Ordering::Acquire) || kai::managed_volume(path).is_none() {
+            return Err("PROFILE_LOG_PATH_UNAVAILABLE".into());
+        }
+        match profiles::metadata_len(path) {
+            Ok(bytes) if bytes <= MAX_MANAGED_LOG_BYTES => {}
+            Ok(_) => return Err("PROFILE_LOG_TOO_LARGE".into()),
+            Err(error) if error == "KAI_VOLUME_FILE_NOT_FOUND" => return Ok(String::new()),
+            Err(error) => return Err(error),
+        }
+        let bytes = profiles::read_file(path)?;
+        let offset = bytes.len().saturating_sub(MAX_VIEW_BYTES);
+        let tail = &bytes[offset..];
+        let tail = if offset > 0 && bytes[offset - 1] != b'\n' {
+            tail.iter()
+                .position(|byte| *byte == b'\n')
+                .map_or(tail, |line_end| &tail[line_end + 1..])
+        } else {
+            tail
+        };
+        Ok(String::from_utf8_lossy(tail).into_owned())
+    }
+
+    #[tauri::command]
+    async fn open_logs_directory(
+        app_state: tauri::State<'_, AppState>,
+        profile_id: Option<String>,
+    ) -> Result<Option<ProfileLogsView>, String> {
+        let app_state = app_state.inner().clone();
+        let admission = app_state.desktop_work.admit()?;
+        run_desktop_blocking(admission, move || {
+            let _route_guard = lock_shared_route_gate(&app_state.shared_route_gate)?;
+            let (active_id, active) = app_state.active_snapshot()?;
+            if profile_id.as_deref().is_some_and(|id| id != active_id.as_str()) {
+                return Err("ACTIVE_PROFILE_CHANGED".into());
+            }
+            let logs = active
+                .network_log_path
+                .path()
+                .parent()
+                .ok_or_else(|| "Logs directory is unavailable".to_string())?;
+            if kai::managed_volume(logs).is_some() {
+                if profile_id.is_none() {
+                    return Err("KAI_LOGS_STORED_IN_ENCRYPTED_CONTAINER".into());
+                }
+                return Ok(Some(ProfileLogsView {
+                    network: ProfileLogTail::read(&active.network_log_path),
+                    transfers: ProfileLogTail::read(&active.transfer_log_path),
+                }));
+            }
+            profiles::create_dir_all(logs)
+                .map_err(|error| format!("Could not create logs directory: {error}"))?;
+            open_with_system(logs)?;
+            Ok(None)
+        })
+        .await
     }
 
     #[tauri::command]
@@ -23796,10 +25458,15 @@ function run(argv) {
         profile_id: String,
         friend_number: u32,
         grant_token: String,
+        expected_public_key: Option<String>,
+        expected_contact_incarnation: Option<u64>,
     ) -> Result<u32, String> {
+        let admission = app_state.desktop_work.admit()?;
         let app_state = app_state.inner().clone();
         tauri::async_runtime::spawn_blocking(move || {
-            send_tox_file_from_grant_blocking(&app_state, profile_id, friend_number, grant_token)
+            let _admission = admission;
+
+            send_tox_file_from_grant_blocking(&app_state, profile_id, friend_number, grant_token, expected_public_key, expected_contact_incarnation)
         })
         .await
         .map_err(|error| format!("Native file queue task stopped unexpectedly: {error}"))?
@@ -23810,6 +25477,8 @@ function run(argv) {
         profile_id: String,
         friend_number: u32,
         grant_token: String,
+        expected_public_key: Option<String>,
+        expected_contact_incarnation: Option<u64>,
     ) -> Result<u32, String> {
         // Resolve the profile captured when the picker opened. The grant is
         // already bound to this profile and recipient, so a later UI switch
@@ -23819,11 +25488,14 @@ function run(argv) {
         if recipient_public_key.is_empty() {
             return Err("FRIEND_NOT_FOUND".to_string());
         }
+        if expected_public_key.as_deref().is_some_and(|key| !key.eq_ignore_ascii_case(&recipient_public_key)) {
+            return Err("CHAT_CONTACT_IDENTITY_CHANGED".into());
+        }
         let selected = app_state
             .native_file_grants
             .lock()
             .map_err(|_| "Could not access native file grants".to_string())?
-            .consume(&grant_token, &profile_id, &recipient_public_key)?;
+            .consume_with_incarnation(&grant_token, &profile_id, &recipient_public_key, expected_contact_incarnation.unwrap_or(0))?;
         queue_tox_file_for_state(
             tox_state,
             friend_number,
@@ -23831,6 +25503,7 @@ function run(argv) {
             selected.name,
             selected.mime,
             selected.bytes,
+            expected_contact_incarnation,
         )
     }
 
@@ -23848,295 +25521,303 @@ function run(argv) {
     }
 
     #[tauri::command]
-    fn control_tox_file_transfer(
+    async fn control_tox_file_transfer(
         app_state: tauri::State<'_, AppState>,
         profile_id: String,
         friend_number: u32,
         message_id: String,
         action: String,
     ) -> Result<(), String> {
+        let app_state = app_state.inner().clone();
+        let admission = app_state.desktop_work.admit()?;
         let tox_state = app_state.loaded_profile(&profile_id)?;
-        let control = match action.as_str() {
-            "resume" => 0_i32,
-            "pause" => 1_i32,
-            "cancel" => 2_i32,
-            _ => return Err("Unknown file transfer action".to_string()),
-        };
-
-        if action == "cancel" {
-            let removed_from_queue = {
-                let mut pending = tox_state
-                    .pending_files
-                    .lock()
-                    .map_err(|_| "Unable to access pending files".to_string())?;
-                let before = pending.len();
-                pending
-                    .retain(|file| !(file.friend_number == friend_number && file.id == message_id));
-                before != pending.len()
+        run_desktop_blocking(admission, move || {
+            let _route_guard = app_state.shared_route_gate.lock().map_err(|_| "SHARED_ROUTE_TRANSACTION_UNAVAILABLE")?;
+            ensure_queued_profile_current(&app_state, &tox_state)?;
+    let control = match action.as_str() {
+                "resume" => 0_i32,
+                "pause" => 1_i32,
+                "cancel" => 2_i32,
+                _ => return Err("Unknown file transfer action".to_string()),
             };
-            let outgoing_key = tox_state.outgoing_files.lock().ok().and_then(|files| {
-                files.iter().find_map(|(key, file)| {
-                    (key.0 == friend_number
-                        && file.message_id.as_deref() == Some(message_id.as_str()))
-                    .then_some(*key)
-                })
-            });
-            let incoming_key = tox_state.incoming_files.lock().ok().and_then(|files| {
-                files.iter().find_map(|(key, file)| {
-                    (key.0 == friend_number
-                        && file.message_id.as_deref() == Some(message_id.as_str()))
-                    .then_some(*key)
-                })
-            });
 
-            // A protocol cancel is best-effort: local cancellation must never be blocked
-            // by a stale Tox file number or by a peer that is currently offline.
-            let active_transfer = outgoing_key
-                .map(|key| (key, true))
-                .or_else(|| incoming_key.map(|key| (key, false)));
-            if let Some(((friend, file_number), outgoing)) = active_transfer {
-                let mut removed_with_handle = false;
-                if let Ok(state) = tox_state.handle.lock() {
-                    if let Some(instance) = state.as_ref() {
-                        let mut error = 0_i32;
-                        let ok = unsafe {
-                            tox_file_control(
-                                instance.instance.as_ptr(),
-                                friend,
-                                file_number,
-                                2,
-                                &mut error,
-                            )
-                        };
-                        if !ok || error != 0 {
-                            log_transfer(&tox_state.transfer_log_path, format!("FILE_CONTROL_CANCEL_NOTIFY_FAILED friend={friend} file={file_number} message={message_id} code={error}"));
+            if action == "cancel" {
+                let removed_from_queue = {
+                    let mut pending = tox_state
+                        .pending_files
+                        .lock()
+                        .map_err(|_| "Unable to access pending files".to_string())?;
+                    let before = pending.len();
+                    pending
+                        .retain(|file| !(file.friend_number == friend_number && file.id == message_id));
+                    before != pending.len()
+                };
+                let outgoing_key = tox_state.outgoing_files.lock().ok().and_then(|files| {
+                    files.iter().find_map(|(key, file)| {
+                        (key.0 == friend_number
+                            && file.message_id.as_deref() == Some(message_id.as_str()))
+                        .then_some(*key)
+                    })
+                });
+                let incoming_key = tox_state.incoming_files.lock().ok().and_then(|files| {
+                    files.iter().find_map(|(key, file)| {
+                        (key.0 == friend_number
+                            && file.message_id.as_deref() == Some(message_id.as_str()))
+                        .then_some(*key)
+                    })
+                });
+
+                // A protocol cancel is best-effort: local cancellation must never be blocked
+                // by a stale Tox file number or by a peer that is currently offline.
+                let active_transfer = outgoing_key
+                    .map(|key| (key, true))
+                    .or_else(|| incoming_key.map(|key| (key, false)));
+                if let Some(((friend, file_number), outgoing)) = active_transfer {
+                    let mut removed_with_handle = false;
+                    if let Ok(state) = tox_state.handle.lock() {
+                        if let Some(instance) = state.as_ref() {
+                            let mut error = 0_i32;
+                            let ok = if local_transport_ready(&tox_state) {
+                                instance.native().file_control(friend, file_number, 2, &mut error)
+                            } else {
+                                true
+                            };
+                            if !ok || error != 0 {
+                                log_transfer(&tox_state.transfer_log_path, format!("FILE_CONTROL_CANCEL_NOTIFY_FAILED friend={friend} file={file_number} message={message_id} code={error}"));
+                            }
+                            let removed = remove_file_transfer_for_direction(
+                                &tox_state.outgoing_files,
+                                &tox_state.incoming_files,
+                                (friend, file_number),
+                                outgoing,
+                            );
+                            removed_with_handle = true;
+                            if let Some(transfer) = removed {
+                                let _ = profiles::remove_file(&transfer.path);
+                            }
+                            if !outgoing {
+                                resume_next_queued_incoming_for_state(
+                                    Some(instance.native()),
+                                    &tox_state,
+                                );
+                            }
                         }
+                    }
+                    // Local state must still terminate if the native handle is in
+                    // the middle of a rebuild. Housekeeping will resume the next
+                    // queued incoming transfer once the handle becomes available.
+                    if !removed_with_handle {
                         let removed = remove_file_transfer_for_direction(
                             &tox_state.outgoing_files,
                             &tox_state.incoming_files,
                             (friend, file_number),
                             outgoing,
                         );
-                        removed_with_handle = true;
                         if let Some(transfer) = removed {
                             let _ = profiles::remove_file(&transfer.path);
                         }
-                        if !outgoing {
-                            resume_next_queued_incoming_for_state(
-                                instance.instance.as_ptr(),
-                                &tox_state,
-                            );
-                        }
                     }
                 }
-                // Local state must still terminate if the native handle is in
-                // the middle of a rebuild. Housekeeping will resume the next
-                // queued incoming transfer once the handle becomes available.
-                if !removed_with_handle {
-                    let removed = remove_file_transfer_for_direction(
-                        &tox_state.outgoing_files,
-                        &tox_state.incoming_files,
-                        (friend, file_number),
-                        outgoing,
-                    );
-                    if let Some(transfer) = removed {
-                        let _ = profiles::remove_file(&transfer.path);
-                    }
-                }
-            }
 
-            // Keep the history card: cancellation is a durable terminal state, not deletion.
-            set_attachment_transfer_state(&tox_state.messages, &message_id, "cancelled");
-            persist_pending_files(&tox_state.pending_files, &tox_state.pending_files_path);
-            persist_tox_history(
-                &tox_state.messages,
-                &tox_state.history_path,
-                &tox_state.history_enabled,
-            );
-            finish_file_card_runtime_state(
-                &tox_state.messages,
-                &tox_state.history_residency,
-                &tox_state.file_card_protocol,
-                friend_number,
-                &message_id,
-            );
-            log_transfer(&tox_state.transfer_log_path, format!("FILE_CONTROL_CANCELLED_LOCAL friend={friend_number} message={message_id} queued={removed_from_queue}"));
-            return Ok(());
-        }
-
-        let state = tox_state
-            .handle
-            .lock()
-            .map_err(|_| "Unable to access Tox profile".to_string())?;
-        let outgoing_key = tox_state.outgoing_files.lock().ok().and_then(|files| {
-            files.iter().find_map(|(key, file)| {
-                if key.0 == friend_number && file.message_id.as_deref() == Some(message_id.as_str())
-                {
-                    Some(*key)
-                } else {
-                    None
-                }
-            })
-        });
-        let incoming_key = tox_state.incoming_files.lock().ok().and_then(|files| {
-            files.iter().find_map(|(key, file)| {
-                if key.0 == friend_number && file.message_id.as_deref() == Some(message_id.as_str())
-                {
-                    Some(*key)
-                } else {
-                    None
-                }
-            })
-        });
-        let (friend, file_number, outgoing) = if let Some((friend, file_number)) = outgoing_key {
-            (friend, file_number, true)
-        } else if let Some((friend, file_number)) = incoming_key {
-            (friend, file_number, false)
-        } else {
-            set_attachment_transfer_error(
-                &tox_state.messages,
-                &message_id,
-                "Передача больше не активна. Можно отправить файл заново.",
-            );
-            persist_tox_history(
-                &tox_state.messages,
-                &tox_state.history_path,
-                &tox_state.history_enabled,
-            );
-            drop_cached_message_if_inactive_evicted(
-                &tox_state.messages,
-                &tox_state.history_residency,
-                &message_id,
-            );
-            return Err("Active transfer was not found".to_string());
-        };
-
-        if !outgoing && action == "resume" {
-            let settings = tox_state
-                .file_receive_settings
-                .lock()
-                .map_err(|_| "FILE_SETTINGS_UNAVAILABLE".to_string())?;
-            if settings.deny_all {
-                return Err("FILE_RECEIVE_DENIED".to_string());
-            }
-            let maximum = settings.max_concurrent.clamp(1, 2);
-            drop(settings);
-            let at_capacity = tox_state
-                .incoming_files
-                .lock()
-                .map(|files| {
-                    files
-                        .iter()
-                        .filter(|(key, file)| {
-                            **key != (friend, file_number) && file.kind != 1 && file.active
-                        })
-                        .count()
-                        >= maximum
-                })
-                .unwrap_or(false);
-            if at_capacity {
-                if let Ok(mut files) = tox_state.incoming_files.lock() {
-                    if let Some(file) = files.get_mut(&(friend, file_number)) {
-                        file.locally_paused = false;
-                        file.auto_queued = true;
-                    }
-                }
-                set_attachment_transfer_state(&tox_state.messages, &message_id, "queued");
+                // Keep the history card: cancellation is a durable terminal state, not deletion.
+                set_attachment_transfer_state(&tox_state.messages, &message_id, "cancelled");
+                persist_pending_files(&tox_state.pending_files, &tox_state.pending_files_path);
                 persist_tox_history(
                     &tox_state.messages,
                     &tox_state.history_path,
                     &tox_state.history_enabled,
                 );
+                finish_file_card_runtime_state(
+                    &tox_state.messages,
+                    &tox_state.history_residency,
+                    &tox_state.file_card_protocol,
+                    friend_number,
+                    &message_id,
+                );
+                log_transfer(&tox_state.transfer_log_path, format!("FILE_CONTROL_CANCELLED_LOCAL friend={friend_number} message={message_id} queued={removed_from_queue}"));
                 return Ok(());
             }
-        }
 
-        let instance = state
-            .as_ref()
-            .ok_or_else(|| "Tox profile is not initialised".to_string())?;
-        let mut error = 0_i32;
-        let ok = unsafe {
-            tox_file_control(
-                instance.instance.as_ptr(),
-                friend,
-                file_number,
-                control,
-                &mut error,
-            )
-        };
-        // toxcore reports a state that is already reached as an error.  A repeated
-        // pause (6 = already paused) or resume (4 = not paused) is still the
-        // requested end state, so accept it instead of leaving the UI stale.
-        let already_in_requested_state =
-            (action == "pause" && error == 6) || (action == "resume" && error == 4);
-        if (!ok || error != 0) && !already_in_requested_state {
+            let state = tox_state
+                .handle
+                .lock()
+                .map_err(|_| "Unable to access Tox profile".to_string())?;
+            if !local_transport_ready(&tox_state) {
+                return Err("LOCAL_TRANSPORT_NOT_READY".to_string());
+            }
+            let outgoing_key = tox_state.outgoing_files.lock().ok().and_then(|files| {
+                files.iter().find_map(|(key, file)| {
+                    if key.0 == friend_number && file.message_id.as_deref() == Some(message_id.as_str())
+                    {
+                        Some(*key)
+                    } else {
+                        None
+                    }
+                })
+            });
+            let incoming_key = tox_state.incoming_files.lock().ok().and_then(|files| {
+                files.iter().find_map(|(key, file)| {
+                    if key.0 == friend_number && file.message_id.as_deref() == Some(message_id.as_str())
+                    {
+                        Some(*key)
+                    } else {
+                        None
+                    }
+                })
+            });
+            let (friend, file_number, outgoing) = if let Some((friend, file_number)) = outgoing_key {
+                (friend, file_number, true)
+            } else if let Some((friend, file_number)) = incoming_key {
+                (friend, file_number, false)
+            } else {
+                set_attachment_transfer_error(
+                    &tox_state.messages,
+                    &message_id,
+                    "Передача больше не активна. Можно отправить файл заново.",
+                );
+                persist_tox_history(
+                    &tox_state.messages,
+                    &tox_state.history_path,
+                    &tox_state.history_enabled,
+                );
+                drop_cached_message_if_inactive_evicted(
+                    &tox_state.messages,
+                    &tox_state.history_residency,
+                    &message_id,
+                );
+                return Err("Active transfer was not found".to_string());
+            };
+
+            if !outgoing && action == "resume" {
+                let settings = tox_state
+                    .file_receive_settings
+                    .lock()
+                    .map_err(|_| "FILE_SETTINGS_UNAVAILABLE".to_string())?;
+                if settings.deny_all {
+                    return Err("FILE_RECEIVE_DENIED".to_string());
+                }
+                let maximum = settings.max_concurrent.clamp(1, 2);
+                drop(settings);
+                let at_capacity = tox_state
+                    .incoming_files
+                    .lock()
+                    .map(|files| {
+                        files
+                            .iter()
+                            .filter(|(key, file)| {
+                                **key != (friend, file_number) && file.kind != 1 && file.active
+                            })
+                            .count()
+                            >= maximum
+                    })
+                    .unwrap_or(false);
+                if at_capacity {
+                    if let Ok(mut files) = tox_state.incoming_files.lock() {
+                        if let Some(file) = files.get_mut(&(friend, file_number)) {
+                            file.locally_paused = false;
+                            file.auto_queued = true;
+                        }
+                    }
+                    set_attachment_transfer_state(&tox_state.messages, &message_id, "queued");
+                    persist_tox_history(
+                        &tox_state.messages,
+                        &tox_state.history_path,
+                        &tox_state.history_enabled,
+                    );
+                    return Ok(());
+                }
+            }
+
+            let instance = state
+                .as_ref()
+                .ok_or_else(|| "Tox profile is not initialised".to_string())?;
+            let mut error = 0_i32;
+            let ok = instance.native().file_control(friend, file_number, control, &mut error);
+            // Before acceptance, pause is only our local scheduling latch: toxcore
+            // reports ALREADY_PAUSED without sending a PAUSE. Its matching RESUME
+            // is DENIED until the recipient accepts. Clear that local latch and
+            // keep the live offer instead of marking the attachment failed.
+            let waiting_for_peer_acceptance = outgoing
+                && tox_state.outgoing_files.lock().ok().is_some_and(|files| {
+                    files.get(&(friend, file_number)).is_some_and(|file| {
+                        file.phase == OutgoingFilePhase::WaitingForAcceptance
+                    })
+                });
+            // Preserve the existing idempotent pause/resume handling. DENIED is
+            // accepted only for a still-live outgoing offer awaiting acceptance.
+            let already_in_requested_state = (action == "pause" && error == 6)
+                || (action == "resume" && error == 4)
+                || (action == "resume" && error == 5 && waiting_for_peer_acceptance);
+            if (!ok || error != 0) && !already_in_requested_state {
+                drop(state);
+                set_attachment_transfer_error(
+                    &tox_state.messages,
+                    &message_id,
+                    format!("Не удалось изменить передачу (код Tox {error})"),
+                );
+                persist_tox_history(
+                    &tox_state.messages,
+                    &tox_state.history_path,
+                    &tox_state.history_enabled,
+                );
+                drop_cached_message_if_inactive_evicted(
+                    &tox_state.messages,
+                    &tox_state.history_residency,
+                    &message_id,
+                );
+                return Err(format!("Tox file control failed (code {error})"));
+            }
+
+            if action == "cancel" {
+                if outgoing {
+                    if let Ok(mut files) = tox_state.outgoing_files.lock() {
+                        files.remove(&(friend, file_number));
+                    }
+                } else if let Ok(mut files) = tox_state.incoming_files.lock() {
+                    files.remove(&(friend, file_number));
+                }
+            }
+            if outgoing {
+                if let Ok(mut files) = tox_state.outgoing_files.lock() {
+                    if let Some(file) = files.get_mut(&(friend, file_number)) {
+                        file.set_local_paused(action == "pause", Instant::now());
+                    }
+                }
+            } else {
+                if let Ok(mut files) = tox_state.incoming_files.lock() {
+                    if let Some(file) = files.get_mut(&(friend, file_number)) {
+                        file.set_local_paused(action == "pause", Instant::now());
+                        file.auto_queued = false;
+                    }
+                }
+            }
+            // Publish local intent before releasing the native handle: tox_iterate
+            // must not deliver a peer RESUME between our control and this state.
             drop(state);
-            set_attachment_transfer_error(
-                &tox_state.messages,
-                &message_id,
-                format!("Не удалось изменить передачу (код Tox {error})"),
-            );
+            if !outgoing && action == "pause" {
+                if let Ok(state) = tox_state.handle.lock() {
+                    if let Some(instance) = state.as_ref() {
+                        resume_next_queued_incoming_for_state(Some(instance.native()), &tox_state);
+                    }
+                }
+            }
+            let transfer_state = match action.as_str() {
+                "pause" => "paused",
+                "resume" if outgoing => "sending",
+                "resume" => "receiving",
+                "cancel" => "cancelled",
+                _ => unreachable!(),
+            };
+            set_attachment_transfer_state(&tox_state.messages, &message_id, transfer_state);
             persist_tox_history(
                 &tox_state.messages,
                 &tox_state.history_path,
                 &tox_state.history_enabled,
             );
-            drop_cached_message_if_inactive_evicted(
-                &tox_state.messages,
-                &tox_state.history_residency,
-                &message_id,
-            );
-            return Err(format!("Tox file control failed (code {error})"));
-        }
-
-        if action == "cancel" {
-            if outgoing {
-                if let Ok(mut files) = tox_state.outgoing_files.lock() {
-                    files.remove(&(friend, file_number));
-                }
-            } else if let Ok(mut files) = tox_state.incoming_files.lock() {
-                files.remove(&(friend, file_number));
-            }
-        }
-        if outgoing {
-            if let Ok(mut files) = tox_state.outgoing_files.lock() {
-                if let Some(file) = files.get_mut(&(friend, file_number)) {
-                    file.set_local_paused(action == "pause", Instant::now());
-                }
-            }
-        } else {
-            if let Ok(mut files) = tox_state.incoming_files.lock() {
-                if let Some(file) = files.get_mut(&(friend, file_number)) {
-                    file.set_local_paused(action == "pause", Instant::now());
-                    file.auto_queued = false;
-                }
-            }
-        }
-        // Publish local intent before releasing the native handle: tox_iterate
-        // must not deliver a peer RESUME between our control and this state.
-        drop(state);
-        if !outgoing && action == "pause" {
-            if let Ok(state) = tox_state.handle.lock() {
-                if let Some(instance) = state.as_ref() {
-                    resume_next_queued_incoming_for_state(instance.instance.as_ptr(), &tox_state);
-                }
-            }
-        }
-        let transfer_state = match action.as_str() {
-            "pause" => "paused",
-            "resume" if outgoing => "sending",
-            "resume" => "receiving",
-            "cancel" => "cancelled",
-            _ => unreachable!(),
-        };
-        set_attachment_transfer_state(&tox_state.messages, &message_id, transfer_state);
-        persist_tox_history(
-            &tox_state.messages,
-            &tox_state.history_path,
-            &tox_state.history_enabled,
-        );
-        log_transfer(&tox_state.transfer_log_path, format!("FILE_CONTROL action={action} friend={friend} file={file_number} message={message_id} idempotent={already_in_requested_state}"));
-        Ok(())
+            log_transfer(&tox_state.transfer_log_path, format!("FILE_CONTROL action={action} friend={friend} file={file_number} message={message_id} idempotent={already_in_requested_state}"));
+            Ok(())
+        })
+        .await
     }
 
     #[tauri::command]
@@ -24157,16 +25838,26 @@ function run(argv) {
     }
 
     #[tauri::command]
-    fn set_file_receive_settings(
+    async fn set_file_receive_settings(
         app_state: tauri::State<'_, AppState>,
         profile_id: Option<String>,
         settings: FileReceiveSettings,
     ) -> Result<FileReceiveSettings, String> {
+        let app_state = app_state.inner().clone();
+        let admission = app_state.desktop_work.admit()?;
         let tox_state = match profile_id {
             Some(profile_id) => app_state.loaded_profile(&profile_id)?,
             None => app_state.active()?,
         };
-        set_file_receive_settings_for_state(&tox_state, settings)
+        run_desktop_blocking(admission, move || {
+            let _route_guard = app_state
+                .shared_route_gate
+                .lock()
+                .map_err(|_| "SHARED_ROUTE_TRANSACTION_UNAVAILABLE")?;
+            ensure_queued_profile_current(&app_state, &tox_state)?;
+            set_file_receive_settings_for_state(&tox_state, settings)
+        })
+        .await
     }
 
     fn validate_proxy_settings(settings: &ProxySettings) -> Result<(), String> {
@@ -24186,8 +25877,11 @@ function run(argv) {
     async fn get_proxy_settings(
         app_state: tauri::State<'_, AppState>,
     ) -> Result<ProxySettings, String> {
+        let admission = app_state.desktop_work.admit()?;
         let app_state = app_state.inner().clone();
         tauri::async_runtime::spawn_blocking(move || {
+            let _admission = admission;
+
             let _route_guard = app_state
                 .shared_route_gate
                 .lock()
@@ -24243,8 +25937,11 @@ function run(argv) {
         app_state: tauri::State<'_, AppState>,
         settings: ProxySettings,
     ) -> Result<ProxySettings, String> {
+        let admission = app_state.desktop_work.admit()?;
         let app_state = app_state.inner().clone();
         tauri::async_runtime::spawn_blocking(move || {
+            let _admission = admission;
+
             set_proxy_settings_blocking(&app_state, settings)
         })
         .await
@@ -24256,6 +25953,8 @@ function run(argv) {
         settings: ProxySettings,
     ) -> Result<ProxySettings, String> {
         let mut failed = lock_shared_route_gate(&app_state.shared_route_gate)?;
+        app_state.remote_profiles.interrupt_transports();
+        app_state.desktop_update.interrupt_network();
         apply_shared_proxy_settings_locked(
             &mut failed,
             &app_state.proxy_settings,
@@ -24337,8 +26036,11 @@ function run(argv) {
     async fn get_network_settings(
         app_state: tauri::State<'_, AppState>,
     ) -> Result<NetworkSettings, String> {
+        let admission = app_state.desktop_work.admit()?;
         let app_state = app_state.inner().clone();
         tauri::async_runtime::spawn_blocking(move || {
+            let _admission = admission;
+
             let _route_guard = app_state
                 .shared_route_gate
                 .lock()
@@ -24359,8 +26061,11 @@ function run(argv) {
         app_state: tauri::State<'_, AppState>,
         settings: NetworkSettings,
     ) -> Result<NetworkSettings, String> {
+        let admission = app_state.desktop_work.admit()?;
         let app_state = app_state.inner().clone();
         tauri::async_runtime::spawn_blocking(move || {
+            let _admission = admission;
+
             set_network_settings_blocking(&app_state, settings)
         })
         .await
@@ -24437,89 +26142,162 @@ function run(argv) {
     }
 
     #[tauri::command]
-    fn test_proxy_connection(settings: ProxySettings) -> Result<String, String> {
-        validate_proxy_settings(&settings)?;
-        if settings.mode == "none" {
-            return Ok(
-                "Прокси отключён. Используются общие параметры прямого подключения Tox".to_string(),
-            );
-        }
-        let address = (settings.host.as_str(), settings.port)
-            .to_socket_addrs()
-            .map_err(|error| format!("Не удалось разрешить адрес прокси: {error}"))?
-            .next()
-            .ok_or_else(|| "Адрес прокси не разрешился".to_string())?;
-        let mut stream = TcpStream::connect_timeout(&address, Duration::from_secs(10))
-            .map_err(|error| format!("Прокси недоступен: {error}"))?;
-        stream.set_read_timeout(Some(Duration::from_secs(10))).ok();
-        stream.set_write_timeout(Some(Duration::from_secs(10))).ok();
-        if settings.mode == "socks5" {
-            let authenticated = !settings.username.is_empty() || !settings.password.is_empty();
-            stream
-                .write_all(if authenticated {
-                    &[5, 2, 0, 2]
-                } else {
-                    &[5, 1, 0]
-                })
-                .map_err(|error| error.to_string())?;
-            let mut response = [0_u8; 2];
-            stream
-                .read_exact(&mut response)
-                .map_err(|error| format!("Прокси не ответил как SOCKS5: {error}"))?;
-            if response[0] != 5 || response[1] == 0xff {
-                return Err("SOCKS5-прокси отклонил доступные способы авторизации".to_string());
+    async fn get_tox_bootstrap_nodes(
+        app_state: tauri::State<'_, AppState>,
+    ) -> Result<serde_json::Value, String> {
+        let admission = app_state.desktop_work.admit()?;
+        let app_state = app_state.inner().clone();
+        run_desktop_blocking(admission, move || {
+            let profiles = loaded_profiles(&app_state)?;
+            app_state.bootstrap_nodes.view(|revision| {
+                profiles
+                    .iter()
+                    .flat_map(|profile| profile.used_bootstrap_nodes(revision))
+                    .collect()
+            })
+        })
+        .await
+    }
+
+    #[tauri::command]
+    async fn set_tox_bootstrap_nodes(
+        app_state: tauri::State<'_, AppState>,
+        nodes: Vec<bootstrap_nodes::Node>,
+    ) -> Result<serde_json::Value, String> {
+        let admission = app_state.desktop_work.admit()?;
+        let app_state = app_state.inner().clone();
+        run_desktop_blocking(admission, move || {
+            let _guard = lock_shared_route_gate(&app_state.shared_route_gate)?;
+            app_state.bootstrap_nodes.replace(nodes)?;
+            let profiles = loaded_profiles(&app_state)?;
+            app_state.bootstrap_nodes.view(|revision| {
+                profiles
+                    .iter()
+                    .flat_map(|profile| profile.used_bootstrap_nodes(revision))
+                    .collect()
+            })
+        })
+        .await
+    }
+
+    #[tauri::command]
+    async fn test_tox_bootstrap_node(
+        app_state: tauri::State<'_, AppState>,
+        node: bootstrap_nodes::Node,
+    ) -> Result<&'static str, String> {
+        let admission = app_state.desktop_work.admit()?;
+        let app_state = app_state.inner().clone();
+        run_desktop_blocking(admission, move || {
+            let probe = {
+                let _guard = lock_shared_route_gate(&app_state.shared_route_gate)?;
+                prepare_bootstrap_probe(
+                    &app_state.bootstrap_nodes,
+                    &app_state.network_settings,
+                    &app_state.proxy_settings,
+                    &app_state.tor,
+                    node,
+                )?
+            };
+            probe.execute()
+        })
+        .await
+    }
+
+    #[tauri::command]
+    async fn test_proxy_connection(
+        app_state: tauri::State<'_, AppState>,
+        settings: ProxySettings,
+    ) -> Result<String, String> {
+        let app_state = app_state.inner().clone();
+        let admission = app_state.desktop_work.admit()?;
+        run_desktop_blocking(admission, move || {
+            validate_proxy_settings(&settings)?;
+            if settings.mode == "none" {
+                return Ok(
+                    "Прокси отключён. Используются общие параметры прямого подключения Tox"
+                        .to_string(),
+                );
             }
-            if response[1] == 2 {
-                let username = settings.username.as_bytes();
-                let password = settings.password.as_bytes();
-                let mut auth = vec![1, username.len() as u8];
-                auth.extend(username);
-                auth.push(password.len() as u8);
-                auth.extend(password);
-                stream.write_all(&auth).map_err(|error| error.to_string())?;
-                let mut auth_response = [0_u8; 2];
-                stream
-                    .read_exact(&mut auth_response)
-                    .map_err(|error| error.to_string())?;
-                if auth_response[1] != 0 {
-                    return Err("SOCKS5-прокси отклонил логин или пароль".to_string());
-                }
-            }
-            Ok("SOCKS5-прокси доступен, согласование авторизации успешно".to_string())
-        } else {
-            let credentials = (!settings.username.is_empty() || !settings.password.is_empty())
-                .then(|| {
-                    base64_basic(format!("{}:{}", settings.username, settings.password).as_bytes())
-                });
-            let auth = credentials
-                .map(|value| format!("Proxy-Authorization: Basic {value}\r\n"))
-                .unwrap_or_default();
-            stream
-                .write_all(
-                    format!(
-                        "OPTIONS * HTTP/1.1\r\nHost: {}:{}\r\n{auth}Connection: close\r\n\r\n",
-                        settings.host, settings.port
-                    )
-                    .as_bytes(),
-                )
-                .map_err(|error| error.to_string())?;
-            let mut response = [0_u8; 512];
-            let length = stream
-                .read(&mut response)
-                .map_err(|error| format!("HTTP-прокси не ответил: {error}"))?;
-            let first_line = String::from_utf8_lossy(&response[..length])
-                .lines()
+            let address = (settings.host.as_str(), settings.port)
+                .to_socket_addrs()
+                .map_err(|error| format!("Не удалось разрешить адрес прокси: {error}"))?
                 .next()
-                .unwrap_or_default()
-                .to_string();
-            if first_line.contains(" 407 ") {
-                return Err("HTTP-прокси отклонил логин или пароль".to_string());
+                .ok_or_else(|| "Адрес прокси не разрешился".to_string())?;
+            let mut stream = TcpStream::connect_timeout(&address, Duration::from_secs(10))
+                .map_err(|error| format!("Прокси недоступен: {error}"))?;
+            stream.set_read_timeout(Some(Duration::from_secs(10))).ok();
+            stream.set_write_timeout(Some(Duration::from_secs(10))).ok();
+            if settings.mode == "socks5" {
+                let authenticated = !settings.username.is_empty() || !settings.password.is_empty();
+                stream
+                    .write_all(if authenticated {
+                        &[5, 2, 0, 2]
+                    } else {
+                        &[5, 1, 0]
+                    })
+                    .map_err(|error| error.to_string())?;
+                let mut response = [0_u8; 2];
+                stream
+                    .read_exact(&mut response)
+                    .map_err(|error| format!("Прокси не ответил как SOCKS5: {error}"))?;
+                if response[0] != 5 || response[1] == 0xff {
+                    return Err("SOCKS5-прокси отклонил доступные способы авторизации".to_string());
+                }
+                if response[1] == 2 {
+                    let username = settings.username.as_bytes();
+                    let password = settings.password.as_bytes();
+                    let mut auth = vec![1, username.len() as u8];
+                    auth.extend(username);
+                    auth.push(password.len() as u8);
+                    auth.extend(password);
+                    stream.write_all(&auth).map_err(|error| error.to_string())?;
+                    let mut auth_response = [0_u8; 2];
+                    stream
+                        .read_exact(&mut auth_response)
+                        .map_err(|error| error.to_string())?;
+                    if auth_response[1] != 0 {
+                        return Err("SOCKS5-прокси отклонил логин или пароль".to_string());
+                    }
+                }
+                Ok("SOCKS5-прокси доступен, согласование авторизации успешно".to_string())
+            } else {
+                let credentials = (!settings.username.is_empty() || !settings.password.is_empty())
+                    .then(|| {
+                        base64_basic(
+                            format!("{}:{}", settings.username, settings.password).as_bytes(),
+                        )
+                    });
+                let auth = credentials
+                    .map(|value| format!("Proxy-Authorization: Basic {value}\r\n"))
+                    .unwrap_or_default();
+                stream
+                    .write_all(
+                        format!(
+                            "OPTIONS * HTTP/1.1\r\nHost: {}:{}\r\n{auth}Connection: close\r\n\r\n",
+                            settings.host, settings.port
+                        )
+                        .as_bytes(),
+                    )
+                    .map_err(|error| error.to_string())?;
+                let mut response = [0_u8; 512];
+                let length = stream
+                    .read(&mut response)
+                    .map_err(|error| format!("HTTP-прокси не ответил: {error}"))?;
+                let first_line = String::from_utf8_lossy(&response[..length])
+                    .lines()
+                    .next()
+                    .unwrap_or_default()
+                    .to_string();
+                if first_line.contains(" 407 ") {
+                    return Err("HTTP-прокси отклонил логин или пароль".to_string());
+                }
+                if !first_line.starts_with("HTTP/") {
+                    return Err("Сервер не ответил как HTTP-прокси".to_string());
+                }
+                Ok(format!("HTTP-прокси доступен: {first_line}"))
             }
-            if !first_line.starts_with("HTTP/") {
-                return Err("Сервер не ответил как HTTP-прокси".to_string());
-            }
-            Ok(format!("HTTP-прокси доступен: {first_line}"))
-        }
+        })
+        .await
     }
 
     #[tauri::command]
@@ -24529,8 +26307,11 @@ function run(argv) {
         friend_number: u32,
         message_id: String,
     ) -> Result<(), String> {
+        let admission = app_state.desktop_work.admit()?;
         let tox_state = app_state.loaded_profile(&profile_id)?;
         tauri::async_runtime::spawn_blocking(move || {
+            let _admission = admission;
+
             retry_tox_file_transfer_for_state(&tox_state, friend_number, message_id)
         })
         .await
@@ -24648,13 +26429,23 @@ function run(argv) {
     }
 
     #[tauri::command]
-    fn send_tox_avatar(
+    async fn send_tox_avatar(
         app_state: tauri::State<'_, AppState>,
         filename: String,
         bytes: Vec<u8>,
     ) -> Result<usize, String> {
+        let app_state = app_state.inner().clone();
+        let admission = app_state.desktop_work.admit()?;
         let tox_state = app_state.active()?;
-        send_tox_avatar_for_state(&tox_state, filename, bytes)
+        run_desktop_blocking(admission, move || {
+            let _route_guard = app_state
+                .shared_route_gate
+                .lock()
+                .map_err(|_| "SHARED_ROUTE_TRANSACTION_UNAVAILABLE")?;
+            ensure_queued_profile_current(&app_state, &tox_state)?;
+            send_tox_avatar_for_state(&tox_state, filename, bytes)
+        })
+        .await
     }
 
     fn send_tox_avatar_for_state(
@@ -24666,41 +26457,65 @@ function run(argv) {
     }
 
     #[tauri::command]
-    fn set_chat_history_enabled(
+    async fn set_chat_history_enabled(
         app_state: tauri::State<'_, AppState>,
         profile_id: Option<String>,
         enabled: bool,
     ) -> Result<(), String> {
+        let app_state = app_state.inner().clone();
+        let admission = app_state.desktop_work.admit()?;
         let tox_state = match profile_id.as_deref() {
             Some(profile_id) => app_state.loaded_profile(profile_id)?,
             None => app_state.active()?,
         };
-        tox_state.history_enabled.store(enabled, Ordering::Relaxed);
-        if enabled {
-            persist_tox_history(
-                &tox_state.messages,
-                &tox_state.history_path,
-                &tox_state.history_enabled,
-            );
-        } else if let Ok(mut messages) = tox_state.messages.lock() {
-            messages.retain(message_requires_runtime_residency);
-        }
-        invalidate_chat_view_revisions(&tox_state.history_path);
-        Ok(())
+        run_desktop_blocking(admission, move || {
+            let _route_guard = app_state
+                .shared_route_gate
+                .lock()
+                .map_err(|_| "SHARED_ROUTE_TRANSACTION_UNAVAILABLE")?;
+            ensure_queued_profile_current(&app_state, &tox_state)?;
+            tox_state.history_enabled.store(enabled, Ordering::Relaxed);
+            if enabled {
+                persist_tox_history(
+                    &tox_state.messages,
+                    &tox_state.history_path,
+                    &tox_state.history_enabled,
+                );
+            } else if let Ok(mut messages) = tox_state.messages.lock() {
+                messages.retain(message_requires_runtime_residency);
+            }
+            invalidate_chat_view_revisions(&tox_state.history_path);
+            Ok(())
+        })
+        .await
     }
 
     #[tauri::command]
-    fn clear_tox_history(
+    async fn clear_tox_history(
         app_state: tauri::State<'_, AppState>,
         profile_id: Option<String>,
         friend_number: Option<u32>,
         expected_public_key: Option<String>,
     ) -> Result<Option<u64>, String> {
+        let app_state = app_state.inner().clone();
+        let admission = app_state.desktop_work.admit()?;
         let tox_state = match profile_id.as_deref() {
             Some(profile_id) => app_state.loaded_profile(profile_id)?,
             None => app_state.active()?,
         };
-        clear_tox_history_for_state_bound(&tox_state, friend_number, expected_public_key.as_deref())
+        run_desktop_blocking(admission, move || {
+            let _route_guard = app_state
+                .shared_route_gate
+                .lock()
+                .map_err(|_| "SHARED_ROUTE_TRANSACTION_UNAVAILABLE")?;
+            ensure_queued_profile_current(&app_state, &tox_state)?;
+            clear_tox_history_for_state_bound(
+                &tox_state,
+                friend_number,
+                expected_public_key.as_deref(),
+            )
+        })
+        .await
     }
 
     #[cfg(target_os = "windows")]
@@ -24743,6 +26558,8 @@ function run(argv) {
         };
         let mut utc = SystemTime::default();
         let mut local = SystemTime::default();
+        // SAFETY: the input and output structs have the Win32 layout. The
+        // second call uses the first result only after success and the system time zone.
         let ok = unsafe {
             FileTimeToSystemTime(&file_time, &mut utc) != 0
                 && SystemTimeToTzSpecificLocalTime(std::ptr::null(), &utc, &mut local) != 0
@@ -24766,10 +26583,13 @@ function run(argv) {
             Ok(raw) => raw,
             Err(_) => return timestamp.to_string(),
         };
-        let mut local = unsafe { std::mem::zeroed::<libc::tm>() };
-        if unsafe { libc::localtime_r(&raw, &mut local) }.is_null() {
+        let mut local = std::mem::MaybeUninit::<libc::tm>::uninit();
+        // SAFETY: both pointers are valid. A non-null return initializes local.
+        if unsafe { libc::localtime_r(&raw, local.as_mut_ptr()) }.is_null() {
             return timestamp.to_string();
         }
+        // SAFETY: localtime_r succeeded and wrote the complete result.
+        let local = unsafe { local.assume_init() };
         format!(
             "{:02}.{:02}.{:02} {:02}:{:02}",
             local.tm_mon + 1,
@@ -24781,7 +26601,7 @@ function run(argv) {
     }
 
     #[tauri::command]
-    fn export_tox_history(
+    async fn export_tox_history(
         app_state: tauri::State<'_, AppState>,
         profile_id: Option<String>,
         friend_number: u32,
@@ -24789,113 +26609,124 @@ function run(argv) {
         contact_name: String,
         contact_id: String,
     ) -> Result<String, String> {
+        let app_state = app_state.inner().clone();
+        let admission = app_state.desktop_work.admit()?;
         let tox_state = match profile_id.as_deref() {
             Some(profile_id) => app_state.loaded_profile(profile_id)?,
             None => app_state.active()?,
         };
-        let handle = tox_state
-            .handle
-            .lock()
-            .map_err(|_| "TOX_PROFILE_LOCK_POISONED")?;
-        let instance = handle.as_ref().ok_or("TOX_NOT_INITIALIZED")?;
-        let friend_public_key = tox_friend_public_key(instance.instance.as_ptr(), friend_number)
-            .ok_or("CHAT_CONTACT_NOT_FOUND")?;
-        if expected_public_key
-            .as_deref()
-            .is_some_and(|key| !key.eq_ignore_ascii_case(&friend_public_key))
-        {
-            return Err("CHAT_CONTACT_IDENTITY_CHANGED".into());
-        }
-        let _transaction = tox_state
-            .chat_transaction_gate
-            .lock()
-            .map_err(|_| "CHAT_TRANSACTION_UNAVAILABLE")?;
-        drop(handle);
-        let directory = app_state.root_dir.join("chat export");
-        fs::create_dir_all(&directory)
-            .map_err(|error| format!("Could not create chat export directory: {error}"))?;
-        let identity = if contact_name.trim().is_empty() {
-            contact_id.trim()
-        } else {
-            contact_name.trim()
-        };
-        let export_date = local_history_timestamp(unix_timestamp())
-            .split_whitespace()
-            .next()
-            .unwrap_or("export")
-            .replace('.', "-");
-        let filename = format!(
-            "{}-{}.txt",
-            safe_file_name(if identity.is_empty() {
-                "contact"
-            } else {
-                identity
-            }),
-            export_date,
-        );
-        let destination = unique_download_path(&directory, &filename);
-        let temporary = destination.with_extension(format!(
-            "{}.writing",
-            destination
-                .extension()
-                .and_then(|value| value.to_str())
-                .unwrap_or("txt")
-        ));
-        let write_result = (|| -> Result<(), String> {
-            let file = OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&temporary)
-                .map_err(|error| format!("Could not create chat export: {error}"))?;
-            let mut writer = BufWriter::with_capacity(64 * 1024, file);
-            let mut offset = 0usize;
-            loop {
-                let page = chat_history_store::page_registered(
-                    &tox_state.history_path,
-                    friend_number,
-                    &friend_public_key,
-                    offset,
-                    128,
-                )?;
-                for message in page.messages {
-                    let stamp = local_history_timestamp(message.timestamp);
-                    let author = if message.mine {
-                        "Я"
-                    } else {
-                        contact_name.trim()
-                    };
-                    let body = if let Some(attachment) = message.attachment {
-                        let full_name = Path::new(&attachment.path)
-                            .file_name()
-                            .and_then(|value| value.to_str())
-                            .unwrap_or(&attachment.name);
-                        format!("Вложение: {full_name} — {stamp}")
-                    } else {
-                        sanitize_untrusted_text(&message.text)
-                    };
-                    writer
-                        .write_all(format!("{stamp}\r\n{author}: {body}\r\n\r\n").as_bytes())
-                        .map_err(|error| format!("Could not write chat export: {error}"))?;
-                }
-                if !page.has_more {
-                    break;
-                }
-                offset = page.next_offset;
+        run_desktop_blocking(admission, move || {
+            let _route_guard = app_state
+                .shared_route_gate
+                .lock()
+                .map_err(|_| "SHARED_ROUTE_TRANSACTION_UNAVAILABLE")?;
+            ensure_queued_profile_current(&app_state, &tox_state)?;
+            let handle = tox_state
+                .handle
+                .lock()
+                .map_err(|_| "TOX_PROFILE_LOCK_POISONED")?;
+            let instance = handle.as_ref().ok_or("TOX_NOT_INITIALIZED")?;
+            let friend_public_key =
+                tox_friend_public_key(Some(instance.native()), friend_number)
+                    .ok_or("CHAT_CONTACT_NOT_FOUND")?;
+            if expected_public_key
+                .as_deref()
+                .is_some_and(|key| !key.eq_ignore_ascii_case(&friend_public_key))
+            {
+                return Err("CHAT_CONTACT_IDENTITY_CHANGED".into());
             }
-            writer
-                .flush()
-                .and_then(|_| writer.get_ref().sync_all())
-                .map_err(|error| format!("Could not flush chat export: {error}"))
-        })();
-        if let Err(error) = write_result {
-            let _ = fs::remove_file(&temporary);
-            return Err(error);
-        }
-        fs::rename(&temporary, &destination).map_err(|error| {
-            let _ = fs::remove_file(&temporary);
-            format!("Could not commit chat export: {error}")
-        })?;
-        Ok(destination.to_string_lossy().into_owned())
+            let _transaction = tox_state
+                .chat_transaction_gate
+                .lock()
+                .map_err(|_| "CHAT_TRANSACTION_UNAVAILABLE")?;
+            drop(handle);
+            let directory = app_state.root_dir.join("chat export");
+            fs::create_dir_all(&directory)
+                .map_err(|error| format!("Could not create chat export directory: {error}"))?;
+            let identity = if contact_name.trim().is_empty() {
+                contact_id.trim()
+            } else {
+                contact_name.trim()
+            };
+            let export_date = local_history_timestamp(unix_timestamp())
+                .split_whitespace()
+                .next()
+                .unwrap_or("export")
+                .replace('.', "-");
+            let filename = format!(
+                "{}-{}.txt",
+                safe_file_name(if identity.is_empty() {
+                    "contact"
+                } else {
+                    identity
+                }),
+                export_date,
+            );
+            let destination = unique_download_path(&directory, &filename);
+            let temporary = destination.with_extension(format!(
+                "{}.writing",
+                destination
+                    .extension()
+                    .and_then(|value| value.to_str())
+                    .unwrap_or("txt")
+            ));
+            let write_result = (|| -> Result<(), String> {
+                let file = OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&temporary)
+                    .map_err(|error| format!("Could not create chat export: {error}"))?;
+                let mut writer = BufWriter::with_capacity(64 * 1024, file);
+                let mut offset = 0usize;
+                loop {
+                    let page = chat_history_store::page_registered(
+                        &tox_state.history_path,
+                        friend_number,
+                        &friend_public_key,
+                        offset,
+                        128,
+                    )?;
+                    for message in page.messages {
+                        let stamp = local_history_timestamp(message.timestamp);
+                        let author = if message.mine {
+                            "Я"
+                        } else {
+                            contact_name.trim()
+                        };
+                        let body = if let Some(attachment) = message.attachment {
+                            let full_name = Path::new(&attachment.path)
+                                .file_name()
+                                .and_then(|value| value.to_str())
+                                .unwrap_or(&attachment.name);
+                            format!("Вложение: {full_name} — {stamp}")
+                        } else {
+                            sanitize_untrusted_text(&message.text)
+                        };
+                        writer
+                            .write_all(format!("{stamp}\r\n{author}: {body}\r\n\r\n").as_bytes())
+                            .map_err(|error| format!("Could not write chat export: {error}"))?;
+                    }
+                    if !page.has_more {
+                        break;
+                    }
+                    offset = page.next_offset;
+                }
+                writer
+                    .flush()
+                    .and_then(|_| writer.get_ref().sync_all())
+                    .map_err(|error| format!("Could not flush chat export: {error}"))
+            })();
+            if let Err(error) = write_result {
+                let _ = fs::remove_file(&temporary);
+                return Err(error);
+            }
+            fs::rename(&temporary, &destination).map_err(|error| {
+                let _ = fs::remove_file(&temporary);
+                format!("Could not commit chat export: {error}")
+            })?;
+            Ok(destination.to_string_lossy().into_owned())
+        })
+        .await
     }
 
     #[tauri::command]
@@ -24904,34 +26735,46 @@ function run(argv) {
         profile_id: Option<String>,
         friend_number: u32,
         expected_public_key: Option<String>,
+        expected_contact_incarnation: Option<u64>,
     ) -> Result<(), String> {
+        let admission = app_state.desktop_work.admit()?;
         let tox_state = match profile_id.as_deref() {
             Some(profile_id) => app_state.loaded_profile(profile_id)?,
             None => app_state.active()?,
         };
         tauri::async_runtime::spawn_blocking(move || {
+            let _admission = admission;
+
             delete_tox_friend_for_state_bound(
                 &tox_state,
                 friend_number,
                 expected_public_key.as_deref(),
+                expected_contact_incarnation,
             )
         })
         .await
         .map_err(|_| "CHAT_CONTACT_DELETE_TASK_FAILED".to_string())?
     }
 
+    #[cfg(test)]
     pub(super) fn delete_tox_friend_for_state(
         tox_state: &ToxState,
         friend_number: u32,
     ) -> Result<(), String> {
-        delete_tox_friend_for_state_bound(tox_state, friend_number, None)
+        delete_tox_friend_for_state_bound(tox_state, friend_number, None, None)
     }
 
     fn delete_tox_friend_for_state_bound(
         tox_state: &ToxState,
         friend_number: u32,
         expected_public_key: Option<&str>,
+        expected_contact_incarnation: Option<u64>,
     ) -> Result<(), String> {
+        let _route_guard = tox_state
+            .shared_route_gate
+            .as_ref()
+            .map(|gate| lock_shared_route_gate(gate))
+            .transpose()?;
         let state = tox_state
             .handle
             .lock()
@@ -24939,15 +26782,31 @@ function run(argv) {
         let instance = state
             .as_ref()
             .ok_or_else(|| "Tox profile is not initialised".to_string())?;
-        let friend_public_key =
-            tox_friend_public_key(instance.instance.as_ptr(), friend_number).unwrap_or_default();
-        if friend_public_key.is_empty() {
-            return Err("CHAT_CONTACT_NOT_FOUND".into());
+        if !installed_route_matches_settings(tox_state) {
+            return Err("SHARED_ROUTE_RESTART_REQUIRED".to_string());
         }
+        if let Some(expected) = expected_public_key {
+            if pending_contact::finish_absent_with_handle(tox_state, instance, Some(expected))? {
+                drop(state);
+                return recover_local_message_deletions(tox_state);
+            }
+        }
+        let friend_public_key = tox_friend_public_key(Some(instance.native()), friend_number)
+            .ok_or("CHAT_CONTACT_NOT_FOUND")?;
         if expected_public_key
             .is_some_and(|expected| !expected.eq_ignore_ascii_case(&friend_public_key))
         {
             return Err("CHAT_CONTACT_IDENTITY_CHANGED".to_string());
+        }
+        pending_contact::require_incarnation(tox_state, &friend_public_key, expected_contact_incarnation)?;
+        if pending_contact::purge_with_handle(
+            tox_state,
+            instance,
+            friend_number,
+            &friend_public_key,
+            || Ok(Vec::new()),
+        )? {
+            return Ok(());
         }
         // Match the network loop's handle -> transaction lock order.
         let _transaction = tox_state
@@ -24960,7 +26819,7 @@ function run(argv) {
             &tox_state.history_path,
             friend_number,
             &friend_public_key,
-            &pq_tox_owner(instance.instance.as_ptr()),
+            &pq_tox_owner(instance.native()),
         )?;
 
         let local_state_path = profile_local_state_path(tox_state)?;
@@ -24970,7 +26829,10 @@ function run(argv) {
                 .lock()
                 .map_err(|_| "PROFILE_LOCAL_STATE_UNAVAILABLE".to_string())?;
             let saved = read_profile_local_state(&local_state_path)?;
-            deleted_contact_local_operation_ids(saved.as_ref(), friend_number, &friend_public_key)
+            if let Some(saved) = &saved {
+                validate_pending_send_owners(saved, tox_state.owner_profile_id.as_deref())?;
+            }
+            deleted_contact_local_operation_ids(saved.as_ref(), &friend_public_key)
         };
         // Snapshot every durable unsent item before changing toxcore. If the same
         // public key is added again later, these records must not silently resume;
@@ -25054,11 +26916,7 @@ function run(argv) {
                 .join("deleted-contact-recovery");
             profiles::create_dir_all(&directory)
                 .map_err(|error| format!("Unable to create contact recovery directory: {error}"))?;
-            let identity = if friend_public_key.is_empty() {
-                format!("number-{friend_number}")
-            } else {
-                friend_public_key.chars().take(16).collect()
-            };
+            let identity = &friend_public_key[..16];
             let path = unique_download_path(
                 &directory,
                 &format!("{}-{identity}.json", recovery.quarantined_at),
@@ -25092,9 +26950,10 @@ function run(argv) {
         commit_chat_transaction(&tox_state.history_path)?;
         tox_state
             .pq
-            .remove_friend(friend_number, Some(&friend_public_key))?;
+            .remove_friend(friend_number)?;
+        pending_contact::retire_local_incarnation(tox_state, &friend_public_key)?;
         let mut error = 0_i32;
-        if !unsafe { tox_friend_delete(instance.instance.as_ptr(), friend_number, &mut error) } {
+        if !instance.native().friend_delete(friend_number, &mut error) {
             return Err(format!("Unable to delete Tox contact (code {error})"));
         }
         pending_messages.retain(|item| {
@@ -25129,11 +26988,7 @@ function run(argv) {
                 let mut next = current
                     .cloned()
                     .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
-                remove_deleted_contact_from_local_state(
-                    &mut next,
-                    friend_number,
-                    &friend_public_key,
-                )?;
+                remove_deleted_contact_from_local_state(&mut next, &friend_public_key)?;
                 Ok(next)
             },
         );
@@ -25169,9 +27024,6 @@ function run(argv) {
             if let Ok(mut progress) = tox_state.receipt_progress.lock() {
                 progress.retain(|id, _| !removed.contains(id));
             }
-        }
-        if let Ok(mut receipts) = tox_state.pq_receipts.lock() {
-            receipts.retain(|(receipt_friend, _), _| *receipt_friend != friend_number);
         }
         if let Ok(mut files) = tox_state.incoming_files.lock() {
             files.retain(|(file_friend, _), _| *file_friend != friend_number);
@@ -25270,76 +27122,87 @@ function run(argv) {
     }
 
     #[tauri::command]
-    fn accept_incoming_friend_request(
+    async fn accept_incoming_friend_request(
         app_state: tauri::State<'_, AppState>,
         profile_id: Option<String>,
         public_key: String,
     ) -> Result<u32, String> {
+        let app_state = app_state.inner().clone();
+        let admission = app_state.desktop_work.admit()?;
         let tox_state = match profile_id.as_deref() {
             Some(profile_id) => app_state.loaded_profile(profile_id)?,
             None => app_state.active()?,
         };
-        let key = parse_public_key(&public_key)?;
-        let state = tox_state
-            .handle
-            .lock()
-            .map_err(|_| "Не удалось получить доступ к профилю Tox".to_string())?;
-        let instance = state
-            .as_ref()
-            .ok_or_else(|| "Профиль Tox не инициализирован".to_string())?;
-        let mut error = 0_i32;
-        let number = unsafe {
-            tox_friend_add_norequest(instance.instance.as_ptr(), key.as_ptr(), &mut error)
-        };
-        let public_key = hex_upper(&key);
-        let number = resolve_native_friend_add_result(
-            instance.instance.as_ptr(),
-            &public_key,
-            number,
-            error,
-            false,
-        )
-        .map_err(|error| format!("Не удалось принять запрос Tox (код {error})"))?;
-        let cache_write = {
-            let mut cache = tox_state
-                .friend_cache
+        run_desktop_blocking(admission, move || {
+            let _route_guard = app_state
+                .shared_route_gate
                 .lock()
-                .map_err(|_| "FRIEND_CACHE_UNAVAILABLE".to_string())?;
-            let entry = cache.entry(public_key.clone()).or_default();
-            refresh_accepted_friend_profile(
-                entry,
-                number,
-                unix_timestamp(),
-                next_chat_event_sequence(),
-            );
-            enqueue_friend_cache_write_required(&cache, &tox_state.friend_cache_path)?
-        };
-        wait_for_atomic_write(cache_write)?;
-        ToxState::save(instance)?;
-        if error == 0 {
-            tox_state.pq.bind_contact(
-                number,
+                .map_err(|_| "SHARED_ROUTE_TRANSACTION_UNAVAILABLE")?;
+            ensure_queued_profile_current(&app_state, &tox_state)?;
+            let key = parse_public_key(&public_key)?;
+            let state = tox_state
+                .handle
+                .lock()
+                .map_err(|_| "Не удалось получить доступ к профилю Tox".to_string())?;
+            let instance = state
+                .as_ref()
+                .ok_or_else(|| "Профиль Tox не инициализирован".to_string())?;
+            if !installed_route_matches_settings(&tox_state) {
+                return Err("SHARED_ROUTE_RESTART_REQUIRED".to_string());
+            }
+            let mut error = 0_i32;
+            let number = instance.native().friend_add_norequest(&key, &mut error);
+            let public_key = hex_upper(&key);
+            let number = resolve_native_friend_add_result(
+                instance.native(),
                 &public_key,
-                &pq_tox_owner(instance.instance.as_ptr()),
+                number,
+                error,
                 false,
-            )?;
-        }
-        drop(state);
-        if let Ok(mut requests) = tox_state.incoming_requests.lock() {
-            requests.retain(|request| !request.public_key.eq_ignore_ascii_case(&public_key));
-        }
-        persist_incoming_friend_requests(
-            &tox_state.incoming_requests,
-            &tox_state.incoming_requests_path,
-        );
-        if let Ok(mut unread) = tox_state.unread_state.lock() {
-            unread.requests.remove(&public_key);
-        }
-        persist_unread_state(&tox_state.unread_state, &tox_state.unread_state_path);
-        if let Some(updates) = &tox_state.updates {
-            updates.changed();
-        }
-        Ok(number)
+            )
+            .map_err(|error| format!("Не удалось принять запрос Tox (код {error})"))?;
+            let cache_write = {
+                let mut cache = tox_state
+                    .friend_cache
+                    .lock()
+                    .map_err(|_| "FRIEND_CACHE_UNAVAILABLE".to_string())?;
+                let entry = cache.entry(public_key.clone()).or_default();
+                refresh_accepted_friend_profile(
+                    entry,
+                    number,
+                    unix_timestamp(),
+                    next_chat_event_sequence(),
+                );
+                enqueue_friend_cache_write_required(&cache, &tox_state.friend_cache_path)?
+            };
+            wait_for_atomic_write(cache_write)?;
+            ToxState::save(instance)?;
+            if error == 0 {
+                tox_state.pq.bind_contact(
+                    number,
+                    &public_key,
+                    &pq_tox_owner(instance.native()),
+                    false,
+                )?;
+            }
+            drop(state);
+            if let Ok(mut requests) = tox_state.incoming_requests.lock() {
+                requests.retain(|request| !request.public_key.eq_ignore_ascii_case(&public_key));
+            }
+            persist_incoming_friend_requests(
+                &tox_state.incoming_requests,
+                &tox_state.incoming_requests_path,
+            );
+            if let Ok(mut unread) = tox_state.unread_state.lock() {
+                unread.requests.remove(&public_key);
+            }
+            persist_unread_state(&tox_state.unread_state, &tox_state.unread_state_path);
+            if let Some(updates) = &tox_state.updates {
+                updates.changed();
+            }
+            Ok(number)
+        })
+        .await
     }
 
     #[tauri::command]
@@ -25347,13 +27210,17 @@ function run(argv) {
         app_state: tauri::State<'_, AppState>,
         profile_id: Option<String>,
         public_key: String,
+        expected_contact_incarnation: Option<u64>,
     ) -> Result<(), String> {
+        let admission = app_state.desktop_work.admit()?;
         let tox_state = match profile_id.as_deref() {
             Some(profile_id) => app_state.loaded_profile(profile_id)?,
             None => app_state.active()?,
         };
         tauri::async_runtime::spawn_blocking(move || {
-            reject_incoming_friend_request_for_state(&tox_state, &public_key)
+            let _admission = admission;
+
+            reject_incoming_friend_request_with_cleanup(&tox_state, &public_key, expected_contact_incarnation, |_, _| Ok(Vec::new()))
         })
         .await
         .map_err(|error| format!("Friend request rejection task failed: {error}"))?
@@ -25399,8 +27266,11 @@ function run(argv) {
         app_state: tauri::State<'_, AppState>,
         settings: TorSettings,
     ) -> Result<TorStatus, String> {
+        let admission = app_state.desktop_work.admit()?;
         let app_state = app_state.inner().clone();
         tauri::async_runtime::spawn_blocking(move || {
+            let _admission = admission;
+
             set_tor_settings_blocking(&app_state, settings)
         })
         .await
@@ -25411,6 +27281,9 @@ function run(argv) {
         app_state: &AppState,
         settings: TorSettings,
     ) -> Result<TorStatus, String> {
+        let _route_guard = lock_shared_route_gate(&app_state.shared_route_gate)?;
+        app_state.remote_profiles.interrupt_transports();
+        app_state.desktop_update.interrupt_network();
         let status = app_state.tor.apply_settings(settings)?;
         let profiles: Vec<Arc<ToxState>> = app_state
             .profiles
@@ -25420,20 +27293,25 @@ function run(argv) {
             .cloned()
             .collect();
         for profile in profiles {
-            profile.rebuild_network_route()?;
+            profile.rebuild_network_route_inner(None)?;
         }
         Ok(status)
     }
 
     #[tauri::command]
     async fn restart_tor(app_state: tauri::State<'_, AppState>) -> Result<TorStatus, String> {
+        let admission = app_state.desktop_work.admit()?;
         let app_state = app_state.inner().clone();
-        tauri::async_runtime::spawn_blocking(move || restart_tor_blocking(&app_state))
-            .await
-            .map_err(|error| format!("Tor restart task failed: {error}"))?
+        tauri::async_runtime::spawn_blocking(move || {
+            let _admission = admission;
+            restart_tor_blocking(&app_state)
+        })
+        .await
+        .map_err(|error| format!("Tor restart task failed: {error}"))?
     }
 
     fn restart_tor_blocking(app_state: &AppState) -> Result<TorStatus, String> {
+        let _route_guard = lock_shared_route_gate(&app_state.shared_route_gate)?;
         let status = app_state.tor.restart()?;
         let profiles: Vec<Arc<ToxState>> = app_state
             .profiles
@@ -25443,31 +27321,46 @@ function run(argv) {
             .cloned()
             .collect();
         for profile in profiles {
-            profile.rebuild_network_route()?;
+            profile.rebuild_network_route_inner(None)?;
         }
         Ok(status)
     }
 
     #[tauri::command]
-    fn set_tox_user_status(
+    async fn set_tox_user_status(
         app: tauri::AppHandle,
         app_state: tauri::State<'_, AppState>,
         status: String,
     ) -> Result<String, String> {
+        let app_state = app_state.inner().clone();
+        let admission = app_state.desktop_work.admit()?;
         let tox_state = app_state.active()?;
-        let result = set_user_status_inner(&tox_state, &status)?;
-        update_tray(&app, &app_state);
-        let _ = app.emit("active-user-status-changed", &result);
-        Ok(result)
+        let admitted_profile_id = tox_state.owner_profile_id.clone();
+        run_desktop_blocking(admission, move || {
+            let _route_guard = app_state
+                .shared_route_gate
+                .lock()
+                .map_err(|_| "SHARED_ROUTE_TRANSACTION_UNAVAILABLE")?;
+            ensure_queued_profile_current(&app_state, &tox_state)?;
+            let result = set_user_status_inner(&tox_state, &status)?;
+            update_tray(&app, &app_state);
+            if admitted_profile_id.as_deref() == active_profile_id(&app_state).as_deref() {
+                let _ = app.emit("active-user-status-changed", &result);
+            }
+            Ok(result)
+        })
+        .await
     }
 
     #[tauri::command]
-    fn set_profile_user_status(
+    async fn set_profile_user_status(
         app: tauri::AppHandle,
         app_state: tauri::State<'_, AppState>,
         profile_id: String,
         status: String,
     ) -> Result<String, String> {
+        let app_state = app_state.inner().clone();
+        let admission = app_state.desktop_work.admit()?;
         let tox_state = app_state
             .profiles
             .lock()
@@ -25475,106 +27368,143 @@ function run(argv) {
             .get(&profile_id)
             .cloned()
             .ok_or_else(|| "PROFILE_NOT_LOADED".to_string())?;
-        let result = set_user_status_inner(&tox_state, &status)?;
-        update_tray(&app, &app_state);
-        if active_profile_id(&app_state).as_deref() == Some(profile_id.as_str()) {
-            let _ = app.emit("active-user-status-changed", &result);
-        }
-        let _ = app.emit("profiles-changed", &profile_id);
-        Ok(result)
-    }
-
-    #[tauri::command]
-    fn get_tox_user_status(app_state: tauri::State<'_, AppState>) -> Result<String, String> {
-        let tox_state = app_state.active()?;
-        if !tox_state.network_enabled.load(Ordering::Relaxed) {
-            return Ok("offline".to_string());
-        }
-        let state = tox_state
-            .handle
-            .lock()
-            .map_err(|_| "Не удалось получить доступ к профилю Tox".to_string())?;
-        let instance = state
-            .as_ref()
-            .ok_or_else(|| "Профиль Tox не инициализирован".to_string())?;
-        Ok(
-            match unsafe { tox_self_get_status(instance.instance.as_ptr()) } {
-                0 => "online",
-                1 => "away",
-                _ => "busy",
+        run_desktop_blocking(admission, move || {
+            let _route_guard = app_state
+                .shared_route_gate
+                .lock()
+                .map_err(|_| "SHARED_ROUTE_TRANSACTION_UNAVAILABLE")?;
+            ensure_queued_profile_current(&app_state, &tox_state)?;
+            let result = set_user_status_inner(&tox_state, &status)?;
+            update_tray(&app, &app_state);
+            if active_profile_id(&app_state).as_deref() == Some(profile_id.as_str()) {
+                let _ = app.emit("active-user-status-changed", &result);
             }
-            .to_string(),
-        )
+            let _ = app.emit("profiles-changed", &profile_id);
+            Ok(result)
+        })
+        .await
     }
 
     #[tauri::command]
-    fn get_tox_status_message(app_state: tauri::State<'_, AppState>) -> Result<String, String> {
+    async fn get_tox_user_status(app_state: tauri::State<'_, AppState>) -> Result<String, String> {
+        let app_state = app_state.inner().clone();
+        let admission = app_state.desktop_work.admit()?;
         let tox_state = app_state.active()?;
-        let state = tox_state
-            .handle
-            .lock()
-            .map_err(|_| "Не удалось получить доступ к профилю Tox".to_string())?;
-        let instance = state
-            .as_ref()
-            .ok_or_else(|| "Профиль Tox не инициализирован".to_string())?;
-        let mut error = 0;
-        let length =
-            unsafe { tox_self_get_status_message_size(instance.instance.as_ptr(), &mut error) };
-        if error != 0 {
-            return Err(format!("Не удалось получить статус Tox (код {error})"));
-        }
-        if length == 0 {
-            return Ok(String::new());
-        }
-        let mut bytes = vec![0_u8; length];
-        error = 0;
-        if !unsafe {
-            tox_self_get_status_message(instance.instance.as_ptr(), bytes.as_mut_ptr(), &mut error)
-        } {
-            return Err(format!("Не удалось прочитать статус Tox (код {error})"));
-        }
-        Ok(normalize_status_message(&String::from_utf8_lossy(&bytes)))
+        run_desktop_blocking(admission, move || {
+            let _route_guard = app_state
+                .shared_route_gate
+                .lock()
+                .map_err(|_| "SHARED_ROUTE_TRANSACTION_UNAVAILABLE")?;
+            ensure_queued_profile_current(&app_state, &tox_state)?;
+            if !tox_state.network_enabled.load(Ordering::Relaxed) {
+                return Ok("offline".to_string());
+            }
+            let state = tox_state
+                .handle
+                .lock()
+                .map_err(|_| "Не удалось получить доступ к профилю Tox".to_string())?;
+            let instance = state
+                .as_ref()
+                .ok_or_else(|| "Профиль Tox не инициализирован".to_string())?;
+            Ok(
+                match instance.native().self_status() {
+                    0 => "online",
+                    1 => "away",
+                    _ => "busy",
+                }
+                .to_string(),
+            )
+        })
+        .await
     }
 
     #[tauri::command]
-    fn set_tox_status_message(
+    async fn get_tox_status_message(
+        app_state: tauri::State<'_, AppState>,
+    ) -> Result<String, String> {
+        let app_state = app_state.inner().clone();
+        let admission = app_state.desktop_work.admit()?;
+        let tox_state = app_state.active()?;
+        run_desktop_blocking(admission, move || {
+            let _route_guard = app_state
+                .shared_route_gate
+                .lock()
+                .map_err(|_| "SHARED_ROUTE_TRANSACTION_UNAVAILABLE")?;
+            ensure_queued_profile_current(&app_state, &tox_state)?;
+            let state = tox_state
+                .handle
+                .lock()
+                .map_err(|_| "Не удалось получить доступ к профилю Tox".to_string())?;
+            let instance = state
+                .as_ref()
+                .ok_or_else(|| "Профиль Tox не инициализирован".to_string())?;
+            let mut error = 0;
+            let bytes = instance
+                .native()
+                .self_status_message(&mut error)
+                .ok_or_else(|| format!("Не удалось прочитать статус Tox (код {error})"))?;
+            Ok(normalize_status_message(&String::from_utf8_lossy(&bytes)))
+        })
+        .await
+    }
+
+    #[tauri::command]
+    async fn set_tox_status_message(
         app_state: tauri::State<'_, AppState>,
         message: String,
     ) -> Result<String, String> {
+        let app_state = app_state.inner().clone();
+        let admission = app_state.desktop_work.admit()?;
         let tox_state = app_state.active()?;
-        let value = normalize_status_message(&message);
-        let state = tox_state
-            .handle
-            .lock()
-            .map_err(|_| "Не удалось получить доступ к профилю Tox".to_string())?;
-        let instance = state
-            .as_ref()
-            .ok_or_else(|| "Профиль Tox не инициализирован".to_string())?;
-        let mut error = 0;
-        if !unsafe {
-            tox_self_set_status_message(
-                instance.instance.as_ptr(),
-                value.as_bytes().as_ptr(),
-                value.len(),
-                &mut error,
-            )
-        } {
-            return Err(format!("Не удалось обновить статус Tox (код {error})"));
-        }
-        log_network(
-            &tox_state.network_log_path,
-            format!(
-                "SELF_STATUS_MESSAGE bytes={} fingerprint={}",
-                value.len(),
-                event_fingerprint(value.as_bytes())
-            ),
-        );
-        ToxState::save(instance)?;
-        Ok(value)
+        run_desktop_blocking(admission, move || {
+            let _route_guard = app_state
+                .shared_route_gate
+                .lock()
+                .map_err(|_| "SHARED_ROUTE_TRANSACTION_UNAVAILABLE")?;
+            ensure_queued_profile_current(&app_state, &tox_state)?;
+            let value = normalize_status_message(&message);
+            let state = tox_state
+                .handle
+                .lock()
+                .map_err(|_| "Не удалось получить доступ к профилю Tox".to_string())?;
+            let instance = state
+                .as_ref()
+                .ok_or_else(|| "Профиль Tox не инициализирован".to_string())?;
+            let mut error = 0;
+            if !instance.native().self_set_status_message(value.as_bytes(), &mut error) {
+                return Err(format!("Не удалось обновить статус Tox (код {error})"));
+            }
+            log_network(
+                &tox_state.network_log_path,
+                format!(
+                    "SELF_STATUS_MESSAGE bytes={} fingerprint={}",
+                    value.len(),
+                    event_fingerprint(value.as_bytes())
+                ),
+            );
+            ToxState::save(instance)?;
+            Ok(value)
+        })
+        .await
     }
 
     #[cfg_attr(mobile, tauri::mobile_entry_point)]
     pub fn run() {
+        let portable_root = match instance::portable_root_for_current_executable() {
+            Ok(root) => root,
+            Err(error) => {
+                instance::report_startup_error(&error);
+                return;
+            }
+        };
+        match desktop_update::recover_before_startup(&portable_root) {
+            Ok(true) => return,
+            Ok(false) => {}
+            Err(error) => {
+                instance::report_startup_error(&error);
+                return;
+            }
+        }
         let instance_outcome = match InstanceGuard::acquire_for_current_executable() {
             Ok(outcome) => outcome,
             Err(error) => {
@@ -25618,6 +27548,7 @@ function run(argv) {
                     .map(|settings| settings.language.clone())
                     .unwrap_or_else(|_| "ru".to_string());
                 app.manage(app_state);
+                app.state::<AppState>().desktop_update.start();
                 webview_recovery::setup(app)
                     .map_err(|error| format!("Could not start WebView recovery: {error}"))?;
                 #[cfg(unix)]
@@ -25628,6 +27559,9 @@ function run(argv) {
                 update_tray(app.handle(), &app.state::<AppState>());
                 instance_guard.start_activation_listener(app.handle().clone());
                 app.manage(instance_guard);
+                if let Err(error) = app.state::<AppState>().desktop_update.acknowledge_startup() {
+                    let _ = app.emit("application-exit-error", error);
+                }
                 Ok(())
             })
             .on_window_event(|window, event| match event {
@@ -25636,17 +27570,13 @@ function run(argv) {
                 }
                 tauri::WindowEvent::CloseRequested { api, .. } => {
                     let state = window.state::<AppState>();
-                    let close_to_tray = state
-                        .settings
-                        .lock()
-                        .map(|settings| settings.close_to_tray)
-                        .unwrap_or(true);
+                    let close_to_tray = state.close_to_tray.load(Ordering::Acquire);
                     if close_to_tray && !state.exit_requested.load(Ordering::Relaxed) {
                         api.prevent_close();
                         let _ = window.hide();
                     } else {
-                        webview_recovery::stop(window.app_handle());
-                        stop_owned_services(&state);
+                        api.prevent_close();
+                        request_application_exit(window.app_handle(), &state);
                     }
                 }
                 tauri::WindowEvent::DragDrop(drag) if window.label() == "main" => match drag {
@@ -25667,39 +27597,67 @@ function run(argv) {
                         let Some(target) = target else {
                             return;
                         };
-                        let target_is_current = state
-                            .loaded_profile(&target.profile_id)
-                            .map(|profile| {
-                                profile.stable_friend_public_key(target.friend_number)
-                                    == target.recipient_public_key
+                        let profile = if target.remote.is_some() { None } else {
+                            match state.loaded_profile(&target.profile_id) {
+                                Ok(profile) => Some(profile),
+                                Err(_) => {
+                                    let _ = window.emit("native-file-drop-error", "FILE_DROP_TARGET_CHANGED");
+                                    return;
+                                }
+                            }
+                        };
+                        let admission = match state.desktop_work.admit() {
+                            Ok(admission) => admission,
+                            Err(error) => {
+                                let _ = window.emit("native-file-drop-error", error);
+                                return;
+                            }
+                        };
+                        let state = state.inner().clone();
+                        let window = window.clone();
+                        let paths = paths.clone();
+                        tauri::async_runtime::spawn(async move {
+                            let result = run_desktop_blocking(admission, move || {
+                                let _route_guard = state
+                                    .shared_route_gate
+                                    .lock()
+                                    .map_err(|_| "SHARED_ROUTE_TRANSACTION_UNAVAILABLE")?;
+                                if state.native_file_drop_revision.load(Ordering::Acquire) != target.revision {
+                                    return Err("FILE_DROP_TARGET_CHANGED".into());
+                                }
+                                let _target_transaction = if let Some(profile) = &profile {
+                                    ensure_queued_profile_current(&state, profile)?;
+                                    Some(lock_native_file_target(profile, target.friend_number, Some(&target.recipient_public_key), Some(target.contact_incarnation))?.1)
+                                } else { current_remote_drop_target(&state, &target)?; None };
+                                let batch = issue_native_file_batch(&state, paths, target.profile_id.clone(), target.recipient_public_key.clone(), target.contact_incarnation)?;
+                                if target.remote.is_some() {
+                                    let mut grants = state.native_file_grants.lock().map_err(|_| "NATIVE_FILE_GRANT_INVALID")?;
+                                    let context = drop_read_context(&target);
+                                    for selection in &batch.accepted { grants.bind_read_context(&selection.grant_token, &context)?; }
+                                }
+                                Ok(NativeFileDropBatch {
+                                    profile_id: target.profile_id,
+                                    friend_number: target.friend_number,
+                                    expected_public_key: target.recipient_public_key,
+                                    expected_contact_incarnation: target.contact_incarnation,
+                                    view_lease_id: target.view_lease_id,
+                                    target_revision: target.revision,
+                                    batch,
+                                })
                             })
-                            .unwrap_or(false);
-                        if !target_is_current {
-                            let _ =
-                                window.emit("native-file-drop-error", "FILE_DROP_TARGET_CHANGED");
-                            return;
-                        }
-                        match issue_native_file_batch(
-                            &state,
-                            paths.clone(),
-                            target.profile_id.clone(),
-                            target.recipient_public_key,
-                        ) {
-                            Ok(batch) => {
-                                let _ = window.emit(
-                                    "native-file-drop-ready",
-                                    NativeFileDropBatch {
-                                        profile_id: target.profile_id,
-                                        friend_number: target.friend_number,
-                                        batch,
-                                    },
-                                );
+                            .await;
+                            match result {
+                                Ok(batch) => {
+                                    let _ = window.emit("native-file-drop-ready", batch);
+                                }
+                                Err(_) => {
+                                    let _ = window.emit(
+                                        "native-file-drop-error",
+                                        "FILE_DROP_PREPARATION_FAILED",
+                                    );
+                                }
                             }
-                            Err(_) => {
-                                let _ = window
-                                    .emit("native-file-drop-error", "FILE_DROP_PREPARATION_FAILED");
-                            }
-                        }
+                        });
                     }
                     _ => {}
                 },
@@ -25713,6 +27671,31 @@ function run(argv) {
                     .build(),
             )
             .invoke_handler(tauri::generate_handler![
+                desktop_update::get_desktop_update_state,
+                desktop_update::acknowledge_desktop_update_renderer,
+                desktop_update::check_desktop_update,
+                desktop_update::set_desktop_auto_update,
+                desktop_update::install_desktop_update,
+                desktop_update::cancel_desktop_update,
+                webgate_desktop::connect_webgate_profile,
+                webgate_desktop::update_webgate_profile,
+                webgate_desktop::webgate_profiles,
+                webgate_desktop::webgate_invoke,
+                webgate_desktop::webgate_select_profile,
+                webgate_desktop::webgate_disconnect_profile,
+                webgate_desktop::webgate_restore_profile,
+                webgate_desktop::webgate_forget_profile,
+                webgate_desktop::get_webgate_connection_card,
+                webgate_desktop::save_webgate_connection_card,
+                webgate_desktop::webgate_file_operation,
+                webgate_downloads::begin_webgate_download,
+                webgate_downloads::begin_webgate_history_export,
+                webgate_downloads::write_webgate_download,
+                webgate_downloads::finish_webgate_download,
+                webgate_downloads::cancel_webgate_download,
+                webgate_downloads::webgate_local_downloads,
+                webgate_downloads::webgate_resolve_download,
+                webgate_local_download_action,
                 get_startup_state,
                 report_webview_heartbeat,
                 set_app_language,
@@ -25765,9 +27748,13 @@ function run(argv) {
                 pick_tox_files,
                 stage_clipboard_image_for_chat,
                 set_native_file_drop_target,
+                read_webgate_file_grant,
                 send_tox_file_from_grant,
                 discard_native_file_grant,
                 show_attachment_in_folder,
+                save_attachment_copy,
+                read_attachment_media,
+                webgate_save_download_copy,
                 copy_attachment_to_clipboard,
                 open_downloads_directory,
                 open_logs_directory,
@@ -25781,6 +27768,9 @@ function run(argv) {
                 set_proxy_settings,
                 test_proxy_connection,
                 get_network_settings,
+                get_tox_bootstrap_nodes,
+                set_tox_bootstrap_nodes,
+                test_tox_bootstrap_node,
                 set_network_settings,
                 retry_tox_file_transfer,
                 send_tox_avatar,
@@ -25810,15 +27800,18 @@ function run(argv) {
             .build(tauri::generate_context!())
             .expect("error while building tauri application");
         app.run(|app_handle, event| {
-            if matches!(
-                event,
-                tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit
-            ) {
+            if let tauri::RunEvent::ExitRequested { api, .. } = &event {
+                if let Some(state) = app_handle.try_state::<AppState>() {
+                    if !state.shutdown_completed.load(Ordering::Acquire) {
+                        api.prevent_exit();
+                        request_application_exit(app_handle, &state);
+                    }
+                }
+            }
+            if matches!(event, tauri::RunEvent::Exit) {
+                // The owned exit worker has already drained and stopped services.
                 webview_recovery::stop(app_handle);
                 if let Some(state) = app_handle.try_state::<AppState>() {
-                    if let Ok(mut grants) = state.native_file_grants.lock() {
-                        grants.clear_all();
-                    }
                     stop_owned_services(&state);
                 }
             }
@@ -25829,6 +27822,9 @@ function run(argv) {
         if !begin_owned_service_shutdown(&state.shutdown_started) {
             return;
         }
+        state.webgate_downloads.clear();
+        state.remote_profiles.close_all();
+        state.tor.begin_shutdown();
         state.tor.stop();
         if let Ok(profiles) = state.profiles.lock() {
             for profile in profiles.values() {
@@ -25866,11 +27862,51 @@ pub use desktop_adapter::run;
 
 #[cfg(feature = "desktop")]
 fn request_application_exit(app: &tauri::AppHandle, state: &AppState) {
-    state.exit_requested.store(true, Ordering::Relaxed);
-    if let Ok(mut grants) = state.native_file_grants.lock() {
-        grants.clear_all();
+    if state.exit_requested.swap(true, Ordering::AcqRel) {
+        return;
     }
-    webview_recovery::stop(app);
-    desktop_adapter::stop_owned_services(state);
-    app.exit(0);
+    if let Err(error) = state.desktop_work.close() {
+        state.exit_requested.store(false, Ordering::Release);
+        let _ = app.emit("application-exit-error", error);
+        return;
+    }
+    state.desktop_update.stop();
+    state.tor.begin_shutdown();
+    let app = app.clone();
+    let state = state.clone();
+    tauri::async_runtime::spawn(async move {
+        let worker_state = state.clone();
+        let worker_app = app.clone();
+        let result = tauri::async_runtime::spawn_blocking(move || {
+            worker_state.desktop_work.wait_until_idle()?;
+            if let Ok(mut grants) = worker_state.native_file_grants.lock() {
+                grants.clear_all();
+            }
+            webview_recovery::stop(&worker_app);
+            desktop_adapter::stop_owned_services(&worker_state);
+            if let Err(error) = worker_state.desktop_update.finish_shutdown() {
+                // The independent helper must retain/restart the old payload
+                // when clean-handoff publication fails. Services are already
+                // drained, so finish this exit rather than leave a stopped UI.
+                let _ = worker_app.emit("application-exit-error", error);
+            }
+            worker_state
+                .shutdown_completed
+                .store(true, Ordering::Release);
+            Ok::<_, String>(())
+        })
+        .await;
+        match result {
+            Ok(Ok(())) => app.exit(0),
+            Ok(Err(error)) => {
+                let _ = app.emit("application-exit-error", error);
+            }
+            Err(error) => {
+                let _ = app.emit(
+                    "application-exit-error",
+                    format!("Shutdown task stopped unexpectedly: {error}"),
+                );
+            }
+        }
+    });
 }

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { realpathSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { assertSelectedWebHydration, runCiVerificationTests } from "./test-ci-incremental-verification.mjs";
@@ -48,7 +49,10 @@ const sqlcipherRebuild = await readFile(new URL("scripts/rebuild-sqlcipher-runti
 const sqlcipherSmokeSource = await readFile(new URL("scripts/tests/sqlcipher-runtime-smoke.c", projectRoot), "utf8");
 const sourceArchiveBuild = await readFile(new URL("scripts/build-source-archive.ps1", projectRoot), "utf8");
 const webInstallerBuild = await readFile(new URL("scripts/build-web-installer.ps1", projectRoot), "utf8");
-const webBootstrapInstaller = await readFile(new URL("web/installer/install-kaigen-web-from-github.sh", projectRoot), "utf8");
+const webBootstrapInstaller = await readFile(new URL("kaigenweb.sh", projectRoot), "utf8");
+const webStableReleaseResolver = webBootstrapInstaller.match(/^resolve_stable_release\(\) \{\r?\n[^]*?^\}/mu)?.[0] ?? "";
+const webArchiveExtractor = webBootstrapInstaller.match(/^extract_verified_archive\(\) \{\r?\n[^]*?^\}/mu)?.[0] ?? "";
+const webReleaseDownload = webBootstrapInstaller.match(/^download_release\(\) \{\r?\n[^]*?^\}/mu)?.[0] ?? "";
 const windowsMsiBuild = await readFile(new URL("scripts/build-windows-msi.ps1", projectRoot), "utf8");
 const automationEntryPoint = await readFile(new URL("scripts/Invoke-KaigenAutomation.ps1", projectRoot), "utf8");
 const sourceArchivePrivacyTest = await readFile(new URL("scripts/test-source-archive-privacy.mjs", projectRoot), "utf8");
@@ -65,9 +69,10 @@ const cargoManifest = await readFile(new URL("src-tauri/Cargo.toml", projectRoot
 const cargoLock = await readFile(new URL("src-tauri/Cargo.lock", projectRoot), "utf8");
 const offlineLoopbackHarness = await readFile(new URL("scripts/test-offline-friend-request-loopback.ps1", projectRoot), "utf8");
 const offlineLoopbackSource = await readFile(new URL("scripts/tests/offline-friend-request-loopback.c", projectRoot), "utf8");
+const sourceGitRoot = realpathSync.native(fileURLToPath(projectRoot));
 const cargoAttributeOutput = execFileSync(
   "git",
-  ["-c", "safe.directory=*", "-C", fileURLToPath(projectRoot), "check-attr", "eol", "--", "src-tauri/Cargo.toml", "src-tauri/Cargo.lock"],
+  ["-c", `safe.directory=${sourceGitRoot.replaceAll("\\", "/")}`, "-C", sourceGitRoot, "check-attr", "eol", "--", "src-tauri/Cargo.toml", "src-tauri/Cargo.lock"],
   { encoding: "utf8" },
 );
 const commandLines = portableBuild.split(/\r?\n/).map((line) => line.trim());
@@ -171,12 +176,12 @@ ok(
   automationEntryPoint.startsWith("#requires -Version 7.6.5") &&
     automationEntryPoint.includes("[Console]::OutputEncoding = $utf8NoBom") &&
     automationEntryPoint.includes("$OutputEncoding = $utf8NoBom") &&
-    automationEntryPoint.includes("$PSVersionTable.PSVersion.ToString() -cne '7.6.5'") &&
+    automationEntryPoint.includes("$PSVersionTable.PSVersion.ToString() -cnotin @('7.6.5', '7.6.9')") &&
     automationEntryPoint.includes("& $FilePath @ArgumentList") &&
     automationEntryPoint.includes("'debian-build'") &&
     automationEntryPoint.includes("'macos-build'") &&
     automationEntryPoint.includes("Resolve-KaigenNativeCommand -Name 'bash'"),
-  "the canonical automation entry point must pin PowerShell 7.6.5, force UTF-8 and delegate Unix builds through argument-array native runners",
+  "the canonical automation entry point must accept exactly PowerShell 7.6.5 or 7.6.9, force UTF-8 and delegate Unix builds through argument-array native runners",
 );
 ok(
   /'web-gates' \{[\s\S]*?@\('run', 'build'\)[\s\S]*?@\('run', 'build:web'\)[\s\S]*?@\('run', 'test:built-content-security'\)[\s\S]*?@\('run', 'test:product-bundles'\)/u.test(automationEntryPoint),
@@ -242,7 +247,7 @@ ok(
   "the MSI builder must package only a privacy-checked portable tree into a high-compression embedded CAB and reuse the user install directory",
 );
 ok(
-  windowsMsiBuild.includes('<MajorUpgrade AllowSameVersionUpgrades="yes"') &&
+  /<MajorUpgrade\b[^>]*\bAllowSameVersionUpgrades="yes"/u.test(windowsMsiBuild) &&
     !windowsMsiBuild.includes('Schedule="afterInstallExecute"') &&
     windowsMsiBuild.includes('<Custom Action="ShutdownKaigenBeforeUpdate" After="CostFinalize">1</Custom>') &&
     windowsMsiBuild.includes('<Binary Id="KaigenUpdateShutdownHelper"') &&
@@ -292,18 +297,44 @@ ok(
   "Unix CI must build, integrity-check, and publish the Web release bundle without implicit tests",
 );
 ok(
-  webBootstrapInstaller.includes("REPOSITORY='kaigendev/Kaigen'") &&
-    webBootstrapInstaller.includes("RELEASE_LABEL='__KAIGEN_RELEASE_LABEL__'") &&
-    webBootstrapInstaller.includes("BUNDLE_SHA256='__KAIGEN_WEB_BUNDLE_SHA256__'") &&
-    webBootstrapInstaller.includes("curl --fail --location --proto '=https' --tlsv1.2 --retry 3 --retry-all-errors") &&
-    webBootstrapInstaller.includes('[[ "$ACTUAL_SHA256" == "$BUNDLE_SHA256" ]]') &&
-    webBootstrapInstaller.includes('[[ "$(tr -d \'\\r\\n\' < "$EXTRACT_ROOT/release-id")" == "$BUILD_ID" ]]') &&
-    webBootstrapInstaller.includes("(cd \"$EXTRACT_ROOT\" && sha256sum -c manifest.sha256)") &&
-    webBootstrapInstaller.includes('"$INSTALLER" "$ACTION" --bundle "$EXTRACT_ROOT" "$@"') &&
-    webInstallerBuild.includes('"Kaigen-Web-Installer-$ReleaseLabel.sh"') &&
-    webInstallerBuild.includes("Web bootstrap template placeholders are missing or ambiguous.") &&
+    webBootstrapInstaller.includes("readonly REPO=kaigendev/Kaigen") &&
+    webBootstrapInstaller.includes("fetch() { curl -fLsS --proto '=https' --tlsv1.2 --retry 3 --connect-timeout 20") &&
+    webReleaseDownload.includes("[[ $(resolve_stable_release 0) != NO_UPDATE ]] || die 'No installable release exists.'") &&
+    webStableReleaseResolver.includes("\"https://api.github.com/repos/$REPO/releases?per_page=100&page=$page\"") &&
+    webStableReleaseResolver.includes("for ((page=1;page<=100;page++)); do") &&
+    webStableReleaseResolver.includes("re.fullmatch(r'[vV]?[0-9]+(?:\\.[0-9]+)*', value)") &&
+    webStableReleaseResolver.includes("release.get('draft') is not False or release.get('prerelease') is not False") &&
+    webStableReleaseResolver.includes("version, release = max(releases, key=lambda item: item[0])") &&
+    webReleaseDownload.includes("asset=$(jq -cer '[.assets[] | select(.name | test(\"^Kaigen-Web-Debian13-Nginx-[A-Za-z0-9._-]+\\\\.tar\\\\.gz$\"))] | if length==1 then .[0] else error(\"Web bundle missing or ambiguous\") end' \"$TMP/release.json\")") &&
+    webBootstrapInstaller.includes("digest=$(jq -er '.digest | select(test(\"^sha256:[a-f0-9]{64}$\"))' <<< \"$asset\")") &&
+    webReleaseDownload.includes("VERSION=$(jq -er '.tag_name | select(test(\"^[vV]?[0-9]+(\\\\.[0-9]+)*$\"))' \"$TMP/release.json\")") &&
+    webReleaseDownload.includes("local tag; tag=$(jq -er .tag_name \"$TMP/release.json\")") &&
+    webReleaseDownload.includes("\"https://github.com/$REPO/releases/download/$tag/$(jq -r .name <<< \"$asset\")\"") &&
+    webBootstrapInstaller.includes("printf '%s  %s\\n' \"${digest#sha256:}\" \"$TMP/bundle.tar.gz.part\" | sha256sum -c -") &&
+    webReleaseDownload.includes("extract_verified_archive \"$TMP/bundle.tar.gz\" \"${digest#sha256:}\" \"$TMP/bundle\"") &&
+    webArchiveExtractor.includes("if not re.fullmatch(r'[a-fA-F0-9]{64}', digest): raise SystemExit('Invalid archive SHA-256')") &&
+    webArchiveExtractor.includes("flags = os.O_RDONLY | os.O_NOFOLLOW") &&
+    webArchiveExtractor.includes("if not stat.S_ISREG(os.fstat(source.fileno()).st_mode): raise SystemExit('Archive is not a regular file')") &&
+    webArchiveExtractor.includes("while chunk := source.read(1024 * 1024): h.update(chunk)") &&
+    webArchiveExtractor.includes("if h.hexdigest() != digest.lower(): raise SystemExit('Archive SHA-256 mismatch')") &&
+    webArchiveExtractor.includes("if len(members) > 100000: raise SystemExit('Archive member limit exceeded')") &&
+    webArchiveExtractor.includes("if (not parts or name.startswith('/') or any(x in ('.', '..') for x in parts)") &&
+    webArchiveExtractor.includes("or not re.fullmatch(r'[A-Za-z0-9_./+@-]+', name) or name in names):") &&
+    webArchiveExtractor.includes("if not (member.isfile() or member.isdir()): raise SystemExit('Unsupported archive member type')") &&
+    webArchiveExtractor.includes("if member.size < 0: raise SystemExit('Invalid member size')") &&
+    webArchiveExtractor.includes("if total > 2 * 1024**3: raise SystemExit('Archive expanded size limit exceeded')") &&
+    webArchiveExtractor.includes("destination.mkdir(mode=0o700, parents=False, exist_ok=False)") &&
+    webArchiveExtractor.includes("with open(target, 'xb') as output:") &&
+    webArchiveExtractor.indexOf("for member in members:") < webArchiveExtractor.indexOf("destination.mkdir(") &&
+    webArchiveExtractor.indexOf("destination.mkdir(") < webArchiveExtractor.lastIndexOf("for member in members:") &&
+    webBootstrapInstaller.includes("BUILD=$(tr -d '\\r\\n' < \"$TMP/bundle/release-id\")") &&
+    webBootstrapInstaller.includes("[[ $(cat \"$TMP/bundle/payload/ui/kaigen-build-id\") == \"$BUILD\" ]] || die 'UI identity mismatch.'") &&
+    webInstallerBuild.includes("$canonicalInstaller = Join-Path $projectRoot 'kaigenweb.sh'") &&
+    webInstallerBuild.includes("Copy-Item -LiteralPath $canonicalInstaller -Destination $bootstrap") &&
+    webInstallerBuild.includes("(Get-FileHash -LiteralPath $bootstrap -Algorithm SHA256).Hash -cne $installerHash") &&
+    webInstallerBuild.includes("Published Web installer differs from canonical kaigenweb.sh.") &&
     unixBuildWorkflow.includes("artifacts/Kaigen-Web-Installer-${{ env.KAIGEN_RELEASE_LABEL }}.sh"),
-  "the standalone Web bootstrap must be published outside the archive and download only the exact release bundle with a build-pinned SHA-256 before delegating install/update mode",
+  "the published canonical installer must retain byte identity and verify the stable official release asset digest, preflighted archive and UI/build identity",
 );
 ok(
   webInstallerBuild.includes("[string]$TorBundleRoot = 'work/platform/linux/TorExpertBundle'") &&

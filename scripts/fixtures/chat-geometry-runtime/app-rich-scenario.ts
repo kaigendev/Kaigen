@@ -3,6 +3,7 @@ import {
   geometryAppendUnreadMessage,
   geometryEmitFriendStatus,
   geometryMessageId,
+  geometrySendAttempts,
   prepareRichUiScenario,
   prepareUnreadVisibilityScenario,
   richUiEvidence,
@@ -606,11 +607,22 @@ export async function runActualAppRichScenario(): Promise<RichUiResult> {
     const send = document.querySelector<HTMLButtonElement>(".composer .send")!;
     send.click();
     await new Promise(requestAnimationFrame);
-    check(textarea.value === "", "submit must clear the only draft synchronously");
-    check(send.disabled, "the cleared composer must remain guarded while the immutable send operation is pending");
-    check(richUiEvidence().latestSendArgs === undefined, "draft clear must precede backend completion");
+    const pendingSend = geometrySendAttempts.at(-1);
+    check(textarea.value === text && pendingSend?.text === text && !!pendingSend.profileId
+      && !!pendingSend.expectedPublicKey && richUiEvidence().latestSendArgs === undefined,
+      "the immutable owner-bound send must retain its exact draft while backend admission is pending");
+    check(send.disabled, "the pending composer must remain guarded while the immutable send operation is pending");
 
-    const sent = await waitFor(() => richUiEvidence().latestSendArgs, 2_000, "formatted send payload");
+    const sent = await waitFor(() => {
+      const admitted = richUiEvidence().latestSendArgs;
+      if (!admitted) return undefined;
+      if (getComposer() !== textarea || !carol.classList.contains("selected")) throw new Error("formatted send owner changed before draft clearance");
+      return textarea.value === "" ? admitted : undefined;
+    }, 2_000, "formatted send admission and same-owner draft clearance");
+    check(textarea.value === "" && getComposer() === textarea && carol.classList.contains("selected")
+      && sent.operationId === pendingSend.operationId && sent.profileId === pendingSend.profileId
+      && sent.friendNumber === pendingSend.friendNumber && sent.expectedPublicKey === pendingSend.expectedPublicKey,
+      "only the accepted captured owner/key operation may clear the unchanged draft");
     check(sent.text === text, "formatted submit must preserve the plain message text");
     check(Array.isArray(sent.formatting) && sent.formatting.length === 4, "formatted submit must send exactly four spans");
     const kinds = sent.formatting.map((span: { kind: string }) => span.kind).sort();

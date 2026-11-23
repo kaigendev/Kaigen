@@ -2,6 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { getCurrentWindow, invoke, listen, openDialog, platformCapabilities } from "@kaigen/platform";
 import MessengerApp from "./App";
 import { CompactModal } from "./CompactModal";
+import { DesktopUpdateProvider } from "./DesktopUpdates";
 import { isProfileAvatarPending, observeProfileAvatarRequests, releaseProfileAvatar, reserveProfileAvatar } from "./profileAvatarRequests";
 import ProfileAvatar from "./ProfileAvatar";
 import TextEditContextMenu from "./TextEditContextMenu";
@@ -15,6 +16,10 @@ import { canLeaveStartupSplash } from "./layoutPersistence";
 import { brandImageUrl, prepareBrandImage } from "./brandImage";
 import "./Startup.css";
 import { installDesktopNotifications } from "./desktopNotifications";
+import { WebgateConnectionFields } from "./webgate/WebgateConnectionFields";
+import { ConnectionCardSettings } from "./webgate/ConnectionCardSettings";
+import { isWebgateProfileId } from "./webgate/platformRouter";
+import { emptyWebgateConnection, makeWebgateCard } from "./webgate/connectionCard";
 
 const ROOT_APP_UI_IDS = rootAppUiCatalog.ids;
 
@@ -32,10 +37,14 @@ export type ProfileSummary = {
   notificationsEnabled: boolean;
   unreadTarget?: string | null;
   error?: string | null;
+  backend?: "local" | "webgate";
+  webgateLocked?: boolean;
+  capabilities?: string[];
 };
 
 type StartupState = {
   firstRun: boolean;
+  webgateStoreError?: string | null;
   language: Language;
   closeToTray: boolean;
   initialConnectionPresetRequired: boolean;
@@ -183,13 +192,15 @@ function Welcome({ onProfiles, onBackToProfiles }: { onProfiles: (profiles: Prof
   const { language, t } = useI18n();
   const [flow, setFlow] = useState<"choice" | "create" | "import">("choice");
   const [name, setName] = useState("Tox User");
+  const [webgate, setWebgate] = useState(false);
+  const [webgateConnection, setWebgateConnection] = useState(emptyWebgateConnection);
   const [protect, setProtect] = useState(false);
   const [password, setPassword] = useState("");
   const [confirm, setConfirm] = useState("");
   const [candidates, setCandidates] = useState<QtoxCandidate[]>([]);
   const [sourceInspected, setSourceInspected] = useState(false);
   const [candidatePasswords, setCandidatePasswords] = useState<Record<string, string>>({});
-  type Activity = "idle" | "choosing" | "creating" | "discovering" | "importing";
+  type Activity = "idle" | "choosing" | "creating" | "connecting" | "discovering" | "importing";
   const [activity, setActivity] = useState<Activity>("idle");
   const activityRef = useRef<Activity>("idle");
   const pickerAbort = useRef<AbortController | null>(null);
@@ -204,22 +215,26 @@ function Welcome({ onProfiles, onBackToProfiles }: { onProfiles: (profiles: Prof
   const languageRef = useRef(language);
   languageRef.current = language;
   useEffect(() => setError(""), [language]);
-  useEffect(() => { setPassword(""); setConfirm(""); setCandidatePasswords({}); setError(""); }, [flow]);
+  useEffect(() => { setPassword(""); setConfirm(""); setCandidatePasswords({}); setWebgateConnection((current) => ({ ...current, password: "" })); setError(""); }, [flow]);
 
   const create = async () => {
     if (activityRef.current !== "idle") return;
-    if (protect && (!password || password !== confirm)) {
+    if (!webgate && protect && (!password || password !== confirm)) {
       setError(t("Пароли не совпадают"));
       return;
     }
-    if (!beginActivity("creating")) return;
+    if (!beginActivity(webgate ? "connecting" : "creating")) return;
     setError("");
     try {
-      const created = await invoke<CreatedProfileResult>("create_profile", { name, password: protect ? password : null });
+      const created = webgate
+        ? await invoke<CreatedProfileResult>("connect_webgate_profile", { card: makeWebgateCard(webgateConnection), password: webgateConnection.password })
+        : await invoke<CreatedProfileResult>("create_profile", { name, password: protect ? password : null });
       await onProfiles(created.profiles, "create", created.initialConnectionPresetRequired);
     } catch (value) {
-      setError(formatUserFacingError(value, { ru: "Не удалось создать профиль", en: "Could not create the profile" }, languageRef.current));
-    } finally { setPassword(""); setConfirm(""); finishActivity(); }
+      setError(formatUserFacingError(value, webgate
+        ? { ru: "Не удалось подключить Webgate. Проверьте ссылку, пароль и имя аккаунта.", en: "Could not connect Webgate. Check the link, password, and account name." }
+        : { ru: "Не удалось создать профиль", en: "Could not create the profile" }, languageRef.current));
+    } finally { setPassword(""); setConfirm(""); setWebgateConnection((current) => ({ ...current, password: "" })); finishActivity(); }
   };
 
   const discover = async (location: string) => {
@@ -276,7 +291,7 @@ function Welcome({ onProfiles, onBackToProfiles }: { onProfiles: (profiles: Prof
         password: passwordMode === "none" ? null : candidatePasswords[candidate.profilePath] || null,
       }), "import");
     } catch (value) {
-      setError(formatUserFacingError(value, { ru: "Не удалось импортировать профиль qTox", en: "Could not import the qTox profile" }, languageRef.current));
+      setError(formatUserFacingError(value, { ru: "Не удалось импортировать профиль", en: "Could not import the profile" }, languageRef.current));
     } finally {
       setCandidatePasswords((current) => { const next = { ...current }; delete next[candidate.profilePath]; return next; });
       finishActivity();
@@ -288,18 +303,21 @@ function Welcome({ onProfiles, onBackToProfiles }: { onProfiles: (profiles: Prof
     <Brand />
     <header><h1>{t("Добро пожаловать в Kaigen")}</h1><p>{t("Выберите, что вы хотите сделать для начала работы")}</p></header>
     {flow === "choice" && <div className="welcome-cards">
-      <article className="welcome-card create-card"><span className="welcome-card-icon"><CreateProfileIcon /></span><h2>{t("Создать новый профиль")}</h2><p>{t("Начните с чистого листа. Создайте новый профиль и настройте свой аккаунт.")}</p><button onClick={() => setFlow("create")}>{t("Создать профиль")} <b>›</b></button></article>
+      <article className="welcome-card create-card"><span className="welcome-card-icon"><CreateProfileIcon /></span><h2>{t("Создать новый профиль")}</h2><p>{language === "ru" ? "Создайте новый профиль или подключите существующий аккаунт веб-версии, отметив Webgate." : "Create a new profile or connect an existing Web account by selecting Webgate."}</p><button onClick={() => setFlow("create")}>{t("Создать профиль")} <b>›</b></button></article>
       <article className="welcome-card import-card"><span className="welcome-card-icon"><ImportProfileIcon /></span><h2>{t("Импортировать из qTox")}</h2><p>{t("Перенесите контакты и историю сообщений из существующего qTox-профиля.")}</p><button onClick={() => setFlow("import")}>{t("Импортировать")} <b>›</b></button></article>
       {onBackToProfiles && <button className="welcome-profile-back" type="button" onClick={onBackToProfiles}>‹ {t("Вернуться к подключению профилей")}</button>}
     </div>}
-    {flow === "create" && <form className={`startup-form create-flow ${protect ? "with-password" : ""}`} onSubmit={(event) => { event.preventDefault(); void create(); }}>
+    {flow === "create" && <form className={`startup-form create-flow ${webgate ? "webgate-flow" : protect ? "with-password" : ""}`} onSubmit={(event) => { event.preventDefault(); void create(); }}>
       <button className="startup-back" type="button" disabled={busy} onClick={() => setFlow("choice")}>‹ {t("Назад")}</button>
-      <h2>{t("Новый профиль")}</h2>
-      <label>{t("Имя профиля")}<input value={name} maxLength={64} onChange={(event) => setName(event.target.value)} autoFocus /></label>
-      <label className="startup-check"><input type="checkbox" checked={protect} onChange={(event) => setProtect(event.target.checked)} /><span>{t("Защитить профиль паролем")}</span></label>
-      {protect && <div className="startup-passwords"><label>{t("Пароль")}<input type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete="new-password" /></label><label>{t("Повторите пароль")}<input type="password" value={confirm} onChange={(event) => setConfirm(event.target.value)} autoComplete="new-password" /></label><small>{t("Без этого пароля восстановить профиль будет невозможно.")}</small></div>}
+      <h2>{webgate ? (language === "ru" ? "Подключение Webgate" : "Connect Webgate") : t("Новый профиль")}</h2>
+      <label className="startup-check"><input type="checkbox" checked={webgate} disabled={busy} onChange={(event) => { setWebgate(event.target.checked); setPassword(""); setConfirm(""); setWebgateConnection((current) => ({ ...current, password: "" })); setError(""); }} /><span>{language === "ru" ? "Подключить аккаунт веб-версии — Webgate" : "Connect a Web account — Webgate"}</span></label>
+      {webgate ? <WebgateConnectionFields value={webgateConnection} onChange={setWebgateConnection} language={language} disabled={busy} /> : <>
+        <label>{t("Имя профиля")}<input value={name} maxLength={64} onChange={(event) => setName(event.target.value)} autoFocus /></label>
+        <label className="startup-check"><input type="checkbox" checked={protect} onChange={(event) => setProtect(event.target.checked)} /><span>{t("Защитить профиль паролем")}</span></label>
+        {protect && <div className="startup-passwords"><label>{t("Пароль")}<input type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete="new-password" /></label><label>{t("Повторите пароль")}<input type="password" value={confirm} onChange={(event) => setConfirm(event.target.value)} autoComplete="new-password" /></label><small>{t("Без этого пароля восстановить профиль будет невозможно.")}</small></div>}
+      </>}
       {error && <p className="startup-error">{error}</p>}
-      <button className="startup-primary" disabled={busy || !name.trim() || (protect && !password)}>{activity === "creating" ? t("Создание…") : t("Создать профиль")}</button>
+      <button className="startup-primary" disabled={busy || (webgate ? !webgateConnection.endpoint.trim() || !webgateConnection.profileName.trim() || !webgateConnection.password : !name.trim() || (protect && !password))}>{activity === "connecting" ? (language === "ru" ? "Подключение…" : "Connecting…") : webgate ? (language === "ru" ? "Подключить Webgate" : "Connect Webgate") : activity === "creating" ? t("Создание…") : t("Создать профиль")}</button>
     </form>}
     {flow === "import" && <div className={`startup-form import-flow ${busy ? "busy" : ""}`} aria-busy={busy}>
       <button className="startup-back" type="button" disabled={busy} onClick={() => setFlow("choice")}>‹ {t("Назад")}</button>
@@ -327,7 +345,7 @@ function Welcome({ onProfiles, onBackToProfiles }: { onProfiles: (profiles: Prof
       {!busy && sourceInspected && candidates.length === 0 && <p className="startup-note">{language === "ru" ? "В выбранном источнике нет пригодных профилей qTox." : "The selected source contains no usable qTox profiles."}</p>}
       {error && <p className="startup-error">{error}</p>}
     </div>}
-    <footer><span className="welcome-shield"><PrivacyShieldIcon /></span><p>{t("Все данные хранятся рядом с программой. Сетевой маршрут может быть защищён встроенным Tor, а сообщения — дополнительным постквантовым слоем.")}</p></footer>
+    <footer><span className="welcome-shield"><PrivacyShieldIcon /></span><p>{webgate ? (language === "ru" ? "Данные аккаунта остаются на выбранном сервере. При закрытии клиента временный кеш и его ключ удаляются." : "Account data stays on the selected server. Closing this client removes its temporary cache and key.") : t("Все данные хранятся рядом с программой. Сетевой маршрут может быть защищён встроенным Tor, а сообщения — дополнительным постквантовым слоем.")}</p></footer>
   </section>;
 }
 
@@ -468,6 +486,7 @@ function UnlockProfiles({ profiles, onProfiles, onConnected, onDisableProfile, o
     </div>
     {!profile.loaded && profile.error !== "PROFILE_FINALIZATION_REQUIRED" && <>{profile.encrypted && <input type="password" data-i18n-ignore translate="no" aria-label={`${t("Пароль профиля")}: ${profile.name}`} placeholder={t("Пароль профиля")} value={passwords[profile.id] ?? ""} onChange={(event) => setPasswords((value) => ({ ...value, [profile.id]: event.target.value }))} onKeyDown={(event) => { if (event.key === "Enter" && !event.nativeEvent.isComposing) { event.preventDefault(); void unlock(profile); } }} />}<button disabled={busy[profile.id] || (profile.encrypted && !passwords[profile.id])} onClick={() => void unlock(profile)}>{busy[profile.id] ? "…" : t("Подключить")}</button></>}
     {profile.error === "PROFILE_FINALIZATION_REQUIRED" && <button type="button" disabled={disabling[profile.id] || busy[profile.id]} onClick={() => void disable(profile)}>{disabling[profile.id] ? "…" : language === "ru" ? "Повторить сохранение и отключение" : "Retry saving and disconnecting"}</button>}
+    {isWebgateProfileId(profile.id) && !profile.loaded && <ConnectionCardSettings key={profile.id} profileId={profile.id} language={language} />}
     {(errors[profile.id] || profile.error) && <em role="alert">{errors[profile.id]?.[language] ?? formatUserFacingError(profile.error, { ru: "Профиль недоступен. Повторите действие.", en: "The profile is unavailable. Try again." }, language, false)}</em>}
   </article>)}</div><div className="unlock-actions"><button className="startup-primary" onClick={onContinue}>{profiles.some((profile) => profile.loaded) ? t("Продолжить с открытыми профилями") : t("Пропустить и вернуться")}</button><button className="unlock-add-profile" type="button" onClick={onAddProfile}><span aria-hidden="true" />{t("Добавить ещё один профиль")}</button></div></section>;
 }
@@ -530,7 +549,7 @@ export default function RootApp({ onLanguageChange, registerBeforeWorkspaceLock 
     if (!rootAliveRef.current || revision !== startupRefreshRevision.current || profileSwitchingRef.current) return false;
     if (!initialStartupRouteResolved.current) {
       initialStartupRouteResolved.current = true;
-      const hasLockedPasswordProfile = value.profiles.some((profile) => !profile.loaded && (profile.encrypted || profile.error === "PROFILE_FINALIZATION_REQUIRED"));
+      const hasLockedPasswordProfile = value.profiles.some((profile) => !profile.loaded && (profile.encrypted || profile.webgateLocked || profile.error === "PROFILE_FINALIZATION_REQUIRED"));
       // On subsequent application launches the connection screen is useful only
       // when at least one enabled password-protected profile actually needs to be
       // unlocked. Explicitly pin the direct route for passwordless profiles so a
@@ -771,7 +790,7 @@ export default function RootApp({ onLanguageChange, registerBeforeWorkspaceLock 
     }
     catch (error) { setFatal(String(error)); }
   };
-  const lockedRemain = useMemo(() => startup?.profiles.some((profile) => profile.encrypted && !profile.loaded) ?? false, [startup]);
+  const lockedRemain = useMemo(() => startup?.profiles.some((profile) => (profile.encrypted || profile.webgateLocked) && !profile.loaded) ?? false, [startup]);
   const loaded = startup?.profiles.some((profile) => profile.loaded) ?? false;
   const hasFinalizationError = startup?.profiles.some((profile) => profile.error === "PROFILE_FINALIZATION_REQUIRED") ?? false;
   useEffect(() => {
@@ -785,6 +804,8 @@ export default function RootApp({ onLanguageChange, registerBeforeWorkspaceLock 
   }, [startup]);
 
   const startupReady = brandReady && canLeaveStartupSplash(themeReady, splashDone, startup);
+  const [dismissedWebgateStoreError, setDismissedWebgateStoreError] = useState("");
+  const webgateStoreError = startup?.webgateStoreError ?? "";
   const startupFocusReported = useRef(false);
   useEffect(() => {
     if (!startupReady || startupFocusReported.current) return;
@@ -832,10 +853,14 @@ export default function RootApp({ onLanguageChange, registerBeforeWorkspaceLock 
             </>
             : <Welcome onProfiles={reviewCreatedOrImportedProfiles} onBackToProfiles={startup.profiles.length > 0 ? returnToProfileConnection : undefined} />;
 
-  return <I18nProvider language={language} setLanguage={changeLanguage}><GlobalLanguageBridge /><TextEditContextMenu />
+  return <I18nProvider language={language} setLanguage={changeLanguage}><DesktopUpdateProvider><GlobalLanguageBridge /><TextEditContextMenu />
+    {startupReady && webgateStoreError && dismissedWebgateStoreError !== webgateStoreError && <aside className="startup-error webgate-store-warning" role="alert" data-i18n-ignore translate="no">
+      <p>{language === "ru" ? "Не удалось открыть сохранённые подключения Webgate. Сохранённые данные не изменены. Проверьте доступ к хранилищу этой учётной записи и повторите запуск; остальные профили доступны." : "Saved Webgate connections could not be opened. Stored data is unchanged. Check this account's storage access and restart; other profiles remain available."}</p>
+      <button type="button" onClick={() => setDismissedWebgateStoreError(webgateStoreError)} aria-label={language === "ru" ? "Скрыть уведомление" : "Dismiss notice"}>×</button>
+    </aside>}
     <div className="startup-route-layer" inert={initialConnectionPresetRequired || undefined} aria-hidden={initialConnectionPresetRequired || undefined}>
       {brandReady ? route : <section className="splash-screen" aria-hidden="true" />}
     </div>
     {initialConnectionPresetRequired && <InitialConnectionPresetDialog busy={initialPresetBusy} error={initialPresetError} onSelect={(preset) => void applyInitialConnectionPreset(preset)} />}
-  </I18nProvider>;
+  </DesktopUpdateProvider></I18nProvider>;
 }

@@ -3,6 +3,10 @@ import * as base from "./app-platform";
 export * from "./app-platform";
 
 const storageKey = "kaigen-contact-groups-runtime-profiles";
+const layoutKey = "kaigen-contact-sort-runtime-layout";
+const exerciseContactSort = new URLSearchParams(location.search).has("contactSort");
+let holdLayout = false;
+let releaseLayout: (() => void) | undefined;
 const saved: Record<string, any> = JSON.parse(sessionStorage.getItem(storageKey) ?? "{}");
 const saveCalls: Array<{ profileId: string; state: any; status: string }> = [];
 const heldOwners = new Set<string>();
@@ -25,6 +29,13 @@ export function contactGroupsSetScale(scale: number) {
 export function contactGroupsHoldSave(profileId: string) { heldOwners.add(profileId); }
 export function contactGroupsReleaseSaves() { for (const release of pendingSaves.splice(0)) release(); }
 
+export function contactSortHoldSave() { holdLayout = true; }
+export function contactSortSavePending() { return releaseLayout !== undefined; }
+export function contactSortReleaseSave() {
+  releaseLayout?.();
+  releaseLayout = undefined;
+}
+
 export function contactGroupsInjectEvent(friendNumber: number, text: string) {
   activity.set(friendNumber, Math.floor(Date.now() / 1000) + ++activitySequence);
   const id = base.geometryAppendUnreadMessage(friendNumber, text);
@@ -33,6 +44,13 @@ export function contactGroupsInjectEvent(friendNumber: number, text: string) {
 }
 
 export async function invoke<T>(command: string, args: any = {}): Promise<T> {
+  if (command === "save_layout_state" && exerciseContactSort) {
+    if (holdLayout && args.state.contactSort?.mode === "status") {
+      holdLayout = false;
+      await new Promise<void>(resolve => { releaseLayout = resolve; });
+    }
+    sessionStorage.setItem(layoutKey, JSON.stringify(args.state));
+  }
   if (command === "load_local_state") {
     const profileId = args.profileId ?? activeProfileId;
     if (saved[profileId]) {
@@ -59,6 +77,8 @@ export async function invoke<T>(command: string, args: any = {}): Promise<T> {
     })] as T;
   }
   if (command === "load_layout_state") {
+    const layout = exerciseContactSort ? sessionStorage.getItem(layoutKey) : null;
+    if (layout) result = { ...result, ...JSON.parse(layout) } as T;
     const scale = Number(sessionStorage.getItem("kaigen-contact-groups-runtime-scale"));
     if (scale) return { ...result, appearance: { ...(result as any)?.appearance, interfaceScale: scale } } as T;
   }

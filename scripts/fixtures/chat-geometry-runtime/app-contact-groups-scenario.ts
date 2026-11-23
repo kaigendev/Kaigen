@@ -1,4 +1,4 @@
-import { contactGroupsEvidence, contactGroupsInjectEvent, contactGroupsHoldSave, contactGroupsReleaseSaves } from "./app-contact-groups-platform";
+import { contactGroupsEvidence, contactGroupsInjectEvent, contactGroupsHoldSave, contactGroupsReleaseSaves, contactSortHoldSave, contactSortReleaseSave, contactSortSavePending, invoke as contactGroupsInvoke } from "./app-contact-groups-platform";
 
 type Stage = { id: number; kind: string; x?: number; y?: number; key?: string; text?: string; name?: string; done?: boolean };
 declare global { var __KAIGEN_CONTACT_GROUPS_STAGE__: Stage | undefined; }
@@ -49,11 +49,12 @@ async function submenu(hover = false) {
   else await click(trigger);
   await button(".contact-group-submenu button");
 }
-async function create(name: string, group: string) {
+async function create(name: string, group: string, holdSave = false) {
   await contextContact(name); await submenu();
   await click(await button(".contact-group-submenu button", "Создать группу…"));
   await wait(() => document.querySelector<HTMLInputElement>("#contact-group-name-input") ?? undefined, "group dialog");
   await input({ kind: "text", text: group });
+  if (holdSave) contactGroupsHoldSave(contactGroupsEvidence().activeProfileId);
   await click(await button(".file-confirm-card button[type=submit]"));
   return persisted(value => value?.groups.some((item: any) => item.name === group), "created group " + group, contactGroupsEvidence().activeProfileId);
 }
@@ -89,6 +90,15 @@ async function keyboardCancellation(name: string) {
 export async function runContactGroupsKeyboardScenario() {
   try { await keyboardCancellation("Keyboard"); return {ok:true,assertions,cases}; }
   catch(error) {await capture("groups-keyboard-failure.png");return {ok:false,assertions,cases,error:error instanceof Error?error.stack:String(error)};}
+}
+
+const ACK_SAVED_GROUP = "ACK Saved";
+async function historyRevisionCounts() {
+  const profileId = contactGroupsEvidence().activeProfileId;
+  return JSON.stringify(await Promise.all([0, 1, 2, 3].map(async friendNumber => {
+    const snapshot = await contactGroupsInvoke<{ revision: unknown; total: number }>("get_tox_messages_snapshot", { profileId, friendNumber, rangeOffset: 0, limit: 1 });
+    return [friendNumber, snapshot.revision, snapshot.total];
+  })));
 }
 
 export async function runContactGroupsScenario() {
@@ -217,8 +227,62 @@ export async function runContactGroupsScenario() {
     await click(await button(".contact-group-context-menu button", "Удалить группу"));
     await persisted(value => !value?.groups.some((item: any) => item.id === work2) && !value.assignments[B], "delete group unassigns its contacts");
     check(!!(await contact("Carol")), "deleted group contacts remain visible");
-    return { ok: true, assertions, cases, evidence: contactGroupsEvidence(), restartState: state() };
+    // Keep the acknowledged-create regression last: the existing driver reloads next.
+    const ackProfile = contactGroupsEvidence().activeProfileId;
+    const beforeAckState = JSON.stringify(state(ackProfile));
+    const beforeAckRegion = (await contact("Carol")).closest("[data-contact-group-region]")?.getAttribute("data-contact-group-region");
+    const beforeAckHistory = await historyRevisionCounts();
+    const saveStart = contactGroupsEvidence().saves.length;
+    let heldCreateError: unknown;
+    const heldCreate = create("Carol", ACK_SAVED_GROUP, true);
+    void heldCreate.catch(error => { heldCreateError = error; });
+    await wait(() => {
+      if (heldCreateError) throw heldCreateError;
+      return contactGroupsEvidence().saves.slice(saveStart).some(call => call.profileId === ackProfile && call.status === "pending" && call.state.contactGroups?.groups.some((group: any) => group.name === ACK_SAVED_GROUP)) ? true : undefined;
+    }, "create reaches the held owned save RPC");
+    check(!groupNames().includes(ACK_SAVED_GROUP), "held create does not expose a committed group before ACK");
+    check(JSON.stringify(state(ackProfile)) === beforeAckState, "held create leaves saved groups and membership unchanged before ACK");
+    check((await contact("Carol")).closest("[data-contact-group-region]")?.getAttribute("data-contact-group-region") === beforeAckRegion, "held create does not move the contact before ACK");
+    const busyForm = await wait(() => document.querySelector<HTMLFormElement>('.file-confirm-card[aria-busy="true"]') ?? undefined, "group dialog remains busy and open until ACK");
+    check(busyForm.querySelector<HTMLInputElement>("#contact-group-name-input")?.disabled === true && [...busyForm.querySelectorAll<HTMLButtonElement>("button")].every(button => button.disabled), "held group dialog disables name, cancel and submit");
+    check(await historyRevisionCounts() === beforeAckHistory, "held create does not mutate history revisions or row counts");
+    await capture("groups-save-pending.png");
+    contactGroupsReleaseSaves();
+    await heldCreate;
+    const ackState = await persisted(value => value?.groups.some((group: any) => group.name === ACK_SAVED_GROUP), "ACK create persisted", ackProfile);
+    const ackGroupId = ackState.groups.find((group: any) => group.name === ACK_SAVED_GROUP).id;
+    await wait(() => !document.querySelector("#contact-group-name-input") && groupNames().includes(ACK_SAVED_GROUP) ? true : undefined, "ACK commits the visible group and closes the dialog");
+    check(state(ackProfile).assignments[B] === ackGroupId && (await contact("Carol")).closest("[data-contact-group-region]")?.getAttribute("data-contact-group-region") === ackGroupId, "ACK commits membership together with the group");
+    const ackedCreateVisibleAt = Date.now();
+    check(await historyRevisionCounts() === beforeAckHistory, "acknowledged create leaves history revisions and row counts unchanged");
+    return { ok: true, assertions, cases, evidence: contactGroupsEvidence(), restartState: state(), ackedCreateVisibleAt };
   } catch (error) { contactGroupsReleaseSaves(); await capture("groups-failure.png"); return { ok: false, assertions, cases, error: error instanceof Error ? error.stack : String(error), evidence: contactGroupsEvidence() }; }
+}
+
+const statusSortButton = () => buttons(".contact-list-control")
+  .find(element => /sort(?:ed|ing)? by status|по статусу/iu.test(element.getAttribute("aria-label") ?? ""));
+
+export async function runContactSortScenario() {
+  const sort = await wait(() => {
+    const control = statusSortButton();
+    return control && !control.disabled ? control : undefined;
+  }, "hydrated contact sort control");
+  check(sort.getAttribute("aria-pressed") === "false", "initial saved sort is by activity");
+  contactSortHoldSave();
+  try {
+    await click(sort);
+    await wait(() => contactSortSavePending() ? true : undefined, "sort save is in flight");
+    check(sort.getAttribute("aria-pressed") === "false", "new sort is not displayed before the save is acknowledged");
+    check(sort.disabled, "concurrent sort actions cannot submit a stale direction");
+  } finally { contactSortReleaseSave(); }
+  await wait(() => statusSortButton()?.getAttribute("aria-pressed") === "true" ? true : undefined, "confirmed sort is visible");
+  return { ok: true, assertions, visibleAt: Date.now() };
+}
+
+export async function runContactSortReloadScenario() {
+  await wait(() => statusSortButton()?.getAttribute("aria-pressed") === "true" ? true : undefined, "confirmed sort is restored after reload");
+  check(document.documentElement.scrollWidth <= innerWidth + 1, "sort controls preserve viewport geometry");
+  return { ok: true, assertions, reloadDocumentStartedAt: performance.timeOrigin };
 }
 
 export async function runContactGroupsReloadScenario() {
@@ -227,7 +291,17 @@ export async function runContactGroupsReloadScenario() {
   check(state().enabled === true, "reload retains enabled flag");
   check(headers().map(element => element.dataset.contactGroupId).join() === state().order.join(), "reload retains system position and user order");
   await capture("groups-restart.png");
-  return { ok: true, assertions, evidence: contactGroupsEvidence() };
+  const ackGroup = state().groups.find((group: any) => group.name === ACK_SAVED_GROUP);
+  check(!!ackGroup && state().assignments[B] === ackGroup.id, "immediate document reload retains the acknowledged group and membership");
+  check((await contact("Carol")).closest("[data-contact-group-region]")?.getAttribute("data-contact-group-region") === ackGroup.id, "reloaded acknowledged membership is visible");
+  const beforeRemoveHistory = await historyRevisionCounts();
+  await contextContact("Carol"); await submenu();
+  await click(await button(".contact-group-submenu button", "Убрать из группы"));
+  await persisted(value => !value?.assignments[B] && !value?.groups.some((group: any) => group.id === ackGroup.id), "normal unassign persists and removes the empty acknowledged group");
+  await wait(() => !groupNames().includes(ACK_SAVED_GROUP) ? true : undefined, "normal unassign commits the visible removal");
+  check(!!(await contact("Carol")), "normal unassign keeps the contact");
+  check(await historyRevisionCounts() === beforeRemoveHistory, "normal unassign does not mutate history revisions or row counts");
+  return { ok: true, assertions, evidence: contactGroupsEvidence(), reloadDocumentStartedAt: performance.timeOrigin };
 }
 
 export async function runContactGroupsGeometryScenario(scale: number, height: number, width: number) {

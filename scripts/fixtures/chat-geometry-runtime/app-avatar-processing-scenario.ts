@@ -1,4 +1,4 @@
-import { normalizeProfileAvatar, profileAvatarToToxPng, readAvatarDataUrl, PROFILE_AVATAR_SOURCE_MAX_BYTES } from "../../../src/avatar";
+import { normalizeProfileAvatar, readAvatarDataUrl, PROFILE_AVATAR_SOURCE_MAX_BYTES } from "../../../src/avatar";
 import { avatarFixture } from "./avatar-fixture-images";
 const sha = async (bytes: ArrayBuffer | Uint8Array) => [...new Uint8Array(await crypto.subtle.digest("SHA-256", bytes))].map(value => value.toString(16).padStart(2, "0")).join("");
 const settled = async (promise: Promise<unknown>) => Promise.race([
@@ -36,7 +36,7 @@ export async function runActualAvatarProcessingScenario() {
       finally { HTMLCanvasElement.prototype.toBlob = nativeToBlob; }
     }
     const source = inputs[0];
-    const tox = await profileAvatarToToxPng(source.dataUrl);
+    const { bytes: tox } = await normalizeProfileAvatar(source.dataUrl);
     check(tox.length <= 65536 && [...tox.slice(0,8)].join() === "137,80,78,71,13,10,26,10", "public Tox conversion returns a real bounded PNG");
     const corrupt = await settled(normalizeProfileAvatar("data:image/png;base64,AAAA"));
     check(corrupt.status === "rejected", "actual corrupt-image decode rejects");

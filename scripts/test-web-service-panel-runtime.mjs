@@ -9,11 +9,12 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 const root = fileURLToPath(new URL("..", import.meta.url));
 const options = new Map();
 for (let i = 2; i < process.argv.length; i += 2) {
-  assert(["--playwright-module", "--chromium-executable", "--evidence-root"].includes(process.argv[i]));
+  assert(["--playwright-module", "--chromium-executable", "--evidence-root", "--scenario"].includes(process.argv[i]));
   assert(process.argv[i + 1] && !options.has(process.argv[i]));
   options.set(process.argv[i], process.argv[i + 1]);
 }
 for (const key of ["--playwright-module", "--chromium-executable", "--evidence-root"]) assert(options.has(key), key);
+assert([undefined, "layout", "workspace-navigation", "workspace-link-recovery"].includes(options.get("--scenario")), "Unknown scenario");
 const evidence = path.resolve(options.get("--evidence-root"));
 assert(!await fs.stat(evidence).catch(() => null), "Fresh evidence directory required");
 await fs.mkdir(evidence, { recursive: true });
@@ -21,11 +22,166 @@ const identity = async (filename) => {
   const bytes = await fs.readFile(filename);
   return { path: filename, bytes: bytes.length, sha256: createHash("sha256").update(bytes).digest("hex") };
 };
+async function workspaceNavigationScenarios(browser, url, report) {
+  const a = "a".repeat(48), b = "b".repeat(48), c = "c".repeat(48);
+  const ready = (page, identifier) => page.locator(`[data-fixture-identity="${identifier}"]`).waitFor();
+  const settle = page => page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  const log = page => page.evaluate(() => JSON.parse(sessionStorage.getItem("fixture-navigation-log") ?? "[]"));
+  const context = await browser.newContext({ locale: "en", viewport: { width: 390, height: 844 } });
+  await context.addInitScript(() => {
+    window.navigationDocumentId = crypto.randomUUID();
+    // Installed before the product listener, so a persisted restore is kept
+    // even when WebRoot immediately reloads its retired document.
+    window.addEventListener("pageshow", event => {
+      if (!event.isTrusted) return;
+      const events = JSON.parse(sessionStorage.getItem("fixture-pageshow-log") ?? "[]");
+      events.push({ persisted: event.persisted, hash: location.hash, documentId: window.navigationDocumentId });
+      sessionStorage.setItem("fixture-pageshow-log", JSON.stringify(events.slice(-64)));
+    });
+  });
+  const page = await context.newPage(), errors = [];
+  page.on("pageerror", error => errors.push(String(error)));
+  try {
+    const base = url + "/?navigation=1";
+    await page.goto(base + "#k=" + a); await ready(page, a);
+    const initialDocumentId = await page.evaluate(() => window.navigationDocumentId);
+    await page.evaluate(() => window.dispatchEvent(new PageTransitionEvent("pageshow", { persisted: false })));
+    await settle(page);
+    assert.equal(await page.evaluate(() => window.navigationDocumentId), initialDocumentId, "Normal pageshow must not reload the document");
+    await page.evaluate(() => {
+      window.oldNavigationDocument = true;
+      window.workspaceNavigationFixture.hold("prepare");
+      window.workspaceNavigationFixture.hold("leave");
+    });
+    // A real anchor performs normal same-document navigation. No reload or
+    // direct controller call is issued by this test.
+    await page.locator("#fixture-link-b").click();
+    await page.waitForFunction(() => document.body.inert);
+    assert.equal(await page.locator(`[data-fixture-identity="${a}"]`).count(), 1, "Old app remains mounted while its save drains");
+    assert.equal(await page.evaluate(() => { const button = document.querySelector("#fixture-portal-action"); button.focus(); return document.activeElement === button; }), false, "Body portals cannot receive focus during navigation");
+    await page.keyboard.press("Enter");
+    assert(!(await log(page)).includes("portal-action"), "Inert portal cannot issue a user action");
+    await page.goto(base + "#k=" + c);
+    await page.evaluate(() => window.dispatchEvent(new PageTransitionEvent("pageshow", { persisted: true })));
+    await settle(page);
+    assert.equal(await page.evaluate(() => window.oldNavigationDocument), true, "Rapid hash selection and cache resume wait for the old save before retirement");
+    await page.evaluate(() => window.workspaceNavigationFixture.release("prepare"));
+    await page.waitForFunction(() => JSON.parse(sessionStorage.getItem("fixture-navigation-log") ?? "[]").includes("leave"));
+    assert.equal(await page.evaluate(() => window.oldNavigationDocument), true, "Document remains until local drain finishes");
+    await page.evaluate(() => window.workspaceNavigationFixture.release("leave"));
+    await ready(page, c);
+    assert.equal(await page.evaluate(() => !!window.oldNavigationDocument), false, "Product router replaces the document");
+    const events = await log(page);
+    assert(events.indexOf("prepare") < events.indexOf("prepared") && events.indexOf("prepared") < events.indexOf("leave"));
+    assert(!events.includes("lock") && !events.includes("close"), "Navigation does not revoke the shared workspace");
+    report.cases.push({ scenario: "ordinary-anchor-latest-target", status: "PASS", preservedMountedSave: true, blockedPortal: true });
+    await page.goBack(); await ready(page, b);
+    assert.equal(await page.evaluate(() => document.body.inert), false, "Back cannot revive an inert retired document");
+    await page.goForward(); await ready(page, c);
+    assert.equal(await page.evaluate(() => document.body.inert), false, "Forward cannot revive an inert retired document");
+    const pageshowEvents = await page.evaluate(() => JSON.parse(sessionStorage.getItem("fixture-pageshow-log") ?? "[]"));
+    const persistedRestores = pageshowEvents.filter(event => event.persisted);
+    report.backForwardCache = { requestedEnabled: true, persistedRestores, pageshowEvents,
+      coverage: persistedRestores.length ? "OBSERVED" : "NOT_OBSERVED",
+      boundary: "Only trusted browser pageshow events count; synthetic event branch checks are not actual BFCache proof." };
+    report.cases.push({ scenario: "browser-back-forward-workspace", status: "PASS" });
+
+    await page.locator("#fixture-link-a").click(); await ready(page, a);
+    await page.evaluate(() => { window.oldNavigationDocument = true; window.workspaceNavigationFixture.failPrepare = true; });
+    await page.locator("#fixture-link-b").click();
+    await page.locator('.web-workspace-notice[role="alert"]').waitFor();
+    assert.equal(new URL(page.url()).hash, "#k=" + a, "Failed save restores the old workspace address");
+    assert.equal(await page.evaluate(() => window.oldNavigationDocument && !document.body.inert), true, "Failed save restores the same interactive document");
+    await ready(page, a);
+    await page.locator("#fixture-portal-action").click();
+    assert.equal((await log(page)).at(-1), "portal-action", "Portal interaction is restored on failure");
+    report.cases.push({ scenario: "failed-prepare-restores-url-and-ui", status: "PASS" });
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+
+  for (const pending of ["lookup", "login", "create", "create-post"]) {
+    const context = await browser.newContext({ locale: "en", viewport: { width: 390, height: 844 } });
+    const page = await context.newPage(), errors = [];
+    page.on("pageerror", error => errors.push(String(error)));
+    try {
+      const base = url + "/?navigation=1" + (pending === "lookup" ? "&hold=lookup" : pending === "login" ? "&auth=1" : "");
+      await page.goto(base + (pending.startsWith("create") ? "" : "#k=" + a));
+      await page.waitForFunction(() => !!window.workspaceNavigationFixture);
+      await page.evaluate(name => { window.workspaceNavigationFixture.hold("leave"); if (name !== "lookup") window.workspaceNavigationFixture.hold(name); }, pending);
+      if (pending === "login") {
+        await page.locator('.web-gate-card input[type="password"]').fill("disposable-password");
+        await page.locator(".web-gate-card .web-primary").click();
+      } else if (pending.startsWith("create")) {
+        const passwords = page.locator('.web-gate-card input[type="password"]');
+        await passwords.nth(0).fill("disposable-password"); await passwords.nth(1).fill("disposable-password");
+        await page.locator(".web-gate-card > form:not(.web-existing-workspace) > .web-primary").click();
+      }
+      await page.waitForFunction(name => JSON.parse(sessionStorage.getItem("fixture-navigation-log") ?? "[]").includes(name), pending);
+      await page.goto(base + "#k=" + b);
+      if (pending === "create-post") {
+        await page.waitForFunction(() => location.hash === "" && !document.body.inert);
+        await page.locator(".web-error").waitFor();
+        assert.match(await page.locator(".web-error").textContent(), /Wait for the current action/u);
+        assert(!(await log(page)).includes("cancel-opening"), "A submitted allocation keeps its original operation alive");
+        await page.evaluate(() => window.workspaceNavigationFixture.release("create-post"));
+        await ready(page, a);
+        assert.equal(new URL(page.url()).hash, "#k=" + a, "Created workspace remains reachable after rejected navigation");
+        assert.deepEqual(errors, []);
+        report.cases.push({ scenario: "submitted-create-preserves-confirmed-link", status: "PASS" });
+        continue;
+      }
+      await page.waitForFunction(() => document.body.inert);
+      await page.evaluate(name => window.workspaceNavigationFixture.release(name), pending);
+      await settle(page);
+      assert.equal(new URL(page.url()).hash, "#k=" + b, `${pending}: late completion cannot replace the selected URL`);
+      assert.equal(await page.locator("[data-created-workspace]").count(), 0, `${pending}: late completion cannot mount the previous workspace`);
+      await page.evaluate(() => window.workspaceNavigationFixture.release("leave"));
+      await ready(page, b);
+      assert.deepEqual(errors, []);
+      report.cases.push({ scenario: "late-" + pending + "-completion", status: "PASS" });
+    } finally { await context.close(); }
+  }
+}
+async function workspaceLinkRecoveryScenario(browser, url, report) {
+  const stale = "d".repeat(48), valid = "a".repeat(48), token = "c".repeat(32);
+  const key = "kaigen.web.launch.token.v1." + token;
+  const entry = `${url}/?navigation=1&auth=1&launchRecovery=1&kaigen-launch=${token}`;
+  const context = await browser.newContext({ locale: "en", viewport: { width: 390, height: 844 }, hasTouch: true });
+  try {
+    await context.addInitScript(({ key, stale }) => {
+      Object.defineProperty(navigator, "standalone", { value: true });
+      if (!localStorage.getItem(key)) localStorage.setItem(key, JSON.stringify({ v: 1, identifier: stale }));
+    }, { key, stale });
+    const page = await context.newPage();
+    await page.goto(entry);
+    await page.getByText("The workspace link is missing or invalid.", { exact: true }).waitFor();
+    const form = page.locator(".web-existing-workspace");
+    const link = form.locator("input");
+    const submit = form.getByRole("button", { name: "Open workspace" });
+    const readBinding = () => page.evaluate(key => JSON.parse(localStorage.getItem(key)).identifier, key);
+    assert.equal(await readBinding(), stale);
+    await link.fill(`https://other.invalid/#k=${valid}`);
+    await submit.click();
+    await form.getByRole("alert").waitFor();
+    assert.equal(await readBinding(), stale, "Rejected links must preserve the install binding");
+    assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1));
+    await link.fill(`${url}/#k=${valid}`);
+    await submit.click();
+    await page.locator('input[autocomplete="current-password"]').waitFor();
+    assert.equal(new URL(page.url()).hash, `#k=${valid}`);
+    assert.equal(await readBinding(), valid, "Only the confirmed replacement is persisted");
+    await page.goto(entry);
+    await page.locator('input[autocomplete="current-password"]').waitFor();
+    assert.equal(new URL(page.url()).hash, `#k=${valid}`, "The installed selector uses the recovered link on its next launch");
+    report.cases.push({ scenario: "workspace-link-recovery", status: "PASS", viewportWidth: 390, passwordRequired: true });
+  } finally { await context.close(); }
+}
+
 const report = { startedAt: new Date().toISOString(), status: "RUNNING", sources: [], cases: [],
   boundary: "Actual WebRoot/CSS and browser-input in disposable Chromium; controlled service fixture verifies actual WebRoot UI, not live backend admission; live workspace creation is separate evidence." };
 let browser, server;
 try {
-  for (const name of ["src/web/WebRoot.tsx", "src/web/WebRoot.css", "src/App.css", "src/theme.css", "src/platform/browser-input.ts", "src/contextMenuCoordinator.ts",
+  for (const name of ["src/web/WebRoot.tsx", "src/web/workspaceLaunch.ts", "src/web/workspaceNavigation.ts", "src/web/WebRoot.css", "src/App.css", "src/theme.css", "src/platform/browser-input.ts", "src/contextMenuCoordinator.ts",
     "scripts/test-web-service-panel-runtime.mjs", ...["index.html", "entry.tsx", "session.ts", "RootApp.tsx"].map(name => "scripts/fixtures/web-service-panel-runtime/" + name)]) {
     report.sources.push({ ...await identity(path.join(root, name)), path: name });
   }
@@ -55,8 +211,12 @@ try {
   await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
   const url = "http://127.0.0.1:" + server.address().port;
   const { chromium } = await import(pathToFileURL(options.get("--playwright-module")).href);
-  browser = await chromium.launch({ executablePath: options.get("--chromium-executable"), headless: true });
-  for (const language of ['ru', 'en']) for (const viewport of [{width:320,height:401},{width:390,height:844},{width:800,height:320},{width:1280,height:800}]) {
+  browser = await chromium.launch({ executablePath: options.get("--chromium-executable"), headless: true,
+    ...(options.get("--scenario") === "workspace-navigation" ? { ignoreDefaultArgs: ["--disable-back-forward-cache"] } : {}),
+  });
+  if (options.get("--scenario") === "workspace-navigation") await workspaceNavigationScenarios(browser, url, report);
+  else if (options.get("--scenario") === "workspace-link-recovery") await workspaceLinkRecoveryScenario(browser, url, report);
+  else for (const language of ['ru', 'en']) for (const viewport of [{width:320,height:401},{width:390,height:844},{width:800,height:320},{width:1280,height:800}]) {
     const context = await browser.newContext({ locale: language, viewport, hasTouch: true });
     const page = await context.newPage();
     const errors=[]; page.on('pageerror', error=>errors.push(String(error)));

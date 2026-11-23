@@ -141,7 +141,7 @@ assert.deepEqual(
 for (const policyName of ["csp", "devCsp"]) {
   const policy = tauriConfig.app?.security?.[policyName];
   assert.ok(policy && typeof policy === "object", `${policyName} must be an explicit directive map`);
-  assert.equal(policy["script-src"], "'self'");
+  assert.equal(policy["script-src"], "'self' 'wasm-unsafe-eval'", "bundled media permits WASM compilation, never JavaScript eval");
   assert.equal(policy["script-src-attr"], "'none'");
   assert.equal(policy["object-src"], "'none'");
   assert.equal(policy["base-uri"], "'none'");
@@ -150,8 +150,8 @@ for (const policyName of ["csp", "devCsp"]) {
   assert.equal(policy["form-action"], "'none'");
   assert.equal(policy["worker-src"], "'self'");
   assert.equal(policy["require-trusted-types-for"], "'script'");
-  assert.equal(policy["trusted-types"], "kaigen-spellcheck-worker");
-  assert.doesNotMatch(policy["script-src"], /(?:unsafe-inline|unsafe-eval|\*|data:|blob:|https?:)/u);
+  assert.equal(policy["trusted-types"], "kaigen-spellcheck-worker kaigen-chat-media-worker");
+  assert.doesNotMatch(policy["script-src"], /(?:'unsafe-inline'|'unsafe-eval'|\*|data:|blob:|https?:)/u);
 }
 assert.deepEqual(tauriConfig.app.security.assetProtocol.scope, []);
 assert.equal(tauriConfig.app.windows[0].dragDropEnabled, true);
@@ -248,7 +248,7 @@ const importProfile = rust.slice(
 for (const lifecycle of [createProfile, importProfile]) {
   assert.match(lifecycle, /native_file_grants[\s\S]*grants\.clear_all\(\)/u);
 }
-assert.match(app, /onDrop=\{\(event\) => \{\s*if \(platformCapabilities\.nativeFilesystem \|\| !hasFileDragType\(event\.dataTransfer\.types\)\) return;\s*event\.preventDefault\(\);\s*event\.stopPropagation\(\);[\s\S]*if \(canStageFileForActiveChat\) stageFiles\(event\.dataTransfer\.files\)/u);
+assert.match(app, /onDrop=\{\(event\) => \{\s*if \(nativeProfileFilesystem \|\| !hasFileDragType\(event\.dataTransfer\.types\)\) return;\s*event\.preventDefault\(\);\s*event\.stopPropagation\(\);[\s\S]*if \(canStageFileForActiveChat\) stageFiles\(event\.dataTransfer\.files\)/u);
 
 const descriptor = nativeGrants.slice(
   nativeGrants.indexOf("pub(crate) struct NativeFileSelection"),
@@ -263,10 +263,10 @@ assert.match(nativeGrants, /DEFAULT_MAX_AGGREGATE_BYTES/u);
 
 for (const source of [webServer, webInstaller]) {
   assert.match(source, /Content-Security-Policy/u);
-  assert.match(source, /script-src 'self'/u);
+  assert.match(source, /script-src 'self' 'wasm-unsafe-eval';/u);
   assert.match(source, /script-src-attr 'none'/u);
   assert.match(source, /require-trusted-types-for 'script'/u);
-  assert.match(source, /trusted-types kaigen-spellcheck-worker/u);
+  assert.match(source, /trusted-types kaigen-spellcheck-worker kaigen-notifications-worker kaigen-transfer-cache-worker kaigen-chat-media-worker(?:;|")/u);
   assert.match(source, /frame-ancestors 'none'/u);
 }
 

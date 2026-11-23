@@ -12,6 +12,12 @@ readonly SLOT_B_PORT='8788'
 
 ACTION='install'
 BUNDLE_ROOT=''
+ARCHIVE_PATH=''
+ARCHIVE_SHA256=''
+ARCHIVE_STAGE=''
+EXPECTED_CURRENT_RELEASE=''
+CHECK_SLOT=''
+RECOVERY_BOOT=false
 NON_INTERACTIVE=false
 INSTALL_ROOT="${KAIGEN_INSTALL_ROOT:-}"
 TEST_MODE="${KAIGEN_INSTALL_TEST:-0}"
@@ -23,7 +29,7 @@ require_command() { command -v "$1" >/dev/null 2>&1 || fail "Required command is
 
 usage() {
   cat <<'EOF'
-Usage: install-kaigen-web.sh [install|update|rollback|uninstall] --bundle DIR [--non-interactive]
+Usage: install-kaigen-web.sh [install|update|rollback|uninstall] (--bundle DIR | --archive FILE --archive-sha256 SHA256) [--non-interactive]
 
 The bundle must contain release-id, manifest.sha256, payload/bin/kaigen-webd,
 payload/lib/Kaigen/libtoxcore.so.2.24.0, payload/TorExpertBundle and
@@ -36,8 +42,13 @@ EOF
 
 while (($#)); do
   case "$1" in
-    install|update|rollback|uninstall) ACTION="$1" ;;
+    install|update|rollback|uninstall|recover-pending|check-slot|prepare-recovery) ACTION="$1" ;;
+    --boot) RECOVERY_BOOT=true ;;
+    --slot) shift; (($#)) || fail '--slot requires a value'; CHECK_SLOT="$1" ;;
+    --expected-current-release) shift; (($#)) || fail '--expected-current-release requires a value'; EXPECTED_CURRENT_RELEASE="$1" ;;
     --bundle) shift; (($#)) || fail '--bundle requires a directory'; BUNDLE_ROOT="$1" ;;
+    --archive) shift; (($#)) || fail '--archive requires a file'; ARCHIVE_PATH="$1" ;;
+    --archive-sha256) shift; (($#)) || fail '--archive-sha256 requires a digest'; ARCHIVE_SHA256="$1" ;;
     --non-interactive) NON_INTERACTIVE=true ;;
     -h|--help) usage; exit 0 ;;
     *) fail "Unknown argument: $1" ;;
@@ -50,6 +61,11 @@ if [[ "$TEST_MODE" != '1' ]]; then
   [[ -z "$INSTALL_ROOT" ]] || fail 'KAIGEN_INSTALL_ROOT is test-only.'
 fi
 
+if [[ "$TEST_MODE" != '1' && "$ACTION" != recover-pending && "$ACTION" != check-slot ]]; then
+  exec 9>/run/kaigen-webd-install.lock
+  flock -n 9 || fail 'Another Kaigen Web installation transaction is running.'
+fi
+
 readonly ETC_DIR="$(root_path /etc/kaigen-webd)"
 readonly SLOT_DIR="$ETC_DIR/slots"
 readonly STATE_FILE="$(root_path /var/lib/kaigen-webd/installer-state)"
@@ -60,10 +76,13 @@ readonly CURRENT_LINK="$(root_path /opt/kaigen-webd/current)"
 readonly NGINX_AVAILABLE="$(root_path /etc/nginx/sites-available/kaigen-web)"
 readonly NGINX_ENABLED="$(root_path /etc/nginx/sites-enabled/kaigen-web)"
 readonly NGINX_UPSTREAM="$(root_path /etc/nginx/kaigen-webd-upstream.conf)"
+readonly CERTBOT_DIR="$(root_path /etc/letsencrypt)"
+readonly CERTBOT_DEPLOY_HOOK="$CERTBOT_DIR/renewal-hooks/deploy/kaigen-web-nginx"
 readonly SERVICE_UNIT="$(root_path /etc/systemd/system/kaigen-webd@.service)"
 readonly LIMITS_DIR="$(root_path /etc/systemd/system/kaigen-webd@.service.d)"
 readonly LIMITS_FILE="$LIMITS_DIR/limits.conf"
 readonly MOUNT_UNIT="$(root_path '/etc/systemd/system/run-kaigen\x2dwebd.mount')"
+readonly UPDATE_JOURNAL="$DATA_DIR/updater-transaction"
 readonly ROUTE_SNAPSHOTS_DIR="$ETC_DIR/installer-route-snapshots"
 readonly ROUTE_SCHEMA_BUILD_ID='build-id-v1'
 readonly ROUTE_SCHEMA_LEGACY='legacy-v0'
@@ -77,9 +96,8 @@ ROUTE_TRANSACTION_ACTIVE_SLOT=''
 ROUTE_TRANSACTION_OLD_STOPPED=false
 ROUTE_TRANSACTION_CANDIDATE_SLOT=''
 ROUTE_TRANSACTION_CANDIDATE_START_ATTEMPTED=false
-ROUTE_TRANSACTION_OLD_STOP_KIND='clean0'
-ROUTE_TRANSACTION_LEGACY_RECEIPT_SHA=''
-ROUTE_TRANSACTION_LEGACY_TARGET=''
+CERTBOT_LINEAGE=''
+CERTBOT_WEBROOT=''
 
 check_debian() {
   local os_release
@@ -100,7 +118,59 @@ check_live_dependencies() {
   fi
 }
 
+admit_archive() {
+  [[ -n "$ARCHIVE_PATH" && -z "$BUNDLE_ROOT" && "$ARCHIVE_SHA256" =~ ^[a-fA-F0-9]{64}$ ]] || fail 'Archive admission requires a digest and no --bundle.'
+  require_command python3
+  ARCHIVE_STAGE="$(mktemp -d /var/tmp/kaigen-web-archive.XXXXXX)"
+  chmod 700 "$ARCHIVE_STAGE"
+  python3 - "$ARCHIVE_PATH" "$ARCHIVE_SHA256" "$ARCHIVE_STAGE/bundle" <<'PY_ARCHIVE'
+import hashlib, os, pathlib, re, stat, sys, tarfile
+archive, digest, destination = sys.argv[1:]
+if not re.fullmatch(r'[a-fA-F0-9]{64}', digest): raise SystemExit('Invalid archive SHA-256')
+flags = os.O_RDONLY | os.O_NOFOLLOW
+fd = os.open(archive, flags)
+with os.fdopen(fd, 'rb') as source:
+    if not stat.S_ISREG(os.fstat(source.fileno()).st_mode): raise SystemExit('Archive is not a regular file')
+    h = hashlib.sha256()
+    while chunk := source.read(1024 * 1024): h.update(chunk)
+    if h.hexdigest() != digest.lower(): raise SystemExit('Archive SHA-256 mismatch')
+    source.seek(0)
+    with tarfile.open(fileobj=source, mode='r:gz') as package:
+        members = package.getmembers()
+        names, total = set(), 0
+        if len(members) > 100000: raise SystemExit('Archive member limit exceeded')
+        for member in members:
+            name = member.name.removeprefix('./').rstrip('/')
+            if name in ('', '.') and member.isdir(): continue
+            parts = pathlib.PurePosixPath(name).parts
+            if (not parts or name.startswith('/') or any(x in ('.', '..') for x in parts)
+                    or not re.fullmatch(r'[A-Za-z0-9_./+@-]+', name) or name in names):
+                raise SystemExit('Unsafe or duplicate archive path')
+            if not (member.isfile() or member.isdir()): raise SystemExit('Unsupported archive member type')
+            if member.size < 0: raise SystemExit('Invalid member size')
+            total += member.size
+            if total > 2 * 1024**3: raise SystemExit('Archive expanded size limit exceeded')
+            names.add(name)
+        destination = pathlib.Path(destination)
+        destination.mkdir(mode=0o700, parents=False, exist_ok=False)
+        for member in members:
+            name = member.name.removeprefix('./').rstrip('/')
+            if name in ('', '.') and member.isdir(): continue
+            target = destination.joinpath(name)
+            target.parent.mkdir(parents=True, exist_ok=True, mode=0o755)
+            if member.isdir():
+                target.mkdir(exist_ok=True, mode=0o755)
+                continue
+            stream = package.extractfile(member)
+            with open(target, 'xb') as output:
+                while chunk := stream.read(1024 * 1024): output.write(chunk)
+            os.chmod(target, 0o755 if member.mode & 0o111 else 0o644)
+PY_ARCHIVE
+  BUNDLE_ROOT="$ARCHIVE_STAGE/bundle"
+}
+
 validate_bundle() {
+  if [[ -n "$ARCHIVE_PATH" && -z "$ARCHIVE_STAGE" ]]; then admit_archive; fi
   [[ -n "$BUNDLE_ROOT" ]] || fail '--bundle is required for install and update.'
   BUNDLE_ROOT="$(cd -- "$BUNDLE_ROOT" && pwd -P)"
   [[ -f "$BUNDLE_ROOT/release-id" ]] || fail 'Bundle release-id is missing.'
@@ -141,7 +211,11 @@ validate_bundle() {
   listed_set="$(printf '%s\n' "${listed_paths[@]}" | LC_ALL=C sort -u)"
   actual_set="$(cd -- "$BUNDLE_ROOT" && find . -type f ! -name manifest.sha256 -printf '%P\n' | LC_ALL=C sort -u)"
   [[ "$listed_set" == "$actual_set" ]] || fail 'Bundle manifest is not an exact file inventory.'
-  (cd -- "$BUNDLE_ROOT" && sha256sum --check --strict manifest.sha256 >/dev/null) || fail 'Bundle manifest verification failed.'
+  # Archive admission verifies the authenticated package once; the inventory above
+  # still enforces its payload structure. Directory admission remains unchanged.
+  if [[ -z "$ARCHIVE_PATH" ]]; then
+    (cd -- "$BUNDLE_ROOT" && sha256sum --check --strict manifest.sha256 >/dev/null) || fail 'Bundle manifest verification failed.'
+  fi
 }
 
 prompt_value() {
@@ -192,11 +266,12 @@ collect_site_settings() {
 
 atomic_write() {
   local target="$1" mode="$2" temporary
-  mkdir -p -- "$(dirname -- "$target")"
-  temporary="$(mktemp "$(dirname -- "$target")/.kaigen-write.XXXXXX")"
-  cat > "$temporary"
-  chmod "$mode" "$temporary"
-  mv -fT -- "$temporary" "$target"
+  mkdir -p -- "$(dirname -- "$target")" || return 1
+  temporary="$(mktemp "$(dirname -- "$target")/.kaigen-write.XXXXXX")" || return 1
+  if ! cat > "$temporary" || ! chmod "$mode" "$temporary" || ! mv -fT -- "$temporary" "$target"; then
+    rm -f -- "$temporary"
+    return 1
+  fi
 }
 
 require_managed_or_absent() {
@@ -301,7 +376,11 @@ persist_route_snapshot() {
   validate_route_snapshot "$staging" "$release_id" "$route_schema"
   if [[ -e "$target" ]]; then
     validate_route_snapshot "$target" "$release_id" "$route_schema"
-    cmp -s -- "$staging/snapshot.sha256" "$target/snapshot.sha256" || fail 'Existing route snapshot has different content.'
+    if ! cmp -s -- "$staging/snapshot.sha256" "$target/snapshot.sha256"; then
+      # Certificate renewal belongs to the host, so a release may return with
+      # the same route snapshot except for the installer-owned HTTP locations.
+      [[ -n "$CERTBOT_WEBROOT" ]] && same_route_snapshot_with_current_acme "$staging" "$target" || fail 'Existing route snapshot has different content.'
+    fi
     rm -rf -- "$staging"
   else
     mv -- "$staging" "$target"
@@ -379,13 +458,7 @@ route_precommit_unchanged() {
   [[ "$(current_route_pointer)" == "$ROUTE_TRANSACTION_CURRENT" ]] || return 1
   if [[ "$TEST_MODE" != '1' ]]; then
     if [[ "$ROUTE_TRANSACTION_OLD_STOPPED" == 'true' ]]; then
-      if [[ "$ROUTE_TRANSACTION_OLD_STOP_KIND" == 'legacy033-snapshot-normal-close' ]]; then
-        local legacy_phase='stopped'
-        if [[ "$ROUTE_TRANSACTION_CANDIDATE_START_ATTEMPTED" == 'true' ]]; then legacy_phase='retired'; fi
-        legacy033_attestation "$legacy_phase" "$ROUTE_TRANSACTION_ACTIVE_SLOT" "$ROUTE_TRANSACTION_LEGACY_TARGET" "$ROUTE_TRANSACTION_LEGACY_RECEIPT_SHA" >/dev/null || return 1
-      else
-        backend_is_quiescent "$ROUTE_TRANSACTION_ACTIVE_SLOT" true || return 1
-      fi
+      backend_is_quiescent "$ROUTE_TRANSACTION_ACTIVE_SLOT" true || return 1
     else
       systemctl is-active --quiet "kaigen-webd@$ROUTE_TRANSACTION_ACTIVE_SLOT.service" || return 1
     fi
@@ -396,6 +469,7 @@ abort_route_transaction() {
   local status=$?
   [[ "$ROUTE_TRANSACTION_ACTIVE" == 'true' ]] || return
   trap - EXIT
+  cleanup_candidate_workspace_check
   if ! route_precommit_unchanged; then
     printf 'ERROR: Shared-route transaction failed after route commit or concurrent drift; refusing automatic reconstruction.\n' >&2
     exit "$status"
@@ -409,6 +483,7 @@ abort_route_transaction() {
   if [[ "$TEST_MODE" != '1' ]]; then
     systemctl daemon-reload
     if [[ "$ROUTE_TRANSACTION_OLD_STOPPED" == 'true' ]]; then
+      select_candidate_journal "$ROUTE_TRANSACTION_ACTIVE_SLOT"
       start_candidate_backend "$ROUTE_TRANSACTION_ACTIVE_SLOT" "$ROUTE_TRANSACTION_RELEASE"
       wait_for_candidate_backend "$ROUTE_TRANSACTION_ACTIVE_SLOT" "$(slot_port "$ROUTE_TRANSACTION_ACTIVE_SLOT")"
     fi
@@ -416,11 +491,172 @@ abort_route_transaction() {
     systemctl reload nginx
     local port
     port="$(slot_port "$ROUTE_TRANSACTION_ACTIVE_SLOT")"
-    curl --fail --silent --show-error "http://127.0.0.1:$port/healthz" >/dev/null
-    curl --fail --silent --show-error "http://127.0.0.1:$port/readyz" >/dev/null
+    curl --fail --silent --show-error --connect-timeout 3 --max-time 5 "http://127.0.0.1:$port/healthz" >/dev/null
+    curl --fail --silent --show-error --connect-timeout 3 --max-time 5 "http://127.0.0.1:$port/readyz" >/dev/null
   fi
+  clear_update_journal
   printf 'Shared-route pre-commit state restored after failed activation.\n' >&2
   exit "$status"
+}
+
+prepare_update_recovery() {
+  [[ "$TEST_MODE" != '1' ]] || return 0
+  local directory="$DATA_DIR/updater" self backend
+  self=$(readlink -f -- "${BASH_SOURCE[0]}")
+  [[ ! -L "$directory" ]] || fail 'Unsafe updater directory.'
+  mkdir -p "$directory"
+  [[ "$(stat -c '%u:%g' "$directory")" == '0:0' ]] || fail 'Untrusted updater directory.'
+  chmod 700 "$directory"
+  if [[ "$self" != "$directory/legacy-adapter.sh" ]]; then
+    [[ ! -L "$directory/legacy-adapter.new" ]] || fail 'Unsafe updater staging path.'
+    install -o root -g root -m 700 "$self" "$directory/legacy-adapter.new"
+    mv -Tf "$directory/legacy-adapter.new" "$directory/legacy-adapter.sh"; sync -f "$directory"
+  fi
+  cat > /etc/systemd/system/kaigen-webd-recovery.service <<EOF
+[Unit]
+Description=Recover interrupted Kaigen Web updates before any writer
+Before=nginx.service kaigen-webd@a.service kaigen-webd@b.service
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/bash --noprofile --norc -p $directory/legacy-adapter.sh recover-pending --boot
+TimeoutStartSec=120
+UMask=0077
+[Install]
+WantedBy=multi-user.target
+EOF
+  for backend in a b; do
+    mkdir -p "/etc/systemd/system/kaigen-webd@$backend.service.d"
+    cat > "/etc/systemd/system/kaigen-webd@$backend.service.d/kaigen-update-recovery.conf" <<EOF
+[Unit]
+Requires=kaigen-webd-recovery.service
+After=kaigen-webd-recovery.service
+[Service]
+ExecCondition=+/bin/bash --noprofile --norc -p $directory/legacy-adapter.sh check-slot --slot $backend
+EOF
+  done
+  systemctl daemon-reload
+  systemctl enable kaigen-webd-recovery.service
+  systemctl start kaigen-webd-recovery.service
+}
+
+transaction_owner_alive() {
+  local pid start boot
+  pid=$(cat "$UPDATE_JOURNAL/owner-pid") start=$(cat "$UPDATE_JOURNAL/owner-start") boot=$(cat "$UPDATE_JOURNAL/boot-id")
+  [[ "$pid" =~ ^[1-9][0-9]*$ && "$start" =~ ^[0-9]+$ && "$boot" == "$(cat /proc/sys/kernel/random/boot_id)" && -r /proc/$pid/stat ]] || return 1
+  [[ "$(awk '{print $22}' "/proc/$pid/stat")" == "$start" ]]
+}
+
+validate_update_journal() {
+  [[ -d "$UPDATE_JOURNAL" && ! -L "$UPDATE_JOURNAL" ]] || fail 'Unsafe update journal.'
+  [[ "$(stat -c '%u:%g:%a' "$UPDATE_JOURNAL")" == '0:0:700' ]] || fail 'Untrusted update journal.'
+  [[ -z "$(find "$UPDATE_JOURNAL" -mindepth 1 ! -type f -print -quit)" ]] || fail 'Unsupported update journal entry.'
+  [[ -z "$(find "$UPDATE_JOURNAL" -type f \( ! -user root -o ! -group root -o ! -perm 0600 \) -print -quit)" ]] || fail 'Untrusted update journal entry.'
+}
+
+persist_update_journal() {
+  [[ "$TEST_MODE" != '1' ]] || return 0
+  [[ ! -e "$UPDATE_JOURNAL" && ! -L "$UPDATE_JOURNAL" && ! -e "$UPDATE_JOURNAL.new" ]] || fail 'An interrupted update needs recovery.'
+  mkdir -m 700 "$UPDATE_JOURNAL.new"
+  install -m 600 "$STATE_FILE" "$UPDATE_JOURNAL.new/state-before"
+  printf '%s\n' "$ROUTE_TRANSACTION_RELEASE" > "$UPDATE_JOURNAL.new/release"
+  printf '%s\n' "$ROUTE_TRANSACTION_SCHEMA" > "$UPDATE_JOURNAL.new/schema"
+  printf '%s\n' "$ROUTE_TRANSACTION_ACTIVE_SLOT" > "$UPDATE_JOURNAL.new/slot"
+  printf '%s\n' "$ROUTE_TRANSACTION_SNAPSHOT" > "$UPDATE_JOURNAL.new/snapshot"
+  printf '%s\n' "$$" > "$UPDATE_JOURNAL.new/owner-pid"
+  awk '{print $22}' "/proc/$$/stat" > "$UPDATE_JOURNAL.new/owner-start"
+  cat /proc/sys/kernel/random/boot_id > "$UPDATE_JOURNAL.new/boot-id"
+  printf '%s\n' '-' > "$UPDATE_JOURNAL.new/candidate"
+  chmod 600 "$UPDATE_JOURNAL.new/"*
+  sync -f "$UPDATE_JOURNAL.new"
+  mv -T "$UPDATE_JOURNAL.new" "$UPDATE_JOURNAL"; sync -f "$DATA_DIR"
+}
+
+select_candidate_journal() {
+  [[ "$TEST_MODE" != '1' ]] || return 0
+  validate_update_journal
+  [[ "$1" =~ ^[ab]$ ]] || fail 'Invalid journal candidate slot.'
+  printf '%s\n' "$1" > "$UPDATE_JOURNAL/candidate.new"
+  chmod 600 "$UPDATE_JOURNAL/candidate.new"
+  mv -T "$UPDATE_JOURNAL/candidate.new" "$UPDATE_JOURNAL/candidate"; sync -f "$UPDATE_JOURNAL"
+}
+
+clear_update_journal() {
+  [[ "$TEST_MODE" != '1' ]] || return 0
+  [[ ! -e "$UPDATE_JOURNAL" ]] || { validate_update_journal; rm -rf -- "$UPDATE_JOURNAL"; sync -f "$DATA_DIR"; }
+}
+
+check_selected_slot() {
+  [[ "$CHECK_SLOT" =~ ^[ab]$ ]] || exit 1
+  if [[ -e "$UPDATE_JOURNAL" ]]; then
+    validate_update_journal
+    transaction_owner_alive || exit 1
+    [[ "$(cat "$UPDATE_JOURNAL/candidate")" == "$CHECK_SLOT" ]]; return
+  fi
+  secure_state_storage
+  require_managed_or_absent "$STATE_FILE"
+  . "$STATE_FILE"
+  [[ "$ACTIVE_SLOT" =~ ^[ab]$ && "$ACTIVE_SLOT" == "$CHECK_SLOT" ]]
+}
+
+recover_pending_transaction() {
+  local release schema slot snapshot peer unit pending
+  if [[ "$ACTION" == recover-pending ]]; then
+    exec 7>/run/kaigen-webd-install.lock
+    if ! flock -n 7; then
+      # The preparing installer starts the empty boot gate while retaining fd9.
+      if [[ "$RECOVERY_BOOT" == true && ! -e "$UPDATE_JOURNAL" && ! -e "$UPDATE_JOURNAL.new" ]]; then return 0; fi
+      fail 'Another update transaction is live; recovery refused.'
+    fi
+  fi
+  [[ "$TEST_MODE" != '1' ]] || return 0
+  cleanup_candidate_workspace_check
+  if [[ ! -e "$UPDATE_JOURNAL" && -e "$UPDATE_JOURNAL.new" ]]; then
+    [[ -d "$UPDATE_JOURNAL.new" && ! -L "$UPDATE_JOURNAL.new" && "$(stat -c '%u:%g:%a' "$UPDATE_JOURNAL.new")" == '0:0:700' ]] || fail 'Unsafe journal staging directory.'
+    [[ -z "$(find "$UPDATE_JOURNAL.new" -mindepth 1 \( ! -type f -o ! -user root -o ! -group root \) -print -quit)" ]] || fail 'Unsafe journal staging contents.'
+    rm -rf -- "$UPDATE_JOURNAL.new"; sync -f "$DATA_DIR"
+  fi
+  if [[ -e "$UPDATE_JOURNAL" ]]; then
+    validate_update_journal
+    transaction_owner_alive && fail 'The journal owner is still running; recovery refused.'
+    release=$(cat "$UPDATE_JOURNAL/release") schema=$(cat "$UPDATE_JOURNAL/schema") slot=$(cat "$UPDATE_JOURNAL/slot") snapshot=$(cat "$UPDATE_JOURNAL/snapshot")
+    [[ "$release" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$ && "$slot" =~ ^[ab]$ && "$schema" =~ ^(build-id-v1|legacy-v0)$ && "$snapshot" == "$ROUTE_SNAPSHOTS_DIR/$release" ]] || fail 'Invalid update journal binding.'
+    validate_route_snapshot "$snapshot" "$release" "$schema"
+    [[ "$(snapshot_value "$snapshot" activeSlot)" == "$slot" ]] || fail 'Journal slot differs from its snapshot.'
+    for peer in a b; do
+      unit="kaigen-webd@$peer.service"
+      if systemctl is-active --quiet "$unit"; then
+        [[ "$RECOVERY_BOOT" != true ]] || fail 'A backend is already live during boot recovery.'
+        stop_backend_for_handoff "$peer"
+      fi
+    done
+    if [[ -e "$NGINX_ENABLED.restore" || -L "$NGINX_ENABLED.restore" ]]; then
+      [[ -L "$NGINX_ENABLED.restore" && "$(readlink "$NGINX_ENABLED.restore")" == '../sites-available/kaigen-web' ]] || fail 'Unmanaged Nginx recovery pointer.'
+      rm "$NGINX_ENABLED.restore"
+    fi
+    restore_route_snapshot "$snapshot" "$release" "$schema"
+    atomic_copy "$snapshot/nginx-upstream" "$NGINX_UPSTREAM" 0644
+    atomic_copy "$UPDATE_JOURNAL/state-before" "$STATE_FILE" 0600
+    rm -f -- "$CURRENT_LINK.new" "$CURRENT_LINK.restore" "$STATE_FILE.new"
+    ln -s "releases/$release" "$CURRENT_LINK.restore"
+    mv -Tf "$CURRENT_LINK.restore" "$CURRENT_LINK"
+    sync -f "$INSTALL_DIR"; sync -f "$ETC_DIR"; sync -f "$DATA_DIR"
+    clear_update_journal
+    load_state
+    systemctl daemon-reload
+    systemctl disable "kaigen-webd@$(other_slot "$slot").service" 2>/dev/null || true
+    systemctl enable "kaigen-webd@$slot.service"
+    if [[ "$RECOVERY_BOOT" == true ]]; then systemctl --no-block start "kaigen-webd@$slot.service"
+    else
+      systemctl start "kaigen-webd@$slot.service"
+      wait_for_candidate_backend "$slot" "$(slot_port "$slot")"
+      nginx -t; systemctl reload nginx
+    fi
+    note 'ROLLBACK_PASS interrupted legacy update recovered.'
+  elif [[ "$RECOVERY_BOOT" == true ]]; then
+    load_state
+    systemctl --no-block start "kaigen-webd@$ACTIVE_SLOT.service"
+  fi
 }
 
 begin_route_transaction() {
@@ -438,15 +674,14 @@ begin_route_transaction() {
   ROUTE_TRANSACTION_OLD_STOPPED=false
   ROUTE_TRANSACTION_CANDIDATE_SLOT=''
   ROUTE_TRANSACTION_CANDIDATE_START_ATTEMPTED=false
-  ROUTE_TRANSACTION_OLD_STOP_KIND='clean0'
-  ROUTE_TRANSACTION_LEGACY_RECEIPT_SHA=''
-  ROUTE_TRANSACTION_LEGACY_TARGET=''
+  persist_update_journal
   ROUTE_TRANSACTION_ACTIVE=true
   trap abort_route_transaction EXIT
 }
 
 end_route_transaction() {
   ROUTE_TRANSACTION_ACTIVE=false
+  if [[ -n "$ARCHIVE_STAGE" ]]; then rm -rf -- "$ARCHIVE_STAGE"; ARCHIVE_STAGE=''; fi
   trap - EXIT
 }
 
@@ -608,6 +843,162 @@ set \$kaigen_web_build_id $build_id;
 EOF
 }
 
+detect_certbot_webroot() {
+  local lineage renewal webroot
+  [[ "$INSTALL_TLS_CERT" =~ ^/etc/letsencrypt/live/([A-Za-z0-9][A-Za-z0-9._-]*)/fullchain\.pem$ ]] || return 0
+  lineage="/etc/letsencrypt/live/${BASH_REMATCH[1]}"
+  [[ "$INSTALL_TLS_KEY" == "$lineage/privkey.pem" ]] || return 0
+  renewal="$CERTBOT_DIR/renewal/${lineage##*/}.conf"
+  [[ -f "$renewal" && ! -L "$renewal" ]] || return 0
+  if ! webroot="$(awk -v host="$INSTALL_HOSTNAME" -v cert="$INSTALL_TLS_CERT" -v key="$INSTALL_TLS_KEY" '
+    function trim(s) { sub(/^[[:space:]]+/, "", s); sub(/[[:space:]]+$/, "", s); return s }
+    { line = trim($0) }
+    line == "[renewalparams]" { section = "params"; next }
+    line == "[[webroot_map]]" && section == "params" { section = "map"; next }
+    line ~ /^\[/ { section = "other"; next }
+    line ~ /^[#;]/ || !index(line, "=") { next }
+    {
+      name = trim(substr(line, 1, index(line, "=") - 1))
+      value = trim(substr(line, index(line, "=") + 1))
+      if (section == "" && name == "fullchain" && value == cert) fullchain++
+      if (section == "" && name == "privkey" && value == key) privkey++
+      if (section == "params" && name == "authenticator" && value == "webroot") auth++
+      if (section == "params" && name == "webroot_path") { path = value; paths++ }
+      if (section == "map" && tolower(name) == tolower(host)) { mapped = value; maps++ }
+    }
+    END {
+      if (fullchain != 1 || privkey != 1 || auth != 1) exit 1
+      if (maps == 1) print mapped
+      else if (maps == 0 && paths == 1) { sub(/,[[:space:]]*$/, "", path); print trim(path) }
+      else print ""
+    }
+  ' "$renewal")"; then return 0; fi
+  webroot="${webroot%/}"
+  if [[ ! "$webroot" =~ ^/[A-Za-z0-9_./-]+$ || "$webroot/" == *//* || "$webroot/" == */../* || "$webroot/" == */./* ]]; then
+    printf 'WARNING: Certbot webroot for %s is missing or unsupported; check the existing renewal configuration.\n' "${lineage##*/}" >&2
+    return 0
+  fi
+  CERTBOT_LINEAGE="$lineage"
+  CERTBOT_WEBROOT="$webroot"
+}
+
+nginx_http_locations() {
+  if [[ -n "$CERTBOT_WEBROOT" ]]; then
+    cat <<EOF
+    # Begin Kaigen Web ACME locations.
+    location ^~ /.well-known/acme-challenge/ {
+        root $CERTBOT_WEBROOT;
+        disable_symlinks on;
+        default_type text/plain;
+        if (\$uri !~ "^/\\.well-known/acme-challenge/[A-Za-z0-9_-]+\$") { return 404; }
+        limit_except GET { deny all; }
+        try_files \$uri =404;
+    }
+    location / {
+        return 301 https://\$host\$request_uri;
+    }
+    # End Kaigen Web ACME locations.
+EOF
+  else
+    printf '%s\n' '    return 301 https://$host$request_uri;'
+  fi
+}
+
+# Refresh only the installer-generated HTTP locations from a historical site.
+# Other snapshots, including sites with customized port 80 routes, stay exact.
+site_with_current_acme() {
+  local site="$1" locations
+  locations="$(nginx_http_locations)"
+  KAIGEN_ACME_LOCATIONS="$locations" awk -v host="$INSTALL_HOSTNAME" '
+    NR == 2 { managed = ($0 == "server {") }
+    NR == 3 { managed = managed && ($0 == "    listen 80;") }
+    NR == 4 { managed = managed && ($0 == "    listen [::]:80;") }
+    NR == 5 { managed = managed && ($0 == "    server_name " host ";") }
+    NR == 6 && managed && $0 == "    return 301 https://$host$request_uri;" { legacy = $0; next }
+    NR == 6 && managed && $0 == "    # Begin Kaigen Web ACME locations." { acme = 1 }
+    acme == 1 {
+      block = block $0 "\n"
+      if ($0 == "    # End Kaigen Web ACME locations.") acme = 2
+      next
+    }
+    legacy || acme == 2 {
+      expected = ENVIRON["KAIGEN_ACME_LOCATIONS"] "\n"
+      previous = block
+      sub(/\n        root \/[A-Za-z0-9_.\/-]+;/, "\n        root WEBROOT;", expected)
+      sub(/\n        root \/[A-Za-z0-9_.\/-]+;/, "\n        root WEBROOT;", previous)
+      if ($0 == "}" && (legacy || previous == expected)) print ENVIRON["KAIGEN_ACME_LOCATIONS"]
+      else if (legacy) print legacy
+      else printf "%s", block
+      legacy = ""; acme = 0
+    }
+    { print }
+    END { if (acme) printf "%s", block }
+  ' "$site"
+}
+
+same_route_snapshot_with_current_acme() {
+  local staging="$1" existing="$2" staging_hashes existing_hashes staging_site existing_site
+  staging_hashes="$(awk '$2 != "nginx-site"' "$staging/snapshot.sha256")" &&
+    existing_hashes="$(awk '$2 != "nginx-site"' "$existing/snapshot.sha256")" &&
+    [[ "$staging_hashes" == "$existing_hashes" ]] &&
+    staging_site="$(site_with_current_acme "$staging/nginx-site")" &&
+    existing_site="$(site_with_current_acme "$existing/nginx-site")" &&
+    [[ "$staging_site" == "$existing_site" ]]
+}
+
+certbot_hook_directory_is_safe() {
+  local create_missing="$1" directory mode
+  for directory in "$CERTBOT_DIR" "$CERTBOT_DIR/renewal-hooks" "$CERTBOT_DIR/renewal-hooks/deploy"; do
+    [[ ! -L "$directory" ]] || return 1
+    if [[ ! -e "$directory" ]]; then
+      [[ "$create_missing" == 'true' ]] && install -d -m 0755 -- "$directory" || return 1
+    fi
+    [[ -d "$directory" && "$(stat -c %u -- "$directory")" == '0' ]] || return 1
+    mode="$(stat -c %a -- "$directory")" || return 1
+    (( (8#$mode & 0022) == 0 )) || return 1
+  done
+}
+
+certbot_hook_is_managed() {
+  [[ -f "$CERTBOT_DEPLOY_HOOK" && ! -L "$CERTBOT_DEPLOY_HOOK" ]] &&
+    [[ "$(stat -c '%u:%a' -- "$CERTBOT_DEPLOY_HOOK")" == '0:700' ]] &&
+    grep -Fqx -- "$MANAGED_MARKER" "$CERTBOT_DEPLOY_HOOK"
+}
+
+write_certbot_deploy_hook() {
+  atomic_write "$CERTBOT_DEPLOY_HOOK" 0700 <<EOF
+#!/bin/bash
+$MANAGED_MARKER
+set -eu
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+[[ \$EUID -eq 0 && "\${RENEWED_LINEAGE:-}" == '$CERTBOT_LINEAGE' ]] || exit 0
+exec 9>/run/kaigen-webd-install.lock
+flock -w 300 9
+site=/etc/nginx/sites-available/kaigen-web
+[[ "\$(readlink -- /etc/nginx/sites-enabled/kaigen-web)" == '../sites-available/kaigen-web' ]] || exit 0
+[[ -f "\$site" && ! -L "\$site" ]] || exit 0
+grep -Fqx -- '$MANAGED_MARKER' "\$site" || exit 0
+grep -Fqx -- '    ssl_certificate $CERTBOT_LINEAGE/fullchain.pem;' "\$site" || exit 0
+grep -Fqx -- '    ssl_certificate_key $CERTBOT_LINEAGE/privkey.pem;' "\$site" || exit 0
+nginx -t
+systemctl reload nginx
+EOF
+}
+
+enable_certbot_renewal() {
+  [[ "$TEST_MODE" != '1' && -n "$CERTBOT_LINEAGE" ]] || return 0
+  if ! command -v certbot >/dev/null 2>&1; then
+    printf 'WARNING: Certbot is missing; automatic renewal for %s was not enabled.\n' "${CERTBOT_LINEAGE##*/}" >&2
+  elif ! certbot_hook_directory_is_safe true ||
+       { [[ -e "$CERTBOT_DEPLOY_HOOK" || -L "$CERTBOT_DEPLOY_HOOK" ]] && ! certbot_hook_is_managed; }; then
+    printf 'WARNING: Certbot deploy hook directory or destination is unmanaged or unsafe: %s\n' "$CERTBOT_DEPLOY_HOOK" >&2
+  elif ! write_certbot_deploy_hook; then
+    printf 'WARNING: Could not write Certbot deploy hook: %s\n' "$CERTBOT_DEPLOY_HOOK" >&2
+  elif ! systemctl enable --now certbot.timer; then
+    printf 'WARNING: Could not enable certbot.timer; check the installed Certbot systemd unit.\n' >&2
+  fi
+}
+
 write_nginx_site() {
   require_managed_or_absent "$NGINX_AVAILABLE"
   atomic_write "$NGINX_AVAILABLE" 0644 <<EOF
@@ -616,7 +1007,7 @@ server {
     listen 80;
     listen [::]:80;
     server_name $INSTALL_HOSTNAME;
-    return 301 https://\$host\$request_uri;
+$(nginx_http_locations)
 }
 
 server {
@@ -629,7 +1020,7 @@ server {
     root /opt/kaigen-webd/current/ui;
     index index.html;
     client_max_body_size 32m;
-    add_header Content-Security-Policy "default-src 'none'; base-uri 'none'; connect-src 'self'; font-src 'self' data:; form-action 'none'; frame-ancestors 'none'; frame-src 'none'; img-src 'self' blob: data:; manifest-src 'self'; media-src 'self' blob:; object-src 'none'; script-src 'self'; script-src-attr 'none'; style-src 'self' 'unsafe-inline'; worker-src 'self'; require-trusted-types-for 'script'; trusted-types kaigen-spellcheck-worker kaigen-notifications-worker" always;
+    add_header Content-Security-Policy "default-src 'none'; base-uri 'none'; connect-src 'self'; font-src 'self' data:; form-action 'none'; frame-ancestors 'none'; frame-src 'none'; img-src 'self' blob: data:; manifest-src 'self'; media-src 'self' blob:; object-src 'none'; script-src 'self' 'wasm-unsafe-eval'; script-src-attr 'none'; style-src 'self' 'unsafe-inline'; worker-src 'self'; require-trusted-types-for 'script'; trusted-types kaigen-spellcheck-worker kaigen-notifications-worker kaigen-transfer-cache-worker kaigen-chat-media-worker" always;
     add_header Cross-Origin-Opener-Policy "same-origin" always;
     add_header Cross-Origin-Resource-Policy "same-origin" always;
     add_header Cache-Control "no-store" always;
@@ -649,6 +1040,20 @@ server {
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto https;
+    }
+    location ~ "^/(?:space/|w/)?[A-Za-z0-9_-]{40,80}/api(?:/|$)" {
+        proxy_pass \$kaigen_web_backend;
+        proxy_http_version 1.1;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header Origin \$http_origin;
+        proxy_set_header Authorization \$http_authorization;
+        proxy_set_header Connection "";
+        proxy_buffering off;
+        proxy_request_buffering off;
+        proxy_read_timeout 300s;
     }
     location /api/ {
         default_type application/json;
@@ -806,254 +1211,12 @@ backend_is_quiescent() {
   return 0
 }
 
-# 0.3.3-only first transition. Remove with the 0.3.4 legacy removal change.
-# No CLI/env override: the task issuer seals one private proof for exact c6.
-legacy033_attestation() {
-  local mode="$1" slot="$2" target="$3" receipt_sha="${4:-}"
-  [[ "$TEST_MODE" != '1' && "$ACTION" == 'update' && "$ROUTE_TRANSACTION_ACTIVE" == 'true' ]] || return 1
-  [[ "$ROUTE_TRANSACTION_RELEASE" == 'web-033-28388778fba5-c6bf12af0893-r1' && "$slot" == 'b' ]] || return 1
-  # Retired readback is only legal after the full pre-start proof and a
-  # successor launch attempt. The successor may already own/write shared data.
-  if [[ "$mode" == 'retired' ]]; then
-    [[ "$ROUTE_TRANSACTION_OLD_STOPPED" == 'true' && "$ROUTE_TRANSACTION_OLD_STOP_KIND" == 'legacy033-snapshot-normal-close' && "$ROUTE_TRANSACTION_CANDIDATE_START_ATTEMPTED" == 'true' ]] || return 1
-    [[ "$slot" == "$ROUTE_TRANSACTION_ACTIVE_SLOT" && "$target" == "$ROUTE_TRANSACTION_LEGACY_TARGET" && "$receipt_sha" == "$ROUTE_TRANSACTION_LEGACY_RECEIPT_SHA" ]] || return 1
-  fi
-  require_command python3
-  python3 -I - "$mode" "$slot" "$target" "$receipt_sha" <<'PY_LEGACY033'
-# This block is inserted verbatim into the candidate installer, not run by this authoring step.
-import ctypes
-import hashlib
-import json
-import os
-from pathlib import Path
-import re
-import stat
-import subprocess
-import sys
-import time
-
-LEGACY = 'web-033-28388778fba5-c6bf12af0893-r1'
-LEGACY_MANIFEST = '51273b430f4cd177a650fc53d0c94563f5df827d8634d2cb487dc900fcccbf34'
-# EXPECTED digest from immutable c6 package D177; NOT an installed observation.
-LEGACY_BINARY = 'ee0beaaf71e323e72b7d021730f6b32cea10950c21fb1dc5417d363b4badf42f'
-UNIT = 'kaigen-webd@b.service'
-ROOTS = ('/var/lib/kaigen-webd/disk', '/run/kaigen-webd/ram', '/run/kaigen-webd/active')
-KINDS = {
- '579e07f4d7977d6b5635d701361b8f98868adfc918fc035fec5323997a0818ec': 'approved-volatile-loss',
- 'b9f85164f4120d55036657d4521025fa880b1a733dac64ca412d927da8f537b1': 'normal-close',
- 'e5bbe9545f90cee41ac8737b72e47cdb6a8ab840225932d56440fe63adb38ac2': 'approved-volatile-loss',
- 'acc16fe650d7b965f972b233cc0c08494aa758c5b330437072b7c3f300cde2f9': 'normal-close',
- '3a390b5f378c1b52464e1450f33b9731bd3a2b2e7841b6a6a3637013cd8bb423': 'normal-close',
-}
-AUTHORIZED_LOSS = {
- '579e07f4d7977d6b5635d701361b8f98868adfc918fc035fec5323997a0818ec': 'only-old69-unknown-volatile-state;preserve-existing-encrypted-kai',
- 'e5bbe9545f90cee41ac8737b72e47cdb6a8ab840225932d56440fe63adb38ac2': 'only-old82-unknown-volatile-state;preserve-existing-encrypted-kai',
-}
-
-PROFILE_IDS = {
- 'b9f85164f4120d55036657d4521025fa880b1a733dac64ca412d927da8f537b1': {'db56ed3dba4caf6b162a9b06c6b5522a936126bb66d254b1a6c52fc96dbdf9c2','9e5701ee09291be96a76e6dab7ebeed5e9faa720c324ee74cb565829bd7cff2d'},
- 'acc16fe650d7b965f972b233cc0c08494aa758c5b330437072b7c3f300cde2f9': {'577d05d22f0850408584610574081bd6e583d6572bcebbf9c7bd5096d11d7698'},
- '3a390b5f378c1b52464e1450f33b9731bd3a2b2e7841b6a6a3637013cd8bb423': {'cd1049a5e8cd4791e73d1788bce67d9db3f3800ffd0fd0ad35df8bd75b5aad7b'},
-}
-
-def require(value, message):
-    if not value:
-        raise RuntimeError(message)
-
-def sha(data):
-    return hashlib.sha256(data).hexdigest()
-
-def digest(value):
-    return isinstance(value, str) and re.fullmatch('[0-9a-f]{64}', value) is not None
-
-def load_json(data):
-    def pairs(items):
-        result = {}
-        for key, value in items:
-            require(key not in result, 'Duplicate proof field')
-            result[key] = value
-        return result
-    return json.loads(data, object_pairs_hook=pairs)
-
-def ordinary(path, private=False):
-    s = path.lstat()
-    require(path.resolve() == path and stat.S_ISREG(s.st_mode) and s.st_nlink == 1, 'Unsafe proof/input file')
-    if private:
-        require(s.st_uid == 0 and stat.S_IMODE(s.st_mode) == 0o600, 'Proof owner/mode mismatch')
-    return s
-
-def properties():
-    names = ('Id','ActiveState','SubState','MainPID','ControlPID','Result','ExecMainCode','ExecMainStatus','ControlGroup','KillMode','KillSignal','ExecMainStartTimestampMonotonic')
-    p = subprocess.run(['systemctl','show',UNIT,*['--property='+n for n in names]], check=True, capture_output=True, text=True)
-    result = dict(line.split('=',1) for line in p.stdout.splitlines() if '=' in line)
-    require(set(result) == set(names) and result['Id'] == UNIT, 'Incomplete unit identity')
-    return result
-
-def root_state():
-    result = {}
-    for name in ROOTS:
-        path = Path(name)
-        s = path.lstat()
-        require(path.resolve() == path and stat.S_ISDIR(s.st_mode), 'Unsafe storage root')
-        entries = []
-        control_files = []
-        for child in path.iterdir():
-            c = child.lstat()
-            if name == ROOTS[0] and child.name == '.web-push-vapid.pk8':
-                require(child.resolve() == child and stat.S_ISREG(c.st_mode) and c.st_nlink == 1 and stat.S_IMODE(c.st_mode) == 0o600, 'Unsafe VAPID control file')
-                control_files.append({'nameSha256':sha(child.name.encode()),'dev':c.st_dev,'inode':c.st_ino,'type':'regular','mode':stat.S_IMODE(c.st_mode),'nlink':c.st_nlink})
-                continue
-            require(re.fullmatch('[0-9a-f]{64}', child.name) and stat.S_ISDIR(c.st_mode), 'Unexplained namespace/object')
-            key = sha(child.name.encode())
-            require(key in KINDS, 'Unexplained namespace')
-            entries.append(key)
-        result[name] = {'dev':s.st_dev,'inode':s.st_ino,'entries':sorted(entries),'controlFiles':control_files}
-    return result
-
-def check_snapshots(proof):
-    # Only the exact reviewed encrypted/container files. Never logical data, keys or arbitrary paths.
-    require(proof['snapshotFiles'], 'No saved snapshot bindings')
-    covered = set()
-    for item in proof['snapshotFiles']:
-        path = Path(item['path'])
-        owner = None
-        for root in ROOTS:
-            try:
-                rel = path.relative_to(root)
-            except ValueError:
-                continue
-            require(len(rel.parts) >= 2 and re.fullmatch('[0-9a-f]{64}', rel.parts[0]), 'Invalid snapshot namespace')
-            owner = sha(rel.parts[0].encode())
-            require(owner in KINDS and item['namespace'] == owner, 'Snapshot namespace mismatch')
-            break
-        require(owner is not None and digest(item['sha256']), 'Snapshot outside reviewed roots')
-        s = ordinary(path)
-        require(s.st_size == item['bytes'] and sha(path.read_bytes()) == item['sha256'], 'Saved snapshot changed')
-        covered.add(owner)
-    require(set(KINDS) <= covered, 'Protected/approved-loss ciphertext binding absent')
-
-def check_contract(proof):
-    require(proof['legacySource'] == {'archiveSha256':'c6bf12af0893dbde22ffc56eea7ea9b6b486dc3f77196240abaafcc196e2ea71','tree':'28388778fba59232e6a10c75d565bb0e25ca3bbe'}, 'Wrong legacy Source binding')
-    require(proof['schema'] == 33 and proof['kind'] == 'legacy033-snapshot-normal-close', 'Wrong proof kind')
-    require(proof['residualContract'] == 'old-drop-errors-unreported;not-clean0;not-aggregate-final-io', 'Wrong legacy assurance')
-    require(digest(proof['reviewPacketSha256']) and re.fullmatch('[0-9a-f]{32}',proof['nonce']), 'Unsealed review identity')
-    require(type(proof['issuedAt']) is int and type(proof['expiresAt']) is int and proof['issuedAt'] <= int(time.time()) <= proof['expiresAt'] <= proof['issuedAt']+900, 'Stale proof')
-    evidence = proof['originalEvidence']
-    require(evidence and all(re.fullmatch('[A-Za-z0-9._-]+',k) and digest(v) for k,v in evidence.items()), 'Missing original evidence bindings')
-    def ref(name):
-        require(name in evidence, 'Missing original receipt')
-    records = proof['namespaces']
-    require(len(records) == 5 and {r['directoryNameSha256'] for r in records} == set(KINDS), 'Incomplete five-namespace review')
-    for r in records:
-        require(r['disposition'] == KINDS[r['directoryNameSha256']], 'Unapproved namespace disposition')
-        ref(r['inventoryReceipt'])
-        if r['disposition'] == 'normal-close':
-            require(r['profiles'] and len({p['profileIdSha256'] for p in r['profiles']}) == len(r['profiles']), 'Missing profile inventory')
-            require({p['profileIdSha256'] for p in r['profiles']} == PROFILE_IDS[r['directoryNameSha256']], 'Protected profile inventory mismatch')
-            for p in r['profiles']:
-                require(digest(p['profileIdSha256']) and re.fullmatch('[0-9A-F]{64}',p['selfPublicKey']), 'Invalid captured profile identity')
-                ref(p['coreSaveReceipt']); ref(p['uiPersistReceipt'])
-            require(r['closeResponse'] == {'status':200,'closed':True}, 'Normal close not confirmed')
-            ref(r['closeReceipt']); ref(r['authScreenReceipt']); ref(r['callerDrainReceipt'])
-            require(r['directoryNameSha256'] not in proof['roots'][ROOTS[2]]['entries'], 'Closed namespace still active')
-        else:
-            ref(r['directHumanApprovalReceipt'])
-            require(r['authorizedLoss'] == AUTHORIZED_LOSS[r['directoryNameSha256']], 'Wrong namespace-specific loss authorization')
-    require(proof['actorFence'] == 'normal-close-drained;no-relogin-until-transition', 'Caller fence missing')
-
-mode, old_slot, target, expected_receipt_sha = sys.argv[1:]
-require(os.geteuid() == 0 and mode in ('consume','stopped','retired'), 'Invalid legacy proof invocation')
-require(old_slot == 'b' and target != LEGACY and re.fullmatch('[A-Za-z0-9][A-Za-z0-9._-]{0,79}',target), 'Legacy scope mismatch')
-require(digest(LEGACY_BINARY), 'Legacy c6 binary pin not sealed')
-parent = Path('/etc/kaigen-webd')
-ps = parent.lstat()
-require(parent.resolve() == parent and stat.S_ISDIR(ps.st_mode) and ps.st_uid == 0 and not ps.st_mode & 0o022, 'Unsafe proof parent')
-name = 'legacy033-transition.ready' if mode == 'consume' else 'legacy033-transition.consumed'
-pfd = os.open(parent,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
-fd = None
-try:
-    require((os.fstat(pfd).st_dev,os.fstat(pfd).st_ino) == (ps.st_dev,ps.st_ino), 'Proof parent changed')
-    before = os.stat(name,dir_fd=pfd,follow_symlinks=False)
-    require(stat.S_ISREG(before.st_mode) and before.st_nlink == 1 and before.st_uid == 0 and stat.S_IMODE(before.st_mode) == 0o600 and before.st_size <= 131072, 'Unsafe proof inode')
-    fd = os.open(name,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK,dir_fd=pfd)
-    s = os.fstat(fd)
-    require((s.st_dev,s.st_ino) == (before.st_dev,before.st_ino), 'Proof changed while opening')
-    with os.fdopen(os.dup(fd),'rb') as stream:
-        raw = stream.read(131073)
-    require(len(raw) == s.st_size, 'Incomplete proof read')
-    claim = parent/'legacy033-transition.issued'
-    ordinary(claim,private=True)
-    require(claim.read_bytes() == (sha(raw)+'\n').encode(), 'Issuance claim mismatch')
-    proof = load_json(raw)
-    if mode == 'consume':
-        check_contract(proof)
-    else:
-        require(sha(raw) == expected_receipt_sha, 'Consumed proof changed')
-    old = proof['old']
-    require(old['cgroup'] == '/system.slice/system-kaigen\\x2dwebd.slice/kaigen-webd@b.service', 'Wrong cgroup path')
-    require(old['release'] == LEGACY and old['manifestSha256'] == LEGACY_MANIFEST and old['binarySha256'] == LEGACY_BINARY and old['unit'] == UNIT and old['pid'] == 41108 and old['startTicks'] == '1437078', 'Not exact legacy c6 process')
-    require(Path('/proc/sys/kernel/random/boot_id').read_text().strip() == old['bootId'], 'Boot changed')
-    release = Path('/opt/kaigen-webd/releases')
-    ordinary(release/LEGACY/'.manifest.sha256'); ordinary(release/LEGACY/'bin/kaigen-webd'); ordinary(release/target/'.manifest.sha256')
-    require(sha((release/LEGACY/'.manifest.sha256').read_bytes()) == LEGACY_MANIFEST and sha((release/LEGACY/'bin/kaigen-webd').read_bytes()) == LEGACY_BINARY, 'Legacy program changed')
-    require(proof['target']['release'] == target and digest(proof['target']['manifestSha256']) and sha((release/target/'.manifest.sha256').read_bytes()) == proof['target']['manifestSha256'], 'Target manifest changed')
-    unit = properties()
-    require(unit['ControlGroup'] in ((old['cgroup'],) if mode == 'consume' else ('',old['cgroup'])) and unit['ExecMainStartTimestampMonotonic'] == old['startMonotonic'] and unit['KillMode'] == 'control-group' and unit['KillSignal'] == '15', 'Unit generation/stop policy changed')
-    # Full writable-storage fence ends at the verified pre-start handoff.
-    # Once a successor was attempted, only immutable bindings and old process
-    # retirement remain invariant; its writes must not invalidate rollback.
-    if mode in ('consume','stopped'):
-        require(root_state() == proof['roots'], 'Root identity/complete namespace inventory changed')
-        check_snapshots(proof)
-    proc = Path('/proc')/str(old['pid'])
-    if mode == 'consume':
-        require(unit['ActiveState'] == 'active' and unit['SubState'] == 'running' and unit['MainPID'] == str(old['pid']) and unit['ControlPID'] == '0', 'Old process not current')
-        require(proc.joinpath('stat').read_text().rsplit(')',1)[1].split()[19] == old['startTicks'], 'PID generation changed')
-        cg = Path('/sys/fs/cgroup')/old['cgroup'].lstrip('/')
-        cs = cg.lstat()
-        require(cg.resolve() == cg and (cs.st_dev,cs.st_ino) == (old['cgroupDev'],old['cgroupInode']), 'Old cgroup identity changed')
-        require(sorted(int(v) for v in cg.joinpath('cgroup.procs').read_text().split()) == old['cgroupPids'] and old['pid'] in old['cgroupPids'], 'Unexplained cgroup writer/process')
-        require(os.readlink(proc/'exe') == str(release/LEGACY/'bin/kaigen-webd') and sha(proc.joinpath('exe').read_bytes()) == LEGACY_BINARY, 'Live old image mismatch')
-        # renameat2(RENAME_NOREPLACE): one atomic persistent claim; never overwrite a prior attempt.
-        require((parent.lstat().st_dev,parent.lstat().st_ino) == (ps.st_dev,ps.st_ino), 'Proof parent replaced')
-        named = os.stat(name,dir_fd=pfd,follow_symlinks=False)
-        require((named.st_dev,named.st_ino) == (s.st_dev,s.st_ino), 'Proof path replaced')
-        libc = ctypes.CDLL(None,use_errno=True)
-        rename = libc.renameat2
-        rename.argtypes = (ctypes.c_int,ctypes.c_char_p,ctypes.c_int,ctypes.c_char_p,ctypes.c_uint)
-        rename.restype = ctypes.c_int
-        require(rename(pfd,name.encode(),pfd,b'legacy033-transition.consumed',1) == 0, 'One-shot consume failed; no retry/reissue')
-        os.fsync(pfd)
-        print(sha(raw))
-    else:
-        require(unit['ActiveState'] == 'inactive' and unit['SubState'] == 'dead' and unit['MainPID'] == '0' and unit['ControlPID'] == '0' and unit['Result'] == 'success' and unit['ExecMainCode'] == '2' and unit['ExecMainStatus'] == '15', 'No exact legacy signal15 stop')
-        require(not proc.exists(), 'Old PID still exists')
-        cg = Path('/sys/fs/cgroup')/old['cgroup'].lstrip('/')
-        if cg.exists():
-            require(not cg.joinpath('cgroup.procs').read_text().strip() and 'populated 0' in cg.joinpath('cgroup.events').read_text().splitlines(), 'Old cgroup still populated')
-        print('legacy033-snapshot-normal-close:signal15;not-clean0')
-finally:
-    if fd is not None:
-        os.close(fd)
-    os.close(pfd)
-PY_LEGACY033
-}
-
 stop_backend_for_handoff() {
   local slot="$1"
   [[ "$slot" =~ ^[ab]$ ]] || fail 'Invalid backend slot for storage handoff.'
   [[ "$TEST_MODE" == '1' ]] && return
-  if [[ "$ACTION" == 'update' && "$ROUTE_TRANSACTION_RELEASE" == 'web-033-28388778fba5-c6bf12af0893-r1' ]]; then
-    ROUTE_TRANSACTION_LEGACY_TARGET="$RELEASE_ID"
-    ROUTE_TRANSACTION_LEGACY_RECEIPT_SHA="$(legacy033_attestation consume "$slot" "$RELEASE_ID")" || fail 'Legacy033 proof was not consumed; refusing old stop.'
-    [[ "$ROUTE_TRANSACTION_LEGACY_RECEIPT_SHA" =~ ^[0-9a-f]{64}$ ]] || fail 'Legacy033 consume outcome is unknown; do not reissue.'
-    systemctl stop "kaigen-webd@$slot.service" || fail 'Legacy033 stop failed; consumed proof retained, no automatic retry.'
-    legacy033_attestation stopped "$slot" "$RELEASE_ID" "$ROUTE_TRANSACTION_LEGACY_RECEIPT_SHA" || fail 'Legacy033 signal15/death binding failed; no successor or automatic retry.'
-    ROUTE_TRANSACTION_OLD_STOP_KIND='legacy033-snapshot-normal-close'
-  else
-    systemctl stop "kaigen-webd@$slot.service" || fail 'Previous backend did not stop successfully.'
-    backend_is_quiescent "$slot" true || fail 'Previous backend has no verified clean exit; refusing storage handoff.'
-  fi
+  systemctl stop "kaigen-webd@$slot.service" || fail 'Previous backend did not stop successfully.'
+  backend_is_quiescent "$slot" true || fail 'Previous backend has no verified clean exit; refusing storage handoff.'
 }
 
 stop_candidate_backend() {
@@ -1092,8 +1255,8 @@ wait_for_candidate_backend() {
     return
   fi
   local deadline=$((SECONDS + 90))
-  until curl --fail --silent --show-error "http://127.0.0.1:$port/healthz" >/dev/null &&
-        curl --fail --silent --show-error "http://127.0.0.1:$port/readyz" >/dev/null; do
+  until curl --fail --silent --show-error --connect-timeout 3 --max-time 5 "http://127.0.0.1:$port/healthz" >/dev/null &&
+        curl --fail --silent --show-error --connect-timeout 3 --max-time 5 "http://127.0.0.1:$port/readyz" >/dev/null; do
     if ((SECONDS >= deadline)); then
       stop_candidate_backend "$slot"
       fail 'Candidate backend did not become healthy.'
@@ -1312,6 +1475,7 @@ activate_release() {
   prepare_storage_root_lock "$slot"
   if [[ -n "$old_slot" && "$TEST_MODE" != '1' ]]; then
     ROUTE_TRANSACTION_CANDIDATE_SLOT="$slot"
+    select_candidate_journal "$slot"
     stop_backend_for_handoff "$old_slot"
     ROUTE_TRANSACTION_OLD_STOPPED=true
   fi
@@ -1345,11 +1509,161 @@ prepare_layout() {
   fi
 }
 
+cleanup_candidate_workspace_check() {
+  [[ "$TEST_MODE" != '1' ]] || return 0
+  local check_root="$DATA_DIR/updater-check" check_ram=/run/kaigen-webd/updater-check owner="$DATA_DIR/updater-check.owner"
+  local unit=kaigen-webd-update-check.service release expected pid loaded
+  if [[ ! -e "$owner" && ! -L "$owner" ]]; then
+    [[ ! -e "$check_root" && ! -L "$check_root" && ! -e "$check_ram" && ! -L "$check_ram" ]] || fail 'Unmarked candidate check roots are not owned by this transaction.'
+    return 0
+  fi
+  [[ -f "$owner" && ! -L "$owner" && "$(stat -c '%u:%g:%a' "$owner")" == '0:0:600' ]] || fail 'Untrusted candidate check owner marker.'
+  release=$(cat "$owner")
+  [[ "$release" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$ ]] || fail 'Invalid candidate check release binding.'
+  [[ ! -L "$check_root" && ! -L "$check_ram" && "$(readlink -m "$check_root")" == "$check_root" && "$(readlink -m "$check_ram")" == "$check_ram" ]] || fail 'Unsafe candidate check root.'
+  for expected in "$check_root" "$check_ram"; do
+    if [[ -e "$expected" ]]; then
+      [[ -d "$expected" && "$(stat -c '%U:%G:%a' "$expected")" == "$SERVICE_USER:$SERVICE_GROUP:700" ]] || fail 'Candidate check directory ownership changed.'
+    fi
+  done
+  expected="$RELEASES_DIR/$release/bin/kaigen-webd"
+  loaded=$(systemctl show -p LoadState --value "$unit" 2>/dev/null || true)
+  if [[ "$loaded" == loaded ]]; then
+    [[ "$(systemctl show -p User --value "$unit")" == "$SERVICE_USER" && "$(systemctl show -p Group --value "$unit")" == "$SERVICE_GROUP" && "$(systemctl show -p ExecStart --value "$unit")" == *"$expected"* ]] || fail 'Candidate check unit identity changed.'
+    pid=$(systemctl show -p MainPID --value "$unit")
+    if [[ "$pid" != 0 ]]; then
+      [[ "$pid" =~ ^[1-9][0-9]*$ && "$(readlink -f "/proc/$pid/exe")" == "$expected" ]] || fail 'Candidate check executable identity changed.'
+    fi
+    systemctl stop "$unit" || fail 'Owned candidate check did not stop.'
+    [[ "$(systemctl show -p MainPID --value "$unit" 2>/dev/null || true)" =~ ^(0)?$ ]] || fail 'Owned candidate check still has a process.'
+  elif [[ -n "$loaded" && "$loaded" != not-found ]]; then fail 'Candidate check unit state is unknown.'; fi
+  if ss -ltnH '( sport = :18787 )' | read -r _; then fail 'Candidate check port is still owned by another process.'; fi
+  systemctl reset-failed "$unit" 2>/dev/null || true
+  rm -rf -- "$check_root" "$check_ram"
+  rm -- "$owner"; sync -f "$DATA_DIR"
+}
+
+check_candidate_workspace() {
+  [[ "$TEST_MODE" != '1' ]] || return 0
+  local check_root="$DATA_DIR/updater-check" check_ram=/run/kaigen-webd/updater-check owner="$DATA_DIR/updater-check.owner" temporary
+  local unit=kaigen-webd-update-check.service key pid i result=0
+  cleanup_candidate_workspace_check
+  if systemctl is-active --quiet "$unit"; then fail 'An unowned candidate check service is active.'; fi
+  if ss -ltnH '( sport = :18787 )' | read -r _; then fail 'Candidate check port is already in use.'; fi
+  # Admission is durable before either isolated directory or process can exist.
+  temporary=$(mktemp "$owner.new.XXXXXX")
+  printf '%s\n' "$RELEASE_ID" > "$temporary"; chmod 600 "$temporary"; sync -f "$temporary"
+  mv -Tf "$temporary" "$owner"; sync -f "$DATA_DIR"
+  install -d -o "$SERVICE_USER" -g "$SERVICE_GROUP" -m 700 "$check_root" "$check_ram"
+  install -d -o "$SERVICE_USER" -g "$SERVICE_GROUP" -m 700 "$check_root/disk" "$check_ram/ram" "$check_ram/active"
+  key=$(openssl ecparam -name prime256v1 -genkey 2>/dev/null | openssl ec -pubout -outform DER 2>/dev/null | base64 -w0 | tr '+/' '-_' | tr -d '=')
+  systemctl reset-failed "$unit" 2>/dev/null || true
+  systemd-run --quiet --collect --unit=kaigen-webd-update-check --property="User=$SERVICE_USER" --property="Group=$SERVICE_GROUP" \
+    --property=LimitMEMLOCK=infinity --property=AmbientCapabilities=CAP_IPC_LOCK \
+    --setenv="LD_LIBRARY_PATH=$RELEASES_DIR/$RELEASE_ID/lib/Kaigen" \
+    --setenv=KAIGEN_WEB_DEPLOYMENT_MODE=service --setenv=KAIGEN_WEB_BIND=127.0.0.1:18787 \
+    --setenv="KAIGEN_WEB_ORIGIN=$PUBLIC_ORIGIN" --setenv="KAIGEN_WEB_DATA_ROOT=$check_root/disk" \
+    --setenv="KAIGEN_WEB_RAM_ROOT=$check_ram/ram" --setenv="KAIGEN_WEB_ACTIVE_ROOT=$check_ram/active" \
+    --setenv="KAIGEN_WEB_RESOURCE_ROOT=$RELEASES_DIR/$RELEASE_ID" --setenv=KAIGEN_WEB_PROOF_DIFFICULTY=12 \
+    "$RELEASES_DIR/$RELEASE_ID/bin/kaigen-webd"
+  for ((i=0;i<60;i++)); do
+    if curl --noproxy '*' -fsS --max-time 3 http://127.0.0.1:18787/readyz >/dev/null 2>&1; then break; fi
+    sleep 1
+  done
+  pid=$(systemctl show -p MainPID --value "$unit")
+  if [[ "$pid" =~ ^[1-9][0-9]*$ ]] && ss -ltnpH '( sport = :18787 )' | grep -q "pid=$pid,"; then
+    if python3 - http://127.0.0.1:18787 "$PUBLIC_ORIGIN" "$RELEASE_ID" "$key" <<'PY_CANDIDATE'
+import hashlib, json, sys, time, urllib.request, urllib.error
+from http.cookies import SimpleCookie
+import re
+
+def response_cookie(raw_headers, login):
+    if not isinstance(login, dict):
+        raise SystemExit('Candidate authentication response is malformed')
+    scoped, legacy = [], []
+    valid = lambda value: isinstance(value, str) and re.fullmatch(r'[A-Za-z0-9_-]{43}', value) is not None
+    for raw in raw_headers:
+        parsed = SimpleCookie()
+        parsed.load(raw)
+        for name, morsel in parsed.items():
+            if name == '__Host-kaigen-device':
+                target, suffix = legacy, ''
+            elif name.startswith('__Host-kaigen-device-'):
+                target, suffix = scoped, name.removeprefix('__Host-kaigen-device-')
+                if not valid(suffix):
+                    raise SystemExit('Candidate authentication cookie scope is malformed')
+            else:
+                continue
+            if not valid(morsel.value):
+                raise SystemExit('Candidate authentication cookie is malformed')
+            target.append((name, morsel.value, suffix))
+    if len(scoped) > 1 or len(legacy) > 1 or not (scoped or legacy):
+        raise SystemExit('Candidate authentication cookies are ambiguous')
+    selected = scoped[0] if scoped else legacy[0]
+    if legacy and legacy[0][1] != selected[1]:
+        raise SystemExit('Candidate authentication cookie aliases differ')
+    if 'workspaceSelector' in login:
+        selector = login['workspaceSelector']
+        if not valid(selector) or not scoped or selected[2] != selector:
+            raise SystemExit('Candidate authentication cookie scope mismatch')
+    else:
+        # Older official responses omit the selector and include both aliases.
+        # Bind their actual Set-Cookie to this successful password-auth response.
+        device = login.get('deviceId')
+        if not valid(device) or selected[1] != device:
+            raise SystemExit('Candidate authentication device mismatch')
+    return selected[0] + '=' + selected[1], selected[2]
+base, origin, build, public_key = sys.argv[1:]
+def call(path, body, headers=None, capture_cookie=False):
+    request = urllib.request.Request(base + '/api/v1/' + path, json.dumps(body).encode(),
+        {'Origin': origin, 'Content-Type': 'application/json', 'X-Kaigen-Client-Build': build, **(headers or {})})
+    try:
+        with urllib.request.urlopen(request, timeout=120) as response:
+            result = json.load(response)
+            if capture_cookie:
+                return result, response.headers.get_all('Set-Cookie', [])
+            return result
+    except urllib.error.HTTPError as error:
+        # Keep only the public error code; never print auth bodies or cookies.
+        code = 'HTTP_ERROR'
+        try:
+            detail = json.loads(error.read(4096))
+            candidate = detail.get('code', detail.get('error')) if isinstance(detail, dict) else None
+            if isinstance(candidate, str) and re.fullmatch(r'[A-Z][A-Z0-9_]{0,95}', candidate):
+                code = candidate
+        except (ValueError, OSError):
+            pass
+        raise SystemExit(f'Candidate {path} failed: HTTP {error.code} {code}') from None
+challenge = call('initializer/challenge', {})
+if challenge['difficulty'] != 12: raise SystemExit('Unexpected candidate proof difficulty')
+nonce = 0
+while not hashlib.sha256(f"{challenge['salt']}:{nonce}".encode()).hexdigest().startswith('000'): nonce += 1
+import secrets
+password = secrets.token_hex(18)
+created = call('workspaces', {'storageMode': 'disk', 'accessPassword': password, 'language': 'en',
+    'proof': {'challengeId': challenge['challengeId'], 'nonce': nonce}})
+identifier = created['identifier']
+login, login_cookies = call('auth/password', {'identifier': identifier, 'password': password, 'publicKey': public_key}, capture_cookie=True)
+cookie, selector = response_cookie(login_cookies, login)
+headers = {'Cookie': cookie, 'X-Kaigen-Csrf': login['csrfToken']}
+if selector:
+    headers['X-Kaigen-Workspace'] = selector
+if call('workspaces/destroy', {'explicitConfirmation': True}, headers).get('destroyed') is not True: raise SystemExit('Candidate workspace was not deleted')
+if call('workspaces/lookup', {'identifier': identifier}).get('exists') is not False: raise SystemExit('Candidate workspace still exists')
+print('WORKSPACE_CHECK_PASS isolated=true created=true deleted=true')
+PY_CANDIDATE
+    then result=0; else result=$?; fi
+  else result=1; fi
+  cleanup_candidate_workspace_check
+  ((result==0)) || fail 'Isolated candidate workspace check failed.'
+}
+
 install_action() {
   [[ ! -e "$STATE_FILE" ]] || fail 'Kaigen Web is already managed here; use update.'
   validate_bundle
   select_mode
   collect_site_settings
+  detect_certbot_webroot
   prepare_layout
   install_release
   write_mount_unit
@@ -1361,44 +1675,63 @@ install_action() {
     systemctl enable nginx
     systemctl reload nginx
   fi
+  enable_certbot_renewal
   note "INSTALL_PASS mode=$INSTALL_MODE release=$RELEASE_ID slot=a"
 }
 
 update_action() {
+  recover_pending_transaction
   validate_bundle
   load_state
+  detect_certbot_webroot
+  [[ -z "$EXPECTED_CURRENT_RELEASE" || "$CURRENT_RELEASE" == "$EXPECTED_CURRENT_RELEASE" ]] || fail 'Installed release changed while checking GitHub; retry the update.'
   local old_slot="$ACTIVE_SLOT" new_slot old_release="$CURRENT_RELEASE" old_mode="$INSTALL_MODE"
   local old_route_schema="$CURRENT_ROUTE_SCHEMA" route_snapshot staging_snapshot
+  prepare_update_recovery
   new_slot="$(other_slot "$old_slot")"
   staging_snapshot="$(create_route_snapshot "$old_release" "$old_route_schema")"
   route_snapshot="$(persist_route_snapshot "$staging_snapshot" "$old_release" "$old_route_schema")"
   begin_route_transaction "$route_snapshot" "$old_release" "$old_route_schema"
   install_release
+  check_candidate_workspace
   write_service_unit
   write_nginx_site
   stage_state "$new_slot" "$RELEASE_ID" "$old_release" "$old_mode" "$ROUTE_SCHEMA_BUILD_ID" "$old_route_schema" "$old_release"
   activate_release "$new_slot" "$RELEASE_ID" "$ROUTE_SCHEMA_BUILD_ID" "$old_slot" '' true
   end_route_transaction
+  clear_update_journal
+  enable_certbot_renewal
   note "UPDATE_PASS release=$RELEASE_ID slot=$new_slot"
 }
 
 rollback_action() {
+  recover_pending_transaction
   load_state
+  detect_certbot_webroot
   [[ -n "${PREVIOUS_RELEASE:-}" ]] || fail 'No previous release is available for rollback.'
   [[ "$PREVIOUS_ROUTE_METADATA_AVAILABLE" == 'true' ]] || fail 'Previous release lacks route metadata; run a successful update before rollback.'
   [[ -d "$RELEASES_DIR/$PREVIOUS_RELEASE" ]] || fail 'Previous release directory is missing.'
   local old_slot="$ACTIVE_SLOT" new_slot target_release="$PREVIOUS_RELEASE" old_release="$CURRENT_RELEASE" old_mode="$INSTALL_MODE" target_mode="${PREVIOUS_MODE:-$INSTALL_MODE}"
   local old_route_schema="$CURRENT_ROUTE_SCHEMA" target_route_schema="$PREVIOUS_ROUTE_SCHEMA"
-  local current_snapshot_staging current_snapshot target_snapshot="$ROUTE_SNAPSHOTS_DIR/$PREVIOUS_ROUTE_SNAPSHOT"
+  local current_snapshot_staging current_snapshot refreshed_site target_snapshot="$ROUTE_SNAPSHOTS_DIR/$PREVIOUS_ROUTE_SNAPSHOT"
+  prepare_update_recovery
   new_slot="$(other_slot "$old_slot")"
   current_snapshot_staging="$(create_route_snapshot "$old_release" "$old_route_schema")"
   current_snapshot="$(persist_route_snapshot "$current_snapshot_staging" "$old_release" "$old_route_schema")"
   begin_route_transaction "$current_snapshot" "$old_release" "$old_route_schema"
   INSTALL_MODE="$target_mode"
   restore_route_snapshot "$target_snapshot" "$target_release" "$target_route_schema"
+  if [[ -n "$CERTBOT_WEBROOT" ]]; then
+    refreshed_site="$(site_with_current_acme "$NGINX_AVAILABLE")"
+    if [[ "$refreshed_site" != "$(cat -- "$NGINX_AVAILABLE")" ]]; then
+      printf '%s\n' "$refreshed_site" | atomic_write "$NGINX_AVAILABLE" 0644
+    fi
+  fi
   stage_state "$new_slot" "$target_release" "$old_release" "$old_mode" "$target_route_schema" "$old_route_schema" "$old_release"
   activate_release "$new_slot" "$target_release" "$target_route_schema" "$old_slot" "$target_snapshot" true
   end_route_transaction
+  clear_update_journal
+  enable_certbot_renewal
   note "ROLLBACK_PASS release=$target_release slot=$new_slot"
 }
 
@@ -1417,7 +1750,7 @@ uninstall_action() {
   fi
   [[ "$erase_data" == 'yes' || "$erase_data" == 'no' ]] || fail 'KAIGEN_UNINSTALL_ERASE_DATA must be yes or no.'
   if [[ "$TEST_MODE" != '1' ]]; then
-    systemctl disable --now kaigen-webd@a.service kaigen-webd@b.service 2>/dev/null || true
+    systemctl disable --now kaigen-webd-update.timer kaigen-webd-recovery.service kaigen-webd@a.service kaigen-webd@b.service 2>/dev/null || true
     systemctl disable --now 'run-kaigen\x2dwebd.mount' 2>/dev/null || true
   fi
   for target in "$NGINX_AVAILABLE" "$NGINX_UPSTREAM" "$SERVICE_UNIT" "$LIMITS_FILE" "$MOUNT_UNIT"; do
@@ -1429,12 +1762,20 @@ uninstall_action() {
     [[ ! -e "$NGINX_ENABLED" || -L "$NGINX_ENABLED" ]] || fail 'Enabled Nginx entry is not a symlink.'
   fi
   rm -f -- "$NGINX_ENABLED"
+  if [[ "$TEST_MODE" != '1' ]]; then
+    if certbot_hook_directory_is_safe false && certbot_hook_is_managed; then rm -f -- "$CERTBOT_DEPLOY_HOOK"; fi
+    rm -f /etc/systemd/system/kaigen-webd-{update,recovery}.service /etc/systemd/system/kaigen-webd-update.timer
+    rm -f /etc/systemd/system/kaigen-webd@{a,b}.service.d/kaigen-update-recovery.conf /etc/systemd/system/nginx.service.d/kaigen-update-recovery.conf
+  fi
   rm -rf -- "$(root_path /opt/kaigen-webd)" "$ETC_DIR" "$LIMITS_DIR"
   if [[ "$erase_data" == 'yes' ]]; then rm -rf -- "$DATA_DIR"; else rm -f -- "$STATE_FILE"; fi
   if [[ "$TEST_MODE" != '1' ]]; then systemctl daemon-reload; nginx -t; systemctl reload nginx; fi
   note "UNINSTALL_PASS dataPreserved=$([[ "$erase_data" == 'no' ]] && echo true || echo false)"
 }
 
+if [[ "$ACTION" == prepare-recovery ]]; then load_state; prepare_update_recovery; exit $?; fi
+if [[ "$ACTION" == check-slot ]]; then check_selected_slot; exit $?; fi
+if [[ "$ACTION" == recover-pending ]]; then recover_pending_transaction; exit $?; fi
 check_debian
 check_live_dependencies
 case "$ACTION" in

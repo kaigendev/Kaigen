@@ -35,54 +35,26 @@ export const DEFAULT_APPEARANCE: AppearanceSettings = {
   interfaceScale: 100,
 };
 
-const LEGACY_FONT_IDS: Record<string, TypographyFontId> = {
-  "ibm-plex-sans-condensed": "ibm-plex-sans-condensed",
-  "IBM Plex Sans Condensed": "ibm-plex-sans-condensed",
-  "fira-sans-condensed": "fira-sans-condensed",
-  "Fira Sans Condensed": "fira-sans-condensed",
-  "noto-sans-semi-condensed": "noto-sans-semi-condensed",
-  "Noto Sans SemiCondensed": "noto-sans-semi-condensed",
-  "source-sans-3": "source-sans-3",
-  "Source Sans 3": "source-sans-3",
-  "golos-text": "golos-text",
-  "Golos Text": "golos-text",
-  '"Golos Text", sans-serif': "golos-text",
-  '"Golos Text", Inter, "Segoe UI", Arial, sans-serif': "golos-text",
-  "martian-mono": "martian-mono",
-  "Martian Mono": "martian-mono",
-  '"Martian Mono Kaigen", monospace': "martian-mono",
-  "inter": "inter",
-  "Inter": "inter",
-  "Inter, Segoe UI, Arial, sans-serif": "inter",
-  'Inter, "Segoe UI", Arial, sans-serif': "inter",
-  "onest": "onest",
-  "Onest": "onest",
-};
-
-export function normalizeTypographyFontId(value: unknown, fallback: TypographyFontId): TypographyFontId {
-  if (typeof value !== "string") return fallback;
-  const direct = TYPOGRAPHY_FONTS.find((font) => font.id === value);
-  if (direct) return direct.id;
-  return LEGACY_FONT_IDS[value] ?? fallback;
-}
-
 function normalizeSize(value: unknown, allowed: readonly number[], fallback: number): number {
   return typeof value === "number" && Number.isFinite(value) && allowed.includes(value) ? value : fallback;
 }
 
+/** Restore saved appearance values against the same choices shown in settings. */
 export function normalizeAppearance(value?: Partial<AppearanceSettings> | null): AppearanceSettings {
   return {
-    interfaceFont: normalizeTypographyFontId(value?.interfaceFont, DEFAULT_APPEARANCE.interfaceFont),
+    interfaceFont: getTypographyFont(value?.interfaceFont, DEFAULT_APPEARANCE.interfaceFont).id,
     interfaceFontSize: normalizeSize(value?.interfaceFontSize, INTERFACE_FONT_SIZES, DEFAULT_APPEARANCE.interfaceFontSize),
-    chatFont: normalizeTypographyFontId(value?.chatFont, DEFAULT_APPEARANCE.chatFont),
+    chatFont: getTypographyFont(value?.chatFont, DEFAULT_APPEARANCE.chatFont).id,
     chatFontSize: normalizeSize(value?.chatFontSize, CHAT_FONT_SIZES, DEFAULT_APPEARANCE.chatFontSize),
-    profilePlaceholderFont: normalizeTypographyFontId(value?.profilePlaceholderFont, DEFAULT_APPEARANCE.profilePlaceholderFont),
+    profilePlaceholderFont: getTypographyFont(value?.profilePlaceholderFont, DEFAULT_APPEARANCE.profilePlaceholderFont).id,
     profilePlaceholderFontSize: normalizeSize(value?.profilePlaceholderFontSize, PROFILE_PLACEHOLDER_FONT_SIZES, DEFAULT_APPEARANCE.profilePlaceholderFontSize),
     interfaceScale: normalizeSize(value?.interfaceScale, [80, 90, 100, 110, 125, 150], DEFAULT_APPEARANCE.interfaceScale),
   };
 }
 
+/** Resolve a canonical font ID to its CSS family and stretch. */
 export function getTypographyFont(value: unknown, fallback: TypographyFontId) {
-  const id = normalizeTypographyFontId(value, fallback);
-  return TYPOGRAPHY_FONTS.find((font) => font.id === id) ?? TYPOGRAPHY_FONTS[0];
+  return TYPOGRAPHY_FONTS.find((font) => font.id === value)
+    ?? TYPOGRAPHY_FONTS.find((font) => font.id === fallback)
+    ?? TYPOGRAPHY_FONTS[0];
 }

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 
-const [app, settings, desktopPlatform, webPlatform, rust, nativeFileGrants, webCore, kai, historyStore, nativeNotifications] = await Promise.all([
+const [app, settings, desktopPlatform, webPlatform, rust, nativeFileGrants, webCore, kai, historyStore, nativeNotifications, realtime] = await Promise.all([
   readFile(new URL("../src/App.tsx", import.meta.url), "utf8"),
   readFile(new URL("../src/Settings.tsx", import.meta.url), "utf8"),
   readFile(new URL("../src/platform/desktop.ts", import.meta.url), "utf8"),
@@ -12,13 +12,14 @@ const [app, settings, desktopPlatform, webPlatform, rust, nativeFileGrants, webC
   readFile(new URL("../src-tauri/src/kai.rs", import.meta.url), "utf8"),
   readFile(new URL("../src-tauri/src/chat_history_store.rs", import.meta.url), "utf8"),
   readFile(new URL("../src-tauri/src/desktop_notifications.rs", import.meta.url), "utf8"),
+  readFile(new URL("../src/webgate/realtime.ts", import.meta.url), "utf8"),
 ]);
 
 assert.match(app, /rangeOffset|targetMessageId/u);
 assert.match(settings, /value="all"/u);
 assert.doesNotMatch(settings, /max="8589934591"/u);
 assert.match(settings, /max="25"/u);
-assert.match(app, /boundedHistoryRequestLimit\(loadedHistoryLimit, activeUnreadCount\)/u);
+assert.match(app, /boundedHistoryRequestLimit\(loadedHistoryLimit\)/u);
 assert.match(nativeNotifications, /const QUEUE_LIMIT: usize = 64;/u);
 assert.match(nativeNotifications, /sync_channel::<Pending>\(QUEUE_LIMIT\)/u);
 assert.match(nativeNotifications, /find_message_registered\([^]*message_id/u);
@@ -27,8 +28,10 @@ assert.match(app, /search_tox_messages"[^]*limit: 100/u);
 assert.match(app, /renderedMessages\.map/u);
 assert.match(app, /const changed = !sameMessages\(previousMessages, nextMessages\)/u);
 assert.match(app, /if \(refreshPending\) return;[\s\S]*get_tox_messages_snapshot/u);
-assert.match(app, /setInterval\(refresh, 5000\)/u);
-assert.match(app, /setInterval\(refresh, 3000\)/u);
+assert.match(app, /watchProfileUpdates\(owner\.profileId, refresh, 5000\)/u);
+assert.match(app, /watchProfileUpdates\(owner\.profileId, refresh, 3000\)/u);
+assert.match(realtime, /const timer = remote \? undefined : window\.setInterval\(run, localIntervalMs\)/u);
+assert.match(realtime, /if \(timer !== undefined\) window\.clearInterval\(timer\)/u);
 assert.match(desktopPlatform, /if \(nativeGrantToken\) \{[\s\S]*send_tox_file_from_grant/u);
 assert.doesNotMatch(desktopPlatform, /send_tox_file_from_path/u);
 assert.match(historyStore, /const DEFAULT_WINDOW_ROWS: usize = 500;/u);

@@ -1,3 +1,4 @@
+export const NOTIFICATION_OPEN_EVENT = "kaigen-open-notification";
 export type ChatNotificationTarget = { profileId: string; target: string; createdAt: number };
 export const CHAT_NOTIFICATION_TARGET_AGE_MS = 5 * 60_000;
 

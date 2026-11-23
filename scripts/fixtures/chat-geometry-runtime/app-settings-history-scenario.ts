@@ -50,6 +50,18 @@ async function privacy() {
   const tab = await waitFor(() => document.querySelector<HTMLButtonElement>('.settings-tabs button[aria-label="Приватность"]') ?? undefined, "privacy tab");
   tab.click(); await waitFor(() => button("Очистить всю локальную историю") ?? document.querySelector(".destroy-confirm"), "clear control");
 }
+async function setOpeningHistoryLimit(limit: number) {
+  document.querySelector<HTMLButtonElement>(".rail-profile-menu-button")!.click();
+  const menu = await waitFor(() => document.querySelector(".rail-profile-menu") ?? undefined, "profile menu");
+  menu.querySelector<HTMLButtonElement>("button")!.click();
+  const tab = await waitFor(() => document.querySelector<HTMLButtonElement>('.settings-tabs button[aria-label="Чаты"]') ?? undefined, "chat settings tab");
+  tab.click();
+  const field = await waitFor(() => [...document.querySelectorAll<HTMLSelectElement>(".settings-content label.setting-select select")]
+    .find((select) => select.parentElement?.textContent?.includes("Сообщений при открытии чата")), "opening history limit");
+  field.value = String(limit);
+  field.dispatchEvent(new Event("change", { bubbles: true }));
+  await waitFor(() => geometryProfileLocalState(A)?.historyMessageLimit === limit ? true : undefined, "saved opening history limit");
+}
 async function confirm() {
   button("Очистить всю локальную историю")?.click(); await frames();
   return waitFor(() => document.querySelector<HTMLButtonElement>(".destroy-confirm .danger-button") ?? undefined, "clear confirmation");
@@ -76,6 +88,16 @@ export async function runActualSettingsHistoryScenario() {
     await waitFor(() => { const shell = document.querySelector<HTMLElement>(".app-shell"); return shell?.isConnected && !shell.classList.contains("ultra-compact") ? true : undefined; }, "desktop profile-owner fixture layout");
     geometrySetMenuProfiles(true); geometryHoldClearHistory();
     await waitFor(() => document.querySelector(`.profile-switcher-item[data-profile-id="${B}"]`) ?? undefined, "owner B");
+    await contact("QA Bob", 0);
+    await setOpeningHistoryLimit(20);
+    await contact("QA Bob", 0);
+    const shortHistory = await waitFor(() => {
+      const snapshot = geometrySnapshotEvidence(0);
+      return snapshot && snapshot.windowStart === snapshot.total - 20 && rows().length === 20 ? snapshot : undefined;
+    }, "new opening limit after returning to a warm chat");
+    await frames();
+    check(shortHistory.requestRange === null && rows().length === 20, "warm history does not restore the preceding opening limit");
+    await setOpeningHistoryLimit(500);
     await contact("QA Bob", 0); await search("Needle");
     await waitFor(() => document.querySelector(`[data-message-key="${geometryMessageId(0, 1000)}"]`) ?? undefined, "far cached range");
     check((geometrySnapshotEvidence(0)?.windowStart ?? 99999) < 1500, "A has an actual ranged history cache before clear");

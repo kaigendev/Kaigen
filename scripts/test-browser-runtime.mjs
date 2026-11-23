@@ -72,8 +72,15 @@ assert.match(spellcheckComposer, /\(onPasteFiles \?\? onStageFiles\)\(files\)/u,
   "clipboard files use their security-specific staging route when supplied");
 assert.match(spellcheckComposer, /composingRef\.current \|\| event\.nativeEvent\.isComposing/u,
   "IME confirmation Enter never enters the send path");
-assert.match(spellcheckComposer, /onDraftChange\(targetChat, ""\)[^]*await onSend\(submission\.text, submission\.formatting, targetReply\)/u,
-  "one draft is cleared synchronously before the captured send operation settles");
+const submitHandler = spellcheckComposer.match(/const submit = async \(\) => \{([^]*?)\n  \};/u)?.[1] ?? "";
+assert.match(submitHandler, /const targetOwner = activeOwnerRef\.current;[^]*const targetChat = activeChatRef\.current;[^]*const accepted = await onSend\(submission\.text, submission\.formatting, targetReply\);\s*if \(accepted !== true \|\| !mountedRef\.current \|\| generation !== sendGenerationRef\.current[^]*activeOwnerRef\.current !== targetOwner \|\| activeChatRef\.current !== targetChat[^]*textRevisionRef\.current !== revision[^]*JSON\.stringify\(replyRef\.current\) !== targetReplySignature\) return;[^]*onDraftChange\(targetChat, ""\)/u,
+  "one captured draft clears only after accepted send admission with matching owner, chat and edit revision");
+assert.equal((submitHandler.match(/onDraftChange\(targetChat, ""\)/gu) ?? []).length, 1,
+  "accepted admission clears the captured draft exactly once");
+assert.doesNotMatch(submitHandler.slice(0, submitHandler.indexOf("const accepted = await onSend")), /onDraftChange\(targetChat, ""\)/u,
+  "an unresolved send admission never erases user text");
+assert.doesNotMatch(submitHandler.match(/\} catch \{([^]*?)\} finally/u)?.[1] ?? "", /onDraftChange|setValue\(|setFormatting\(/u,
+  "rejected admission preserves the current draft and reply");
 assert.doesNotMatch(chatEnhancements, /dangerouslySetInnerHTML|\.innerHTML\s*=/u);
 assert.match(chatEnhancements, /formattedTextSegments\(text, enabled \? formatting : \[\]\)/u,
   "remote formatting is rendered only through bounded declarative segments");
@@ -82,17 +89,20 @@ assert.match(textEditCommands, /event\.key === "ContextMenu" \|\| \(event\.key =
 assert.match(spellcheckComposer, /type="file" multiple[^>]*onChange=\{\(event\) => \{ if \(event\.target\.files\) onStageFiles\(event\.target\.files\)/u);
 for (const policyName of ["csp", "devCsp"]) {
   const policy = tauriConfig.app.security[policyName];
-  assert.equal(policy["script-src"], "'self'");
+  assert.equal(policy["script-src"], "'self' 'wasm-unsafe-eval'", "bundled media permits WASM compilation, never JavaScript eval");
   assert.equal(policy["script-src-attr"], "'none'");
   assert.equal(policy["require-trusted-types-for"], "'script'");
-  assert.equal(policy["trusted-types"], "kaigen-spellcheck-worker");
+  assert.equal(policy["trusted-types"], "kaigen-spellcheck-worker kaigen-chat-media-worker");
 }
 assert.equal(tauriConfig.app.windows[0].dragDropEnabled, true);
 
 assert.match(webSession, /const DEVICE_RECORD_PREFIX = "workspace:";/u);
 assert.match(webSession, /kaigen-workspace-identifier-v1/u);
-assert.match(webSession, /\.put\(record, `\$\{DEVICE_RECORD_PREFIX\}\$\{record\.workspaceDigest\}`\)/u);
-assert.match(webSession, /headers\.set\(WORKSPACE_HEADER, await this\.workspaceDigest\(\)\)/u);
+assert.match(webSession, /\.put\(\s*record,\s*(?:`\$\{DEVICE_RECORD_PREFIX\}\$\{record\.workspaceDigest\}`|DEVICE_RECORD_PREFIX\s*\+\s*record\.workspaceDigest)\s*\)/u);
+assert.match(webSession, /headers\.set\(WORKSPACE_HEADER, this\.authenticatedWorkspaceSelector \|\| await this\.workspaceDigest\(\)\)/u,
+  "authenticated requests retain the accepted stable workspace selector with legacy digest fallback");
+assert.match(webSession, /private async acceptSession\([^]*const workspaceDigest = await this\.workspaceDigest\(\);\s*assertCurrent\(\);\s*this\.authenticatedWorkspaceSelector = response\.workspaceSelector \|\| workspaceDigest;/u,
+  "the preferred selector originates from the current accepted session, never an unrelated workspace");
 assert.match(webSession, /`\$\{WORKSPACE_PROTOCOL_PREFIX\}\$\{workspaceDigest\}`/u);
 assert.match(webSession, /private sessionRefresh: Promise<WorkspaceView \| null> \| null = null;/u);
 assert.match(webSession, /const PERSISTENCE_COMMANDS = new Set\(\["save_layout_state", "save_local_state"\]\);/u);
@@ -109,8 +119,8 @@ assert.match(webSession, /verifyTransferPayload\(blob, transfer\.sizeBytes, tran
 assert.match(webSession, /async command<T>\([^]*const persistenceCommand = PERSISTENCE_COMMANDS\.has\(command\);[^]*if \(persistenceCommand && this\.sessionLifecycle !== "active"\) return undefined as T;[^]*const request = this\.request<T>[^]*this\.pendingPersistenceCommands\.add\(request\);[^]*return await request;[^]*this\.pendingPersistenceCommands\.delete\(request\);/u);
 assert.match(webSession, /private async acceptSession\([^]*this\.sessionLifecycle = "active";/u);
 assert.match(webSession, /error\?\.code === "CSRF_INVALID"/u);
-assert.match(webSession, /if \(code === "CSRF_INVALID" && lease && lease !== "teardown"\) \{\s*if \(this\.sessionLifecycle !== "active" \|\| this\.sessionTeardown\) throw new Error\("SESSION_NOT_ACTIVE"\);/u,
-  "CSRF recovery requires an active non-teardown request lease");
+assert.match(webSession, /if \(code === "CSRF_INVALID" && lease && lease !== "teardown" && !this\.linkRotationActive\) \{\s*if \(this\.sessionLifecycle !== "active" \|\| this\.sessionTeardown\) throw new Error\("SESSION_NOT_ACTIVE"\);/u,
+  "CSRF recovery requires an active non-teardown lease and cannot cross link rotation");
 assert.match(webSession, /if \(sentRevision === this\.authenticationRevision\) await this\.restoreDeviceSession\(\)\.catch\(\(\) => null\);\s*assertCurrent\(\);\s*if \(this\.upgradeRequired\) throw new Error\("UPGRADE_REQUIRED"\);\s*if \(this\.sessionLifecycle !== "active" \|\| this\.sessionTeardown\) throw new Error\("SESSION_NOT_ACTIVE"\);\s*if \(sentRevision !== this\.authenticationRevision\) \{\s*response = await send\(\);\s*const retryCode = await authenticationError\(\);\s*assertCurrent\(\);\s*if \(retryCode && retryCode !== "CSRF_INVALID"\) this\.suspendSession\(lease\);/u,
   "only a changed authentication revision admits one lease-checked retry; expired authorization suspends the session");
 assert.equal([...webSession.matchAll(/response = await send\(\);/gu)].length, 2,
@@ -129,7 +139,7 @@ assert.doesNotMatch(
 assert.match(messenger, /\.\.\.appShellScaleStyle\(appearance\.interfaceScale, platformCapabilities\.containerRelativeLayout\)/u);
 assert.match(interfaceScale, /containerRelativeLayout\s*\? \{ \.\.\.shared, transform: `scale\(\$\{scale\}\)`, transformOrigin: "top left" \}\s*: \{ \.\.\.shared, zoom: scale \}/u);
 assert.match(messenger, /<MessageComposer[\s\S]*?onSend=\{stableSendMessage\}[\s\S]*?onStageFiles=\{stageFiles\}/u);
-assert.match(messenger, /onPickFile=\{platformCapabilities\.nativeFilesystem \? pickNativeFile : undefined\}/u);
+assert.match(messenger, /const nativeProfileFilesystem = platformCapabilities\.nativeFilesystem && !isWebgateProfileId\(activeProfileId\);[^]*onPickFile=\{nativeProfileFilesystem \? pickNativeFile : undefined\}/u);
 assert.match(messenger, /stageFiles\(event\.dataTransfer\.files\)/u);
 assert.doesNotMatch(messenger, /event\.dataTransfer\.files\[0\]/u);
 assert.doesNotMatch(messenger, /onDragDropEvent|event\.payload\.paths/u,
@@ -164,16 +174,18 @@ assert.match(webRoot, /await webSession\.lockWorkspace\(\);/u);
 assert.match(webRoot, /await webSession\.lockWorkspace\(\);\s*flushSync\(/u,
   "successful lock unmounts consumers synchronously before queued session reads reject");
 assert.match(webRoot, /await webSession\.closeWorkspace\(\);\s*flushSync\(/u);
-assert.match(webRoot, /await webSession\.destroyWorkspace\(\);\s*forgetWorkspaceLaunch\(identifier\);\s*history\.replaceState\([^\n]*\);\s*flushSync\(/u,
+assert.match(webRoot, /await webSession\.destroyWorkspace\(\);\s*forgetWorkspaceLaunch\(identifier\);\s*(?:\/\/[^\n]*\n\s*)?serviceHistoryToken\.current = null;\s*history\.replaceState\([^\n]*\);\s*flushSync\(/u,
   "successful destruction forgets its launch record and URL before synchronously unmounting consumers");
-assert.equal([...webRoot.matchAll(/await webSession\.(?:lockWorkspace|closeWorkspace|destroyWorkspace)\(\);\s*(?:forgetWorkspaceLaunch\(identifier\);\s*history\.replaceState\([^\n]*\);\s*)?flushSync\(\(\) =>/gu)].length, 3,
+assert.equal([...webRoot.matchAll(/await webSession\.(?:lockWorkspace|closeWorkspace|destroyWorkspace)\(\);\s*(?:forgetWorkspaceLaunch\(identifier\);\s*(?:\/\/[^\n]*\n\s*)?serviceHistoryToken\.current = null;\s*history\.replaceState\([^\n]*\);\s*)?flushSync\(\(\) =>/gu)].length, 3,
   "each destructive session transition flushes only after its successful await; failures keep the mounted draft");
 assert.match(webRoot, /webSession\.onSessionUnavailable\(\(reload\) => \{[^]*serviceHistoryToken\.current = null;\s*flushSync\(\(\) => \{\s*setWorkspace\(null\);/u,
   "terminal authorization loss separately unmounts consumers synchronously");
 assert.equal([...webRoot.matchAll(/flushSync\(\(\) =>/gu)].length, 4,
   "three successful destructive transitions and terminal authorization loss own synchronous unmounts");
-assert.match(webRoot, /<section className="web-app-window" inert=\{busy \|\| destroyOpen \|\| \(compact && \(serviceOpen \|\| serviceDragging\)\)\}>/u,
-  "busy transitions, active modal overlays and panel dragging block interaction with the application beneath them");
+assert.match(webRoot, /const workspaceModalOpen = destroyOpen \|\| passwordChangeOpen;/u,
+  "both destructive and password-change modals contribute to the shared workspace interaction fence");
+assert.match(webRoot, /<section className="web-app-window" inert=\{busy \|\| workspaceModalOpen \|\| \(compact && \(serviceOpen \|\| serviceDragging\)\)\}>/u,
+  "busy transitions, every workspace modal and panel dragging block interaction with the application beneath them");
 assert.match(webRoot, /disabled=\{busy\} aria-label=\{t\.renewLease\}[^\n]*webSession\.renewLease\(\)\.catch/u);
 assert.match(webRoot, /const closeApplication = useCallback\([^]*await webSession\.closeWorkspace\(\);/u);
 assert.match(webRoot, /const requestClose = \(\) => \{[^]*void closeApplication\(\);[^]*addEventListener\("kaigen:web-close-request", requestClose\)/u);
@@ -187,8 +199,10 @@ assert.match(webRoot, /workspaceDestroyed && <p className="web-success" role="st
 assert.match(webRoot, /menuRef\.current\?\.contains\(event\.target\)[^]*document\.addEventListener\("pointerdown", closeOutside\)[^]*document\.removeEventListener\("pointerdown", closeOutside\)/u);
 assert.match(webRoot, /event\.key === "Escape"[^]*document\.addEventListener\("keydown", closeOnEscape\)[^]*document\.removeEventListener\("keydown", closeOnEscape\)/u);
 const sessionMenu = webRoot.match(/<div className="web-menu"[^]*?<\/nav>/u)?.[0] ?? "";
-assert.equal([...sessionMenu.matchAll(/role=\{compact \? undefined : "menuitem"\}/gu)].length, 2,
-  "desktop session menu retains exactly two menu items; compact panel uses ordinary buttons");
+assert.equal([...sessionMenu.matchAll(/role=\{compact \? undefined : "menuitem"\}/gu)].length, 4,
+  "the four current desktop session actions retain menu semantics; compact panel uses ordinary buttons");
+assert.match(sessionMenu, /setPasswordChangeOpen\(true\);[^]*t\.changePassword[^]*void changeWorkspaceLink\(\)[^]*t\.changeLink[^]*void lockSession\(\)[^]*t\.lockSession[^]*setDestroyOpen\(true\);[^]*t\.destroyWorkspace/u,
+  "the exact password, link, lock and destroy actions own those four menu entries");
 assert.match(sessionMenu, /void lockSession\(\);[^]*t\.lockSession/u);
 assert.match(sessionMenu, /setDestroyOpen\(true\);[^]*t\.destroyWorkspace/u);
 assert.match(webRoot, /navigator\.clipboard\.writeText\(canonicalWorkspaceUrl\(webSession\.getIdentifier\(\)\)\)/u,
@@ -208,7 +222,7 @@ assert.doesNotMatch(webRoot, /ProfileImportKind|profileImportOpen|profileName/u)
 assert.doesNotMatch(webRoot, /restoreOpen|restoreWorkspace|restoreFile/u);
 assert.match(webContracts, /storageMode: StorageMode;\s*accessPassword: string;\s*language:/u);
 assert.doesNotMatch(webContracts, /profileName: string;|\n  password: string;/u);
-assert.match(webSession, /archivePassword,\s*accessPassword,/u);
+assert.doesNotMatch(webSession, /restoreWorkspaceArchive|archivePassword/u);
 assert.doesNotMatch(webSession, /profilePassword/u);
 assert.match(webSession, /"\/api\/v1\/workspaces\/close"/u);
 for (const name of ["lockWorkspace", "closeWorkspace", "destroyWorkspace"]) {
@@ -222,12 +236,12 @@ for (const name of ["lockWorkspace", "closeWorkspace", "destroyWorkspace"]) {
 }
 assert.match(webSession, /private beginSessionTeardown\(\)[^]*this\.sessionLifecycle = "tearing-down";[^]*this\.stopRealtime\(\);/u);
 assert.match(webSession, /private async drainSessionRequests\(\)[^]*this\.pendingSessionRequests[^]*this\.pendingPersistenceCommands[^]*this\.sessionRefresh[^]*Promise\.allSettled\(pending\)/u);
-assert.match(webSession, /await deleteDeviceRecord\(workspaceDigest, legacyWorkspaceDigest\)\.catch/u);
+assert.match(webSession, /await deleteDeviceRecord\(workspaceDigest\)\.catch/u);
 assert.match(webSession, /"\/api\/v1\/workspaces\/destroy"[^]*explicitConfirmation: true[^]*if \(!response\.destroyed\)[^]*this\.identifier = "";/u);
 assert.doesNotMatch(webSession, /async requestArchive|async downloadProfileExport|async cancelArchive|async confirmErasure/u);
 assert.match(webPlatform, /window\.dispatchEvent\(new Event\("kaigen:web-close-request"\)\)/u);
 const webInvoke = webPlatform.slice(
-  webPlatform.indexOf("export async function invoke"),
+  webPlatform.indexOf("async function invokeWebPlatform"),
   webPlatform.indexOf("export function sendFile"),
 );
 const webviewHeartbeatNoop = webInvoke.indexOf('if (command === "report_webview_heartbeat")');
@@ -242,7 +256,7 @@ assert.ok(
   "only the exact desktop heartbeat command is consumed before all other commands reach the web backend",
 );
 assert.match(webPlatform, /command === "export_tox_history"/u);
-assert.match(webPlatform, /webSession\.command<ExportMessagePage>\("get_tox_messages_page"/u);
+assert.match(webPlatform, /request: RawInvoke = \(command, input\) => webSession\.command\(command, input\)[^]*request<ExportMessagePage>\("get_tox_messages_page"/u);
 assert.match(webPlatform, /getFileHandle\(temporaryName, \{ create: true \}\)/u);
 assert.match(webPlatform, /handle\.createWritable\(\)/u);
 assert.match(webPlatform, /webSession\.recoverIncomingTransfer\(profileId, messageId, path\.slice\(prefix\.length\), friendNumber\)/u,
@@ -255,7 +269,7 @@ assert.match(webSession, /void this\.backgroundTransfers\.run\(\)\.catch[^]*setI
 // using the same wire fixture asserted by the Rust producer test.
 assert.doesNotMatch(backgroundTransfers, /this\.operations\.accept/u,
   "file receive permission is executed by the backend, never by discovery");
-assert.match(messenger, /const nearby = \[\.\.\.nearViewport\][^]*setTransferPreviewPins\(activeProfileId, friendNumber, \[[^]*nearby\.flatMap[^]*fullImage\?\.path[^]*recoveringIncomingFilesRef\.current\.size >= 2[^]*recoverIncomingTransfer\(activeProfileId, messageId, path, friendNumber\)/u,
+assert.match(messenger, /const nearby = \[\.\.\.nearViewport\][^]*setTransferPreviewPins\(activeProfileId, friendNumber, \[[^]*nearby\.flatMap[^]*fullMedia\?\.path[^]*recoveringIncomingFilesRef\.current\.size >= 2[^]*recoverIncomingTransfer\(activeProfileId, messageId, path, friendNumber\)/u,
   "only visible and near-visible Web images are pinned and rehydrated with bounded concurrency");
 assert.match(messenger, /new IntersectionObserver\([^]*rootMargin: "100% 0px"/u,
   "preview recovery observes one viewport beyond the rendered chat window");
@@ -277,12 +291,13 @@ assert.match(rootApp, /const browseFile = async/u);
 assert.match(rootApp, /const browseFolder = async/u);
 if (!skipQtox) assert.doesNotMatch(rootApp, /extensions: \["kai", "tox"\]|qtoxSearchComplete|discover\(folder\)/u);
 assert.match(rootApp, /const password = passwords\[profile\.id\] \?\? "";[^]*\(profile\.encrypted && !password\)/u);
-assert.match(rootApp, /!profile\.loaded && <>\{profile\.encrypted && <input[^]*t\("Подключить"\)/u);
+assert.match(rootApp, /!profile\.loaded && profile\.error !== "PROFILE_FINALIZATION_REQUIRED" && <>\{profile\.encrypted && <input[^]*disabled=\{busy\[profile\.id\] \|\| \(profile\.encrypted && !passwords\[profile\.id\]\)\} onClick=\{\(\) => void unlock\(profile\)\}[^]*t\("Подключить"\)/u,
+  "ordinary locked profiles require their password; incomplete finalization cannot enter the ordinary unlock route");
 assert.match(rootApp, /onConnected\(nextProfiles, profile\.id\)/u,
   "unlock completion carries the exact profile owner to the coordinator");
 assert.doesNotMatch(rootApp, /createdFirstProfile|storeProfiles\(profiles, true\)/u,
   "the frontend must not infer the durable one-shot chooser from an empty profile list");
-assert.match(rootApp, /const created = await invoke<CreatedProfileResult>\("create_profile"[^]*await onProfiles\(created\.profiles, "create", created\.initialConnectionPresetRequired\)/u,
+assert.match(rootApp, /const created = webgate\s*\? await invoke<CreatedProfileResult>\("connect_webgate_profile"[^\n]*\n\s*: await invoke<CreatedProfileResult>\("create_profile"[^]*await onProfiles\(created\.profiles, "create", created\.initialConnectionPresetRequired\)/u,
   "profile creation returns profiles and the backend-owned chooser flag atomically");
 assert.match(rootApp, /storeProfiles\(profiles, source === "create" \? initialConnectionPresetRequired : undefined\)/u,
   "the committed create result routes directly into the modal without a fallible readback gap");

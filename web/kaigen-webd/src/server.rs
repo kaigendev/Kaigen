@@ -15,14 +15,13 @@ use base64::{
 use ring::signature;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::{json, Value};
-use sha1::{Digest as _, Sha1};
-use sha2::{Digest as Sha2Digest, Sha256};
+use sha1::Sha1;
+use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 use tauri_app_lib::web_core::{
-    decrypt_tox_profile_import, encrypt_tox_profile_export, AdmissionBlock, DataLease, LeaseDecision,
-    Presence, ResourceSnapshot,
-    StorageMode, WebFriendsRequest, WebMessageSearchRequest, WorkspaceConfig, WorkspaceDomain,
-    WorkspaceIdentifier,
+    decrypt_tox_profile_import, encrypt_tox_profile_export, AdmissionBlock, DataLease,
+    LeaseDecision, Presence, ResourceSnapshot, StorageMode, WebFriendsRequest,
+    WebMessageSearchRequest, WorkspaceConfig, WorkspaceDomain, WorkspaceIdentifier,
 };
 use tauri_app_lib::web_transfer_store::StoreError;
 use tokio::{
@@ -48,13 +47,16 @@ const MAX_AVATAR_COMMAND_JSON_BYTES: usize = 12 * 1024 * 1024;
 const MAX_RAW_PROFILE_IMPORT_BYTES: u64 = 25 * 1024 * 1024;
 const PROFILE_PACKAGE_IMPORT_OVERHEAD_BYTES: u64 = 64 * 1024 * 1024;
 const WORKSPACE_ARCHIVE_IMPORT_OVERHEAD_BYTES: u64 = 64 * 1024 * 1024;
-const LEGACY_DEVICE_COOKIE_NAME: &str = "__Host-kaigen-device";
 const DEVICE_COOKIE_PREFIX: &str = "__Host-kaigen-device-";
 const WORKSPACE_SELECTOR_HEADER: &str = "x-kaigen-workspace";
 const WORKSPACE_PROTOCOL_PREFIX: &str = "kaigen.workspace.";
-const WEB_CONTENT_SECURITY_POLICY: &str = "default-src 'none'; base-uri 'none'; connect-src 'self'; font-src 'self' data:; form-action 'none'; frame-ancestors 'none'; frame-src 'none'; img-src 'self' blob: data:; manifest-src 'self'; media-src 'self' blob:; object-src 'none'; script-src 'self'; script-src-attr 'none'; style-src 'self' 'unsafe-inline'; worker-src 'self'; require-trusted-types-for 'script'; trusted-types kaigen-spellcheck-worker kaigen-notifications-worker";
+const WEB_CONTENT_SECURITY_POLICY: &str = "default-src 'none'; base-uri 'none'; connect-src 'self'; font-src 'self' data:; form-action 'none'; frame-ancestors 'none'; frame-src 'none'; img-src 'self' blob: data:; manifest-src 'self'; media-src 'self' blob:; object-src 'none'; script-src 'self' 'wasm-unsafe-eval'; script-src-attr 'none'; style-src 'self' 'unsafe-inline'; worker-src 'self'; require-trusted-types-for 'script'; trusted-types kaigen-spellcheck-worker kaigen-notifications-worker kaigen-transfer-cache-worker kaigen-chat-media-worker";
+
+#[path = "webgate_api.rs"]
+pub(crate) mod webgate_api;
 
 struct HttpRequest {
+    query: String,
     method: String,
     path: String,
     headers: HashMap<String, String>,
@@ -102,7 +104,9 @@ pub async fn run(
         let mut interval = tokio::time::interval(Duration::from_secs(3));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         while !crate::shutdown_requested() {
-            if until_shutdown(interval.tick()).await.is_none() { break; }
+            if until_shutdown(interval.tick()).await.is_none() {
+                break;
+            }
             crate::web_push::tick(&push_state).await;
         }
     });
@@ -110,7 +114,9 @@ pub async fn run(
     periodic.spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(30));
         while !crate::shutdown_requested() {
-            if until_shutdown(interval.tick()).await.is_none() { break; }
+            if until_shutdown(interval.tick()).await.is_none() {
+                break;
+            }
             let state = Arc::clone(&checkpoint_state);
             let _ = tokio::task::spawn_blocking(move || state.maintenance_tick()).await;
         }
@@ -120,7 +126,9 @@ pub async fn run(
         let mut interval = tokio::time::interval(Duration::from_millis(250));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         while !crate::shutdown_requested() {
-            if until_shutdown(interval.tick()).await.is_none() { break; }
+            if until_shutdown(interval.tick()).await.is_none() {
+                break;
+            }
             let state = Arc::clone(&transfer_state);
             let _ = tokio::task::spawn_blocking(move || state.transfer_tick()).await;
         }
@@ -129,7 +137,9 @@ pub async fn run(
     let mut first_error = None;
     while !crate::shutdown_requested() {
         while let Some(result) = requests.try_join_next() {
-            if result.is_err() { first_error.get_or_insert("WEB_REQUEST_WORKER_FAILED".to_string()); }
+            if result.is_err() {
+                first_error.get_or_insert("WEB_REQUEST_WORKER_FAILED".to_string());
+            }
         }
         match tokio::time::timeout(Duration::from_millis(100), listener.accept()).await {
             Err(_) => continue,
@@ -140,7 +150,9 @@ pub async fn run(
             }
             Ok(Ok((stream, remote))) => {
                 let state = Arc::clone(&state);
-                requests.spawn(async move { let _ = handle_connection(stream, remote, state).await; });
+                requests.spawn(async move {
+                    let _ = handle_connection(stream, remote, state).await;
+                });
             }
         }
     }
@@ -150,14 +162,20 @@ pub async fn run(
     let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
     let blocking_deadline = Instant::now() + Duration::from_secs(60);
     while let Some(result) = tokio::time::timeout_at(deadline, periodic.join_next())
-        .await.map_err(|_| "WEB_SHUTDOWN_DRAIN_TIMEOUT".to_string())?
+        .await
+        .map_err(|_| "WEB_SHUTDOWN_DRAIN_TIMEOUT".to_string())?
     {
-        if result.is_err() { first_error.get_or_insert("WEB_PERIODIC_WORKER_FAILED".to_string()); }
+        if result.is_err() {
+            first_error.get_or_insert("WEB_PERIODIC_WORKER_FAILED".to_string());
+        }
     }
     while let Some(result) = tokio::time::timeout_at(deadline, requests.join_next())
-        .await.map_err(|_| "WEB_SHUTDOWN_DRAIN_TIMEOUT".to_string())?
+        .await
+        .map_err(|_| "WEB_SHUTDOWN_DRAIN_TIMEOUT".to_string())?
     {
-        if result.is_err() { first_error.get_or_insert("WEB_REQUEST_WORKER_FAILED".to_string()); }
+        if result.is_err() {
+            first_error.get_or_insert("WEB_REQUEST_WORKER_FAILED".to_string());
+        }
     }
     // Detached push deliveries retain AppState until their final storage update.
     // The two fixed owners are this run function and main's process owner.
@@ -171,7 +189,8 @@ pub async fn run(
     let shutdown = tokio::task::spawn_blocking(move || shutdown_state.shutdown(blocking_deadline));
     // A timeout does not assert the blocking writer stopped. Its own leases stay
     // alive, and main exits nonzero; the deployment caller must not start next.
-    tokio::time::timeout_at(deadline, shutdown).await
+    tokio::time::timeout_at(deadline, shutdown)
+        .await
         .map_err(|_| "WEB_SHUTDOWN_CHECKPOINT_TIMEOUT".to_string())?
         .map_err(|_| "WEB_SHUTDOWN_WORKER_FAILED".to_string())??;
     first_error.map_or(Ok(()), Err)
@@ -182,8 +201,11 @@ pub async fn run(
 async fn until_shutdown<F: std::future::Future>(future: F) -> Option<F::Output> {
     let mut future = std::pin::pin!(future);
     loop {
-        if crate::shutdown_requested() { return None; }
-        if let Ok(output) = tokio::time::timeout(Duration::from_millis(100), future.as_mut()).await {
+        if crate::shutdown_requested() {
+            return None;
+        }
+        if let Ok(output) = tokio::time::timeout(Duration::from_millis(100), future.as_mut()).await
+        {
             return Some(output);
         }
     }
@@ -198,11 +220,23 @@ async fn handle_connection(
         None => return Ok(()),
         Some(Ok(request)) => request,
         Some(Err(error)) => {
-            return until_shutdown(write_response(&mut stream, error_response(error.status, error.code)))
-                .await.unwrap_or(Ok(()));
+            return until_shutdown(write_response(
+                &mut stream,
+                error_response(error.status, error.code),
+            ))
+            .await
+            .unwrap_or(Ok(()));
         }
     };
-    if crate::shutdown_requested() { return Ok(()); }
+    if crate::shutdown_requested() {
+        return Ok(());
+    }
+    if let Some((identifier, operation)) = webgate_api::scoped_path(&request.path) {
+        if operation == "stream" {
+            let identifier = identifier.to_string();
+            return webgate_api::stream(stream, request, state, identifier).await;
+        }
+    }
     if request.path == "/ws/v1" {
         return handle_websocket(stream, request, state).await;
     }
@@ -250,6 +284,10 @@ async fn read_request(stream: &mut TcpStream) -> Result<HttpRequest, HttpRequest
         return Err(request_error(400, "REQUEST_LINE_INVALID"));
     }
     let path = target.split('?').next().unwrap_or(target).to_string();
+    let query = target
+        .split_once('?')
+        .map(|(_, query)| query.to_string())
+        .unwrap_or_default();
     let mut headers = HashMap::new();
     for line in lines.filter(|line| !line.is_empty()) {
         let (name, value) = line
@@ -291,6 +329,7 @@ async fn read_request(stream: &mut TcpStream) -> Result<HttpRequest, HttpRequest
         buffer.extend_from_slice(&chunk[..read]);
     }
     Ok(HttpRequest {
+        query,
         method,
         path,
         headers,
@@ -322,6 +361,11 @@ fn request_error(status: u16, code: &'static str) -> HttpRequestError {
 }
 
 fn request_body_limit(path: &str) -> usize {
+    if webgate_api::scoped_path(path).is_some() {
+        return MAX_AVATAR_COMMAND_JSON_BYTES
+            .saturating_add(64 * 1024)
+            .max(512 * 1024);
+    }
     match path {
         "/api/v1/commands/save_local_state" => MAX_LOCAL_STATE_JSON_BYTES,
         "/api/v1/commands/set_profile_avatar" => MAX_AVATAR_COMMAND_JSON_BYTES,
@@ -330,6 +374,14 @@ fn request_body_limit(path: &str) -> usize {
 }
 
 async fn route(request: HttpRequest, remote: SocketAddr, state: Arc<AppState>) -> HttpResponse {
+    if let Some((identifier, operation)) = webgate_api::scoped_path(&request.path) {
+        let identifier = identifier.to_string();
+        let operation = operation.to_string();
+        return webgate_api::route(request, remote, state, identifier, operation).await;
+    }
+    if webgate_api::reserved_path(&request.path) {
+        return error_response(404, "NOT_FOUND");
+    }
     if request.method == "GET" && request.path == "/healthz" {
         return json_response(
             200,
@@ -470,7 +522,10 @@ struct CreateResponse {
     workspace: WorkspaceView,
 }
 
-fn creation_admission_error(reason: Option<AdmissionBlock>, snapshot: ResourceSnapshot) -> &'static str {
+fn creation_admission_error(
+    reason: Option<AdmissionBlock>,
+    snapshot: ResourceSnapshot,
+) -> &'static str {
     match reason {
         Some(AdmissionBlock::MaxInstances) => "CREATION_LIMIT_REACHED",
         Some(AdmissionBlock::Disk) => "CREATION_DISK_LIMIT",
@@ -560,6 +615,8 @@ fn create_workspace(request: HttpRequest, state: Arc<AppState>, source: [u8; 32]
             domain,
             runtime: None,
             browser_locked: false,
+            mirror: Default::default(),
+            remote_profiles: Default::default(),
             pending_profile_import: None,
             last_payload_checkpoint: Instant::now(),
             durability: None,
@@ -598,9 +655,7 @@ fn create_workspace(request: HttpRequest, state: Arc<AppState>, source: [u8; 32]
     wipe_string(&mut input.access_password);
     match result {
         Ok(value) => json_response(201, &value),
-        Err(code) if creation_temporarily_unavailable(&code) => {
-            error_response(503, &code)
-        }
+        Err(code) if creation_temporarily_unavailable(&code) => error_response(503, &code),
         Err(code) => error_response(400, &code),
     }
 }
@@ -704,9 +759,7 @@ fn start_workspace_import(
     })();
     match result {
         Ok(value) => json_response(200, &value),
-        Err(code) if creation_temporarily_unavailable(&code) => {
-            error_response(503, &code)
-        }
+        Err(code) if creation_temporarily_unavailable(&code) => error_response(503, &code),
         Err(code) => operation_error(&code),
     }
 }
@@ -1067,6 +1120,8 @@ async fn finish_workspace_import(
         domain: prepared.domain,
         runtime: None,
         browser_locked: false,
+        mirror: Default::default(),
+        remote_profiles: Default::default(),
         pending_profile_import: None,
         last_payload_checkpoint: Instant::now(),
         durability: None,
@@ -1120,12 +1175,18 @@ fn lookup_workspace(request: &HttpRequest, state: Arc<AppState>) -> HttpResponse
         Err(response) => return response,
     };
     let (exists, pending_access_link) = match state.inner.lock() {
-        Ok(inner) => WorkspaceIdentifier::parse(&input.identifier).ok().and_then(|identifier| {
-            let access_hash = identifier.hash();
-            let hash = resolve_workspace_hash(&inner.workspaces, &access_hash)?;
-            let stored = inner.workspaces.get(&hash)?;
-            Some((true, stored.domain.pending_access_link_hash == Some(access_hash)))
-        }).unwrap_or((false, false)),
+        Ok(inner) => WorkspaceIdentifier::parse(&input.identifier)
+            .ok()
+            .and_then(|identifier| {
+                let access_hash = identifier.hash();
+                let hash = resolve_workspace_hash(&inner.workspaces, &access_hash)?;
+                let stored = inner.workspaces.get(&hash)?;
+                Some((
+                    true,
+                    stored.domain.pending_access_link_hash == Some(access_hash),
+                ))
+            })
+            .unwrap_or((false, false)),
         Err(_) => return error_response(503, "STATE_UNAVAILABLE"),
     };
     json_response(
@@ -1138,6 +1199,7 @@ fn lookup_workspace(request: &HttpRequest, state: Arc<AppState>) -> HttpResponse
     )
 }
 
+#[cfg(test)]
 fn workspace_exists<V>(workspaces: &HashMap<[u8; 32], V>, identifier: &str) -> bool {
     WorkspaceIdentifier::parse(identifier)
         .ok()
@@ -1151,18 +1213,34 @@ fn resolve_workspace_hash(
     workspaces.iter().find_map(|(hash, stored)| {
         let current = stored.domain.access_link_hash.unwrap_or(*hash);
         (bool::from(current.ct_eq(access_hash))
-            || stored.domain.pending_access_link_hash.as_ref()
+            || stored
+                .domain
+                .pending_access_link_hash
+                .as_ref()
                 .is_some_and(|pending| bool::from(pending.ct_eq(access_hash))))
-            .then_some(*hash)
+        .then_some(*hash)
     })
 }
 
-fn require_workspace_control(stored: &StoredWorkspace, session: SessionContext) -> Result<(), String> {
-    if stored.browser_locked || stored.runtime.is_none() { return Err("AUTH_INVALID".to_string()); }
-    if stored.domain.close_transaction.is_some() { return Err("WORKSPACE_FROZEN".to_string()); }
-    if !stored.domain.ui_lease.has_holder() { return Err("UI_LEASE_REQUIRED".to_string()); }
-    if !stored.domain.ui_lease.owned_by(&session.device_hash) { return Err("UI_LEASE_TRANSFERRED".to_string()); }
-    if stored.domain.ui_lease.is_stale(now_seconds()) { return Err("UI_LEASE_STALE".to_string()); }
+fn require_workspace_control(
+    stored: &StoredWorkspace,
+    session: SessionContext,
+) -> Result<(), String> {
+    if stored.browser_locked || stored.runtime.is_none() {
+        return Err("AUTH_INVALID".to_string());
+    }
+    if stored.domain.close_transaction.is_some() {
+        return Err("WORKSPACE_FROZEN".to_string());
+    }
+    if !stored.domain.ui_lease.has_holder() {
+        return Err("UI_LEASE_REQUIRED".to_string());
+    }
+    if !stored.domain.ui_lease.owned_by(&session.device_hash) {
+        return Err("UI_LEASE_TRANSFERRED".to_string());
+    }
+    if stored.domain.ui_lease.is_stale(now_seconds()) {
+        return Err("UI_LEASE_STALE".to_string());
+    }
     Ok(())
 }
 
@@ -1180,13 +1258,18 @@ fn change_workspace_password(request: &HttpRequest, state: Arc<AppState>) -> Htt
     };
     let response = authenticated_operation(request, state, |stored, session, _| {
         require_workspace_control(stored, session)?;
-        let replacement = stored.domain.vault.as_ref().ok_or("WORKSPACE_NOT_INITIALIZED")?
+        let replacement = stored
+            .domain
+            .vault
+            .as_ref()
+            .ok_or("WORKSPACE_NOT_INITIALIZED")?
             .prepare_access_password_change(&input.current_password, &input.new_password)?;
         let previous = stored.domain.vault.replace(replacement);
         if let Err(error) = AppState::persist_credentials(stored) {
             stored.domain.vault = previous;
             return Err(error);
         }
+        stored.mirror.revoke_all();
         Ok(json!({ "changed": true }))
     });
     wipe_string(&mut input.current_password);
@@ -1201,24 +1284,47 @@ fn prepare_workspace_link(request: &HttpRequest, state: Arc<AppState>) -> HttpRe
     };
     let result = (|| -> Result<Value, String> {
         let mut inner = state.inner.lock().map_err(|_| "STATE_UNAVAILABLE")?;
-        let (session, _) = authenticate_request(&inner, request,
-            request.headers.get("x-kaigen-csrf").map(String::as_str))?;
+        let (session, _) = authenticate_request(
+            &inner,
+            request,
+            request.headers.get("x-kaigen-csrf").map(String::as_str),
+        )?;
         let current = WorkspaceIdentifier::parse(&input.identifier)
-            .map_err(|_| "WORKSPACE_LINK_CHANGED")?.hash();
-        let stored = inner.workspaces.get(&session.workspace_hash).ok_or("AUTH_INVALID")?;
+            .map_err(|_| "WORKSPACE_LINK_CHANGED")?
+            .hash();
+        let stored = inner
+            .workspaces
+            .get(&session.workspace_hash)
+            .ok_or("AUTH_INVALID")?;
         require_workspace_control(stored, session)?;
-        if !bool::from(stored.domain.access_link_hash.unwrap_or(session.workspace_hash).ct_eq(&current)) {
+        if !bool::from(
+            stored
+                .domain
+                .access_link_hash
+                .unwrap_or(session.workspace_hash)
+                .ct_eq(&current),
+        ) {
             return Err("WORKSPACE_LINK_CHANGED".to_string());
         }
         let identifier = WorkspaceIdentifier::generate()?;
         let next_hash = identifier.hash();
         if inner.workspaces.contains_key(&next_hash)
-            || resolve_workspace_hash(&inner.workspaces, &next_hash).is_some() {
+            || resolve_workspace_hash(&inner.workspaces, &next_hash).is_some()
+        {
             return Err("WORKSPACE_LINK_CHANGED".to_string());
         }
-        let stored = inner.workspaces.get_mut(&session.workspace_hash).ok_or("AUTH_INVALID")?;
-        let previous = (stored.domain.pending_access_link_hash, stored.domain.access_link_revision);
-        let revision = previous.1.checked_add(1).ok_or("WORKSPACE_LINK_REVISION_EXHAUSTED")?;
+        let stored = inner
+            .workspaces
+            .get_mut(&session.workspace_hash)
+            .ok_or("AUTH_INVALID")?;
+        let previous = (
+            stored.domain.pending_access_link_hash,
+            stored.domain.access_link_revision,
+        );
+        let revision = previous
+            .1
+            .checked_add(1)
+            .ok_or("WORKSPACE_LINK_REVISION_EXHAUSTED")?;
         stored.domain.pending_access_link_hash = Some(next_hash);
         stored.domain.access_link_revision = revision;
         if let Err(error) = AppState::persist_credentials(stored) {
@@ -1228,7 +1334,10 @@ fn prepare_workspace_link(request: &HttpRequest, state: Arc<AppState>) -> HttpRe
         }
         Ok(json!({ "identifier": identifier.expose_once(), "revision": revision }))
     })();
-    match result { Ok(value) => json_response(200, &value), Err(code) => operation_error(&code) }
+    match result {
+        Ok(value) => json_response(200, &value),
+        Err(code) => operation_error(&code),
+    }
 }
 
 #[derive(Deserialize)]
@@ -1246,16 +1355,23 @@ fn activate_workspace_link(request: &HttpRequest, state: Arc<AppState>) -> HttpR
     authenticated_operation(request, state.clone(), |stored, session, maintenance| {
         require_workspace_control(stored, session)?;
         let next_hash = WorkspaceIdentifier::parse(&input.identifier)
-            .map_err(|_| "WORKSPACE_LINK_CHANGED")?.hash();
-        let current = stored.domain.access_link_hash.unwrap_or(session.workspace_hash);
+            .map_err(|_| "WORKSPACE_LINK_CHANGED")?
+            .hash();
+        let current = stored
+            .domain
+            .access_link_hash
+            .unwrap_or(session.workspace_hash);
         if !bool::from(current.ct_eq(&next_hash)) {
             if stored.domain.access_link_revision != input.expected_revision
                 || stored.domain.pending_access_link_hash != Some(next_hash)
             {
                 return Err("WORKSPACE_LINK_CHANGED".to_string());
             }
-            let previous = (stored.domain.access_link_hash, stored.domain.pending_access_link_hash,
-                stored.domain.previous_access_link_hash);
+            let previous = (
+                stored.domain.access_link_hash,
+                stored.domain.pending_access_link_hash,
+                stored.domain.previous_access_link_hash,
+            );
             stored.domain.access_link_hash = Some(next_hash);
             stored.domain.pending_access_link_hash = None;
             stored.domain.previous_access_link_hash = Some(current);
@@ -1273,17 +1389,37 @@ fn activate_workspace_link(request: &HttpRequest, state: Arc<AppState>) -> HttpR
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct PasswordNotificationRequest {
+    routing_hint: String,
+    event_token: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PasswordNotificationHandoff {
+    routing_hint: String,
+    event_token: String,
+    profile_id: String,
+    target: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct PasswordLoginRequest {
     identifier: String,
     password: String,
     public_key: String,
     #[serde(default)]
     proof: Option<ProofSolution>,
+    #[serde(default)]
+    notification: Option<PasswordNotificationRequest>,
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SessionResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    notification_handoff: Option<PasswordNotificationHandoff>,
     csrf_token: String,
     device_id: String,
     workspace_selector: String,
@@ -1318,7 +1454,8 @@ async fn password_login(
             .inner
             .lock()
             .map_err(|_| ("STATE_UNAVAILABLE".to_string(), 0))?;
-        let workspace_hash = access_hash.and_then(|hash| resolve_workspace_hash(&inner.workspaces, &hash));
+        let workspace_hash =
+            access_hash.and_then(|hash| resolve_workspace_hash(&inner.workspaces, &hash));
         let policy = inner.auth_backoff.policy(&source, now);
         if policy.allowed_at > now {
             return Err(("AUTH_DELAYED".to_string(), policy.allowed_at - now));
@@ -1385,6 +1522,35 @@ async fn password_login(
                 .workspaces
                 .get_mut(&hash)
                 .expect("authenticated workspace");
+            // The password has been verified. Resolve only this browser's pending
+            // event before the normal enrollment revokes its previous device.
+            let notification_handoff = input.notification.as_ref().and_then(|notification| {
+                if notification.event_token.len() > 512 {
+                    return None;
+                }
+                let cookie = cookie_value(request, &workspace_cookie_name(&hash))?;
+                let previous_device = stored.domain.devices.token_hash(&cookie).ok()?;
+                let args = json!({
+                    "routingHint": notification.routing_hint.as_str(),
+                    "eventToken": notification.event_token.as_str(),
+                });
+                let resolved = crate::web_push::dispatch(stored, &previous_device, "web_push_target", &args).ok()?;
+                if resolved.get("matched").and_then(Value::as_bool) != Some(true) {
+                    return None;
+                }
+                let target = resolved.get("target")?;
+                let profile_id = target.get("profileId")?.as_str()?;
+                let destination = target.get("target")?.as_str()?;
+                if !stored.domain.profiles.profiles().iter().any(|profile| profile.id == profile_id) {
+                    return None;
+                }
+                Some(PasswordNotificationHandoff {
+                    routing_hint: notification.routing_hint.clone(),
+                    event_token: notification.event_token.clone(),
+                    profile_id: profile_id.to_string(),
+                    target: destination.to_string(),
+                })
+            });
             let enrollment = stored
                 .domain
                 .devices
@@ -1405,6 +1571,7 @@ async fn password_login(
             AppState::persist(stored).map_err(|_| ("PERSIST_FAILED".to_string(), 0))?;
             (
                 SessionResponse {
+                    notification_handoff,
                     csrf_token: String::new(),
                     device_id: enrollment.device_token.clone(),
                     workspace_selector: workspace_selector(&hash),
@@ -1412,8 +1579,16 @@ async fn password_login(
                     access_link_pending: access_hash.is_some()
                         && stored.domain.pending_access_link_hash == access_hash,
                     previous_access_hash: if stored.domain.pending_access_link_hash == access_hash {
-                        Some(workspace_selector(&stored.domain.access_link_hash.unwrap_or(hash)))
-                    } else { stored.domain.previous_access_link_hash.as_ref().map(workspace_selector) },
+                        Some(workspace_selector(
+                            &stored.domain.access_link_hash.unwrap_or(hash),
+                        ))
+                    } else {
+                        stored
+                            .domain
+                            .previous_access_link_hash
+                            .as_ref()
+                            .map(workspace_selector)
+                    },
                     workspace: view,
                 },
                 enrollment.device_token,
@@ -1438,11 +1613,7 @@ async fn password_login(
     })();
     wipe_string(&mut input.password);
     match result {
-        Ok((response, token, hash)) => session_response(
-            response,
-            &token,
-            &hash,
-        ),
+        Ok((response, token, hash)) => session_response(response, &token, &hash),
         Err((code, delay)) => {
             if delay > 0 {
                 tokio::time::sleep(Duration::from_secs(delay)).await;
@@ -1542,8 +1713,10 @@ fn device_login(request: &HttpRequest, state: Arc<AppState>) -> HttpResponse {
     let result = (|| -> Result<(SessionResponse, [u8; 32]), String> {
         let mut inner = state.inner.lock().map_err(|_| "STATE_UNAVAILABLE")?;
         let access_hash = hash.ok_or("DEVICE_AUTH_INVALID")?;
-        ensure_workspace_selector(request, &access_hash).map_err(|_| "DEVICE_AUTH_INVALID".to_string())?;
-        let hash = resolve_workspace_hash(&inner.workspaces, &access_hash).ok_or("DEVICE_AUTH_INVALID")?;
+        ensure_workspace_selector(request, &access_hash)
+            .map_err(|_| "DEVICE_AUTH_INVALID".to_string())?;
+        let hash =
+            resolve_workspace_hash(&inner.workspaces, &access_hash).ok_or("DEVICE_AUTH_INVALID")?;
         let maintenance = inner.maintenance;
         let (device_hash, view, access_link_revision, access_link_pending, previous_access_hash) = {
             let stored = inner
@@ -1575,15 +1748,28 @@ fn device_login(request: &HttpRequest, state: Arc<AppState>) -> HttpResponse {
                 maintenance,
                 now_seconds(),
             );
-            (device_hash, view, stored.domain.access_link_revision,
+            (
+                device_hash,
+                view,
+                stored.domain.access_link_revision,
                 stored.domain.pending_access_link_hash == Some(access_hash),
                 if stored.domain.pending_access_link_hash == Some(access_hash) {
-                    Some(workspace_selector(&stored.domain.access_link_hash.unwrap_or(hash)))
-                } else { stored.domain.previous_access_link_hash.as_ref().map(workspace_selector) })
+                    Some(workspace_selector(
+                        &stored.domain.access_link_hash.unwrap_or(hash),
+                    ))
+                } else {
+                    stored
+                        .domain
+                        .previous_access_link_hash
+                        .as_ref()
+                        .map(workspace_selector)
+                },
+            )
         };
         let csrf = AppState::issue_session(&mut inner, hash, device_hash)?;
         Ok((
             SessionResponse {
+                notification_handoff: None,
                 csrf_token: csrf,
                 device_id: input.device_id.clone(),
                 workspace_selector: workspace_selector(&hash),
@@ -1729,11 +1915,9 @@ fn renew(request: &HttpRequest, state: Arc<AppState>) -> HttpResponse {
 
 fn lock_workspace(request: &HttpRequest, state: Arc<AppState>) -> HttpResponse {
     let csrf = request.headers.get("x-kaigen-csrf").map(String::as_str);
-    let locked = (|| -> Result<([u8; 32], bool), String> {
+    let locked = (|| -> Result<[u8; 32], String> {
         let mut inner = state.inner.lock().map_err(|_| "STATE_UNAVAILABLE")?;
-        let (session, cookie) = authenticate_request(&inner, request, csrf)?;
-        let clear_legacy_cookie =
-            legacy_device_cookie(request).is_some_and(|legacy| legacy == cookie);
+        let (session, _) = authenticate_request(&inner, request, csrf)?;
         {
             let stored = inner
                 .workspaces
@@ -1753,9 +1937,9 @@ fn lock_workspace(request: &HttpRequest, state: Arc<AppState>) -> HttpResponse {
         inner
             .sessions
             .retain(|_, candidate| candidate.workspace_hash != session.workspace_hash);
-        Ok((session.workspace_hash, clear_legacy_cookie))
+        Ok(session.workspace_hash)
     })();
-    let (workspace_hash, clear_legacy_cookie) = match locked {
+    let workspace_hash = match locked {
         Ok(value) => value,
         Err(code) => return operation_error(&code),
     };
@@ -1767,14 +1951,6 @@ fn lock_workspace(request: &HttpRequest, state: Arc<AppState>) -> HttpResponse {
             workspace_cookie_name(&workspace_hash)
         ),
     ));
-    if clear_legacy_cookie {
-        response.headers.push((
-            "Set-Cookie".to_string(),
-            format!(
-                "{LEGACY_DEVICE_COOKIE_NAME}=; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=0"
-            ),
-        ));
-    }
     response
 }
 
@@ -1872,11 +2048,9 @@ async fn close_workspace(request: &HttpRequest, state: Arc<AppState>) -> HttpRes
         Err(code) => return operation_error(&code),
     };
     let csrf = request.headers.get("x-kaigen-csrf").map(String::as_str);
-    let closed = (|| -> Result<([u8; 32], bool), String> {
+    let closed = (|| -> Result<[u8; 32], String> {
         let mut inner = state.inner.lock().map_err(|_| "STATE_UNAVAILABLE")?;
-        let (session, cookie) = authenticate_request(&inner, request, csrf)?;
-        let clear_legacy_cookie =
-            legacy_device_cookie(request).is_some_and(|legacy| legacy == cookie);
+        let (session, _) = authenticate_request(&inner, request, csrf)?;
         {
             let stored = inner
                 .workspaces
@@ -1910,9 +2084,9 @@ async fn close_workspace(request: &HttpRequest, state: Arc<AppState>) -> HttpRes
         // Publish the irreversible stop while the registry still excludes a
         // concurrent login from attaching a new runtime to this old worker.
         quiescence.request_stop();
-        Ok((session.workspace_hash, clear_legacy_cookie))
+        Ok(session.workspace_hash)
     })();
-    let (workspace_hash, clear_legacy_cookie) = match closed {
+    let workspace_hash = match closed {
         Ok(value) => value,
         Err(code) => return operation_error(&code),
     };
@@ -1938,14 +2112,6 @@ async fn close_workspace(request: &HttpRequest, state: Arc<AppState>) -> HttpRes
             workspace_cookie_name(&workspace_hash)
         ),
     ));
-    if clear_legacy_cookie {
-        response.headers.push((
-            "Set-Cookie".to_string(),
-            format!(
-                "{LEGACY_DEVICE_COOKIE_NAME}=; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=0"
-            ),
-        ));
-    }
     response
 }
 
@@ -1954,11 +2120,30 @@ async fn command(request: &HttpRequest, state: Arc<AppState>, command: &str) -> 
         Ok(value) => value,
         Err(response) => return response,
     };
+    if matches!(
+        command,
+        "connect_webgate_profile"
+            | "update_webgate_profile"
+            | "webgate_profiles"
+            | "webgate_invoke"
+            | "webgate_select_profile"
+            | "webgate_disconnect_profile"
+            | "webgate_restore_profile"
+            | "webgate_forget_profile"
+            | "get_webgate_connection_card"
+            | "get_webgate_profile_identity"
+            | "webgate_file_operation"
+    ) {
+        return webgate_api::browser_command(request, state, command, args).await;
+    }
     if command == "search_tox_messages" {
         return message_search_command(request, state, &args).await;
     }
     if command == "get_tox_friends" {
         return friends_command(request, state, &args).await;
+    }
+    if command == "test_tox_bootstrap_node" {
+        return bootstrap_probe_command(request, state, &args).await;
     }
     if command == "destroy_active_profile" {
         return destroy_profile_command(request, state, &args).await;
@@ -2191,6 +2376,83 @@ async fn friends_command(
     }
 }
 
+async fn bootstrap_probe_command(
+    request: &HttpRequest,
+    state: Arc<AppState>,
+    args: &Value,
+) -> HttpResponse {
+    let csrf = request.headers.get("x-kaigen-csrf").map(String::as_str);
+    let prepared = (|| -> Result<_, String> {
+        let inner = state.inner.lock().map_err(|_| "STATE_UNAVAILABLE")?;
+        let (session, _) = authenticate_request(&inner, request, csrf)?;
+        let stored = inner
+            .workspaces
+            .get(&session.workspace_hash)
+            .ok_or("AUTH_INVALID")?;
+        if !stored.domain.ui_lease.owned_by(&session.device_hash) {
+            return Err("UI_LEASE_TRANSFERRED".into());
+        }
+        if stored.domain.close_transaction.is_some() {
+            return Err("WORKSPACE_FROZEN".into());
+        }
+        let probe = stored
+            .runtime
+            .as_ref()
+            .ok_or("RUNTIME_LOCKED")?
+            .prepare_bootstrap_probe(
+                args.get("node")
+                    .cloned()
+                    .ok_or("COMMAND_ARGUMENT_INVALID")?,
+            )?;
+        Ok((session, probe))
+    })();
+    let (session, probe) = match prepared {
+        Ok(prepared) => prepared,
+        Err(code) => return operation_error(&code),
+    };
+    let (probe, result) = match tokio::task::spawn_blocking(move || {
+        let result = probe.execute();
+        (probe, result)
+    })
+    .await
+    {
+        Ok(completed) => completed,
+        Err(_) => return operation_error("STATE_UNAVAILABLE"),
+    };
+    let checked = (|| -> Result<&'static str, String> {
+        let inner = state.inner.lock().map_err(|_| "STATE_UNAVAILABLE")?;
+        let (current, _) = authenticate_request(&inner, request, csrf)?;
+        if current.workspace_hash != session.workspace_hash
+            || current.device_hash != session.device_hash
+        {
+            return Err("AUTH_INVALID".into());
+        }
+        let stored = inner
+            .workspaces
+            .get(&session.workspace_hash)
+            .ok_or("AUTH_INVALID")?;
+        if !stored.domain.ui_lease.owned_by(&session.device_hash) {
+            return Err("UI_LEASE_TRANSFERRED".into());
+        }
+        if stored.domain.close_transaction.is_some() {
+            return Err("WORKSPACE_FROZEN".into());
+        }
+        if !stored
+            .runtime
+            .as_ref()
+            .ok_or("RUNTIME_LOCKED")?
+            .bootstrap_probe_is_current(&probe)
+        {
+            return Err("BOOTSTRAP_ROUTE_CHANGED".into());
+        }
+        result
+    })();
+    match checked {
+        Ok(status) => json_response(200, &json!(status)),
+        Err(code) => operation_error(&code),
+    }
+}
+
 async fn message_search_command(
     request: &HttpRequest,
     state: Arc<AppState>,
@@ -2283,21 +2545,38 @@ fn change_stored_profile_password(
     };
     let current = optional_password_arg(args, "currentPassword")?;
     let next = optional_password_arg(args, "newPassword")?;
-    let previous_protected = stored.domain.profiles.profiles().iter()
-        .find(|profile| profile.id == profile_id).ok_or("PROFILE_NOT_FOUND")?.password_protected;
+    let previous_protected = stored
+        .domain
+        .profiles
+        .profiles()
+        .iter()
+        .find(|profile| profile.id == profile_id)
+        .ok_or("PROFILE_NOT_FOUND")?
+        .password_protected;
     let runtime = stored.runtime.as_ref().ok_or("RUNTIME_LOCKED")?;
     stored
         .domain
         .change_profile_password_transaction(&profile_id, next.is_some(), || {
             runtime.change_profile_password(&profile_id, current, next)
         })?;
-    if let Err(error) = stored.checkpoint(true).and_then(|_| AppState::persist(stored)) {
-        let rollback = stored.runtime.as_ref().ok_or("RUNTIME_LOCKED")?
+    if let Err(error) = stored
+        .checkpoint(true)
+        .and_then(|_| AppState::persist(stored))
+    {
+        let rollback = stored
+            .runtime
+            .as_ref()
+            .ok_or("RUNTIME_LOCKED")?
             .change_profile_password(&profile_id, next, current);
         return Err(match rollback {
-            Ok(()) => match stored.domain.set_profile_password_protected(&profile_id, previous_protected) {
+            Ok(()) => match stored
+                .domain
+                .set_profile_password_protected(&profile_id, previous_protected)
+            {
                 Ok(()) => error,
-                Err(metadata) => format!("{error}; profile metadata rollback also failed: {metadata}"),
+                Err(metadata) => {
+                    format!("{error}; profile metadata rollback also failed: {metadata}")
+                }
             },
             Err(rollback) => format!("{error}; profile password rollback also failed: {rollback}"),
         });
@@ -2312,23 +2591,29 @@ fn dispatch_command(
     command: &str,
     args: &Value,
 ) -> Result<Value, String> {
-    if !stored.domain.ui_lease.owned_by(&session.device_hash) {
-        return Err("UI_LEASE_TRANSFERRED".to_string());
-    }
     if stored.domain.close_transaction.is_some() {
         return Err("WORKSPACE_FROZEN".to_string());
+    }
+    // These commands manage only this authenticated device's notifications.
+    // A different UI owner must not block opt-out or notification activation.
+    if matches!(
+        command,
+        "web_push_config" | "web_push_subscribe" | "web_push_unsubscribe" | "web_push_target" | "web_push_view"
+    ) {
+        return crate::web_push::dispatch(stored, &session.device_hash, command, args);
+    }
+    if !stored.domain.ui_lease.owned_by(&session.device_hash) {
+        return Err("UI_LEASE_TRANSFERRED".to_string());
     }
     let mut changed = false;
     let mut runtime_checkpoint_complete = false;
     let result = match command {
-        "web_push_config" | "web_push_subscribe" | "web_push_unsubscribe" | "web_push_target" => {
-            crate::web_push::dispatch(stored, &session.device_hash, command, args)?
-        }
         "get_startup_state" => json!({
-            "firstRun": stored.domain.profiles.stored_count() == 0,
+            "firstRun": stored.domain.profiles.stored_count() == 0 && stored.remote_profiles.summaries().is_empty(),
             "language": stored.domain.language,
             "closeToTray": false,
-            "initialConnectionPresetRequired": stored.domain.initial_connection_preset_required(),
+            "initialConnectionPresetRequired": stored.domain.initial_connection_preset_required()
+                && (stored.domain.profiles.stored_count() > 0 || stored.remote_profiles.summaries().is_empty()),
             "profiles": profile_summaries(stored)
         }),
         "continue_with_loaded_profiles" => Value::Array(profile_summaries(stored)),
@@ -2487,27 +2772,6 @@ fn dispatch_command(
             changed = true;
             serde_json::to_value(view).map_err(|_| "TRANSFER_STATE_INVALID")?
         }
-        "acknowledge_web_incoming_chunk" => {
-            let profile_id = string_arg(args, "profileId")?;
-            let transfer_id = string_arg(args, "transferId")?;
-            let through = args
-                .get("through")
-                .and_then(Value::as_u64)
-                .ok_or("TRANSFER_ACK_RANGE_INVALID")?;
-            let view = stored
-                .runtime
-                .as_mut()
-                .ok_or("RUNTIME_LOCKED")?
-                .acknowledge_web_incoming_chunk(
-                    &mut stored.domain,
-                    profile_id,
-                    transfer_id,
-                    through,
-                    now_seconds(),
-                    now_millis(),
-                )?;
-            serde_json::to_value(view).map_err(|_| "TRANSFER_STATE_INVALID")?
-        }
         "complete_web_incoming_transfer" => {
             let profile_id = string_arg(args, "profileId")?;
             let transfer_id = string_arg(args, "transferId")?;
@@ -2609,6 +2873,26 @@ fn dispatch_command(
                     .cloned()
                     .ok_or("COMMAND_ARGUMENT_INVALID")?,
             )?,
+        "get_tox_bootstrap_nodes" => stored
+            .runtime
+            .as_ref()
+            .ok_or("RUNTIME_LOCKED")?
+            .bootstrap_nodes()?,
+        "set_tox_bootstrap_nodes" => {
+            let runtime = stored.runtime.as_ref().ok_or("RUNTIME_LOCKED")?;
+            let update = runtime.prepare_bootstrap_nodes_update(
+                args.get("nodes")
+                    .cloned()
+                    .ok_or("COMMAND_ARGUMENT_INVALID")?,
+            )?;
+            update.commit(|| stored.checkpoint(true))?;
+            runtime_checkpoint_complete = true;
+            stored
+                .runtime
+                .as_ref()
+                .ok_or("RUNTIME_LOCKED")?
+                .bootstrap_nodes()?
+        }
         "apply_initial_connection_preset" => {
             let preset = string_arg(args, "preset")?;
             if !matches!(preset, "safe" | "fast") {
@@ -2738,10 +3022,7 @@ fn dispatch_command(
                 .map(|profile| profile.display_name.clone())
                 .ok_or("PROFILE_NOT_FOUND")?;
             let password = optional_password_arg(args, "password")?;
-            let runtime = stored
-                .runtime
-                .as_ref()
-                .ok_or("RUNTIME_LOCKED")?;
+            let runtime = stored.runtime.as_ref().ok_or("RUNTIME_LOCKED")?;
             if command == "export_kai_profile" {
                 runtime.export_kai_profile(&profile_id, &display_name, password)?
             } else {
@@ -2821,6 +3102,7 @@ fn command_requires_immediate_checkpoint(command: &str) -> bool {
         command,
         "save_layout_state"
             | "save_local_state"
+            | "set_tox_bootstrap_nodes"
             | "delete_tox_message"
             | "complete_pq_identity"
             | "skip_pq_auto"
@@ -2850,6 +3132,7 @@ fn command_mutates_runtime(command: &str) -> bool {
             | "restart_tor"
             | "set_proxy_settings"
             | "set_network_settings"
+            | "set_tox_bootstrap_nodes"
             | "apply_initial_connection_preset"
             | "request_pq_session"
             | "complete_pq_identity"
@@ -2875,6 +3158,8 @@ fn command_mutates_runtime(command: &str) -> bool {
 struct BeginOutgoingTransferRequest {
     profile_id: String,
     friend_number: u32,
+    expected_public_key: String,
+    expected_contact_incarnation: Option<u64>,
     filename: String,
     mime: String,
     size_bytes: u64,
@@ -2912,6 +3197,8 @@ fn begin_outgoing_transfer(request: &HttpRequest, state: Arc<AppState>) -> HttpR
                 &mut stored.domain,
                 &input.profile_id,
                 input.friend_number,
+                &input.expected_public_key,
+                input.expected_contact_incarnation,
                 &input.filename,
                 &input.mime,
                 input.size_bytes,
@@ -3979,14 +4266,12 @@ async fn destroy_workspace(request: &HttpRequest, state: Arc<AppState>) -> HttpR
         Err(code) => return operation_error(&code),
     };
     let csrf = request.headers.get("x-kaigen-csrf").map(String::as_str);
-    let destroyed = (|| -> Result<(PathBuf, PathBuf, [u8; 32], bool), String> {
+    let destroyed = (|| -> Result<(PathBuf, PathBuf, [u8; 32]), String> {
         let mut inner = state.inner.lock().map_err(|_| "STATE_UNAVAILABLE")?;
-        let (session, cookie) = authenticate_request(&inner, request, csrf)?;
+        let (session, _) = authenticate_request(&inner, request, csrf)?;
         if !input.explicit_confirmation {
             return Err("WORKSPACE_DESTROY_CONFIRMATION_REQUIRED".to_string());
         }
-        let clear_legacy_cookie =
-            legacy_device_cookie(request).is_some_and(|legacy| legacy == cookie);
         {
             let stored = inner
                 .workspaces
@@ -4010,14 +4295,9 @@ async fn destroy_workspace(request: &HttpRequest, state: Arc<AppState>) -> HttpR
         inner
             .sessions
             .retain(|_, session| session.workspace_hash != workspace_hash);
-        Ok((
-            removed.root,
-            removed.active_root,
-            workspace_hash,
-            clear_legacy_cookie,
-        ))
+        Ok((removed.root, removed.active_root, workspace_hash))
     })();
-    let (workspace_root, active_root, workspace_hash, clear_legacy_cookie) = match destroyed {
+    let (workspace_root, active_root, workspace_hash) = match destroyed {
         Ok(value) => value,
         Err(code) => return operation_error(&code),
     };
@@ -4037,14 +4317,6 @@ async fn destroy_workspace(request: &HttpRequest, state: Arc<AppState>) -> HttpR
             workspace_cookie_name(&workspace_hash)
         ),
     ));
-    if clear_legacy_cookie {
-        response.headers.push((
-            "Set-Cookie".to_string(),
-            format!(
-                "{LEGACY_DEVICE_COOKIE_NAME}=; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=0"
-            ),
-        ));
-    }
     response
 }
 
@@ -4085,11 +4357,9 @@ async fn erase(request: &HttpRequest, state: Arc<AppState>) -> HttpResponse {
         Err(code) => return operation_error(&code),
     };
     let csrf = request.headers.get("x-kaigen-csrf").map(String::as_str);
-    let erased = (|| -> Result<(PathBuf, PathBuf, [u8; 32], bool), String> {
+    let erased = (|| -> Result<(PathBuf, PathBuf, [u8; 32]), String> {
         let mut inner = state.inner.lock().map_err(|_| "STATE_UNAVAILABLE")?;
-        let (session, cookie) = authenticate_request(&inner, request, csrf)?;
-        let clear_legacy_cookie =
-            legacy_device_cookie(request).is_some_and(|legacy| legacy == cookie);
+        let (session, _) = authenticate_request(&inner, request, csrf)?;
         {
             let stored = inner
                 .workspaces
@@ -4118,14 +4388,9 @@ async fn erase(request: &HttpRequest, state: Arc<AppState>) -> HttpResponse {
         inner
             .sessions
             .retain(|_, session| session.workspace_hash != workspace_hash);
-        Ok((
-            removed.root,
-            removed.active_root,
-            workspace_hash,
-            clear_legacy_cookie,
-        ))
+        Ok((removed.root, removed.active_root, workspace_hash))
     })();
-    let (workspace_root, active_root, workspace_hash, clear_legacy_cookie) = match erased {
+    let (workspace_root, active_root, workspace_hash) = match erased {
         Ok(value) => value,
         Err(code) => return operation_error(&code),
     };
@@ -4145,14 +4410,6 @@ async fn erase(request: &HttpRequest, state: Arc<AppState>) -> HttpResponse {
             workspace_cookie_name(&workspace_hash)
         ),
     ));
-    if clear_legacy_cookie {
-        response.headers.push((
-            "Set-Cookie".to_string(),
-            format!(
-                "{LEGACY_DEVICE_COOKIE_NAME}=; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=0"
-            ),
-        ));
-    }
     response
 }
 
@@ -4249,6 +4506,11 @@ where
             .workspaces
             .get_mut(&session.workspace_hash)
             .ok_or("AUTH_INVALID")?;
+        webgate_api::configure_relay_identity(
+            stored,
+            &state.config.public_origin,
+            &session.workspace_hash,
+        )?;
         operation(stored, session, maintenance)
     })();
     match result {
@@ -4302,13 +4564,33 @@ async fn handle_websocket(
         None => return Ok(()),
         Some(result) => result.map_err(|_| "WEBSOCKET_WRITE_FAILED".to_string())?,
     }
-    let mut interval = tokio::time::interval(Duration::from_secs(20));
+    let (hub, remote_profiles) = {
+        let inner = state.inner.lock().map_err(|_| "STATE_UNAVAILABLE")?;
+        let stored = inner
+            .workspaces
+            .get(&authenticated.0.workspace_hash)
+            .ok_or("AUTH_INVALID")?;
+        (
+            Arc::clone(&stored.mirror),
+            Arc::clone(&stored.remote_profiles),
+        )
+    };
+    let (mut epoch, mut cursor) = hub.barrier()?;
+    let mut changed = hub.subscribe();
     loop {
-        if until_shutdown(interval.tick()).await.is_none() {
-            let _ = tokio::time::timeout(Duration::from_secs(1),
-                write_websocket_close(&mut stream, 1001, b"service restarting")).await;
+        let wake = async {
+            tokio::time::timeout(Duration::from_secs(20), changed.changed())
+                .await
+                .is_ok()
+        };
+        let Some(business_event) = until_shutdown(wake).await else {
+            let _ = tokio::time::timeout(
+                Duration::from_secs(1),
+                write_websocket_close(&mut stream, 1001, b"service restarting"),
+            )
+            .await;
             return Ok(());
-        }
+        };
         let still_authorized = state
             .inner
             .lock()
@@ -4318,22 +4600,55 @@ async fn handle_websocket(
                 session.device_hash == authenticated.0.device_hash && token == authenticated.1
             });
         if !still_authorized {
-            let _ = tokio::time::timeout(Duration::from_secs(1),
-                write_websocket_close(&mut stream, 4001, b"control transferred")).await;
+            let _ = tokio::time::timeout(
+                Duration::from_secs(1),
+                write_websocket_close(&mut stream, 4001, b"control transferred"),
+            )
+            .await;
             return Ok(());
         }
-        let event = json!({
-            "event": "workspace-heartbeat",
-            "payload": { "at": now_seconds().saturating_mul(1000) }
-        })
-        .to_string();
-        match until_shutdown(write_websocket_frame(&mut stream, 0x1, event.as_bytes())).await {
-            Some(Ok(())) => {}
-            Some(Err(_)) => return Ok(()),
-            None => {
-                let _ = tokio::time::timeout(Duration::from_secs(1),
-                    write_websocket_close(&mut stream, 1001, b"service restarting")).await;
-                return Ok(());
+        let events = hub.replay(None, &epoch, cursor);
+        let frames = match events {
+            Ok(events) => events.into_iter().map(|event| {
+                cursor = event.cursor;
+                if event.profile_id.starts_with("wg-") {
+                    json!({"event":"webgate-event","payload":{"profileId":event.profile_id,"event":event}})
+                } else {
+                    json!({"event":"profile-changed", "payload":{"profileId":event.profile_id,"change":event.payload}})
+                }
+            }).collect::<Vec<_>>(),
+            Err(_) => {
+                let barrier = hub.barrier()?;
+                epoch = barrier.0;
+                cursor = barrier.1;
+                let mut frames=vec![json!({"event":"profile-changed","payload":{"resyncRequired":true}})];
+                for profile in remote_profiles.summaries(){
+                    if let Some(id)=profile.get("id").and_then(Value::as_str){
+                        frames.push(json!({"event":"webgate-event","payload":{"profileId":id,"event":{
+                            "epoch":epoch,"cursor":cursor,"event":"resync-required","profileId":id,
+                            "payload":{"resyncRequired":true}
+                        }}}));
+                    }
+                }
+                frames
+            }
+        };
+        for frame in frames {
+            match tokio::time::timeout(
+                Duration::from_secs(15),
+                write_websocket_frame(&mut stream, 0x1, frame.to_string().as_bytes()),
+            )
+            .await
+            {
+                Ok(Ok(())) => {}
+                _ => return Ok(()),
+            }
+        }
+        if !business_event {
+            let event=json!({"event":"workspace-heartbeat","payload":{"at":now_seconds().saturating_mul(1000)}}).to_string();
+            match until_shutdown(write_websocket_frame(&mut stream, 0x1, event.as_bytes())).await {
+                Some(Ok(())) => {}
+                _ => return Ok(()),
             }
         }
     }
@@ -4370,8 +4685,11 @@ where
 }
 
 fn profile_summaries(stored: &StoredWorkspace) -> Vec<Value> {
-    let selected = selected_profile_id(&stored.domain).ok();
-    stored
+    let selected = stored
+        .remote_profiles
+        .active_id()
+        .or_else(|| selected_profile_id(&stored.domain).ok());
+    let mut summaries: Vec<Value> = stored
         .domain
         .profiles
         .profiles()
@@ -4386,7 +4704,7 @@ fn profile_summaries(stored: &StoredWorkspace) -> Vec<Value> {
             let unread_target = if requests > 0 {
                 Some("requests".to_string())
             } else {
-                friends.and_then(|friends| friends.iter().filter_map(|(friend, count)| count.as_u64().filter(|count| *count > 0).map(|count| (friend, count))).max_by_key(|(_, count)| *count).map(|(friend, _)| format!("friend-number:{friend}")))
+                friends.and_then(|friends| friends.iter().filter_map(|(friend, count)| { let target = crate::web_push::canonical_friend_target(friend)?; let count = count.as_u64().filter(|count| *count > 0)?; Some((target, count)) }).max_by_key(|(_, count)| *count).map(|(target, _)| target))
             };
             let notifications_enabled = local_state.as_ref().is_some_and(|state| state.get("notifyMessages").and_then(Value::as_bool).unwrap_or(false) || state.get("notifyRequests").and_then(Value::as_bool).unwrap_or(false));
             json!({
@@ -4401,12 +4719,17 @@ fn profile_summaries(stored: &StoredWorkspace) -> Vec<Value> {
                 "unread": unread,
                 "avatar": stored.runtime.as_ref().and_then(|runtime| runtime.profile_avatar(&profile.id)),
                 "notificationsEnabled": notifications_enabled,
+                "notificationPreferences": local_state.as_ref()
+                    .map(tauri_app_lib::webgate_notifications::NotificationPreferences::from_local_state)
+                    .unwrap_or_default().value(),
                 "unreadTarget": unread_target,
                 "error": stored.runtime.as_ref()
                     .and_then(|runtime| runtime.profile_lifecycle_error(&profile.id))
             })
         })
-        .collect()
+        .collect();
+    summaries.extend(stored.remote_profiles.summaries());
+    summaries
 }
 
 fn dispatch_requested_profile_runtime(
@@ -4599,10 +4922,6 @@ fn cookie_value(request: &HttpRequest, name: &str) -> Option<String> {
         })
 }
 
-fn legacy_device_cookie(request: &HttpRequest) -> Option<String> {
-    cookie_value(request, LEGACY_DEVICE_COOKIE_NAME)
-}
-
 fn device_cookie_candidates(request: &HttpRequest) -> Vec<String> {
     let mut candidates = Vec::new();
     match request_workspace_selector(request) {
@@ -4611,16 +4930,8 @@ fn device_cookie_candidates(request: &HttpRequest) -> Vec<String> {
             {
                 candidates.push(token);
             }
-            if let Some(token) = legacy_device_cookie(request) {
-                if !candidates.iter().any(|candidate| candidate == &token) {
-                    candidates.push(token);
-                }
-            }
         }
         Ok(None) => {
-            if let Some(token) = legacy_device_cookie(request) {
-                candidates.push(token);
-            }
             if let Some(cookies) = request.headers.get("cookie") {
                 for (name, value) in cookies
                     .split(';')
@@ -4743,12 +5054,6 @@ fn session_response(
         format!(
             "{}={token}; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=604800",
             workspace_cookie_name(workspace_hash)
-        ),
-    ));
-    response.headers.push((
-        "Set-Cookie".to_string(),
-        format!(
-            "{LEGACY_DEVICE_COOKIE_NAME}={token}; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=604800"
         ),
     ));
     response
@@ -5104,6 +5409,8 @@ fn activate_restored_workspace_payload(
             domain: clone_workspace_domain(domain)?,
             runtime: None,
             browser_locked: false,
+            mirror: Default::default(),
+            remote_profiles: Default::default(),
             pending_profile_import: None,
             last_payload_checkpoint: Instant::now(),
             durability: None,
@@ -5197,16 +5504,10 @@ fn protect_private_directory(path: &Path) -> Result<(), String> {
 }
 
 fn wipe_string(value: &mut String) {
-    // The request owns this allocation exclusively until the wipe completes.
-    unsafe { value.as_bytes_mut().fill(0) };
-    value.clear();
+    wipe_bytes(&mut std::mem::take(value).into_bytes());
 }
 
-fn wipe_bytes(value: &mut [u8]) {
-    for byte in value {
-        unsafe { std::ptr::write_volatile(byte, 0) };
-    }
-}
+use tauri_app_lib::wipe_secret_bytes as wipe_bytes;
 
 fn protect_private_file(path: &Path) -> Result<(), String> {
     #[cfg(unix)]
@@ -5392,6 +5693,7 @@ mod tests {
 
     fn request(headers: &[(&str, String)]) -> HttpRequest {
         HttpRequest {
+            query: String::new(),
             method: "POST".to_string(),
             path: "/api/v1/lease/heartbeat".to_string(),
             headers: headers
@@ -5509,6 +5811,8 @@ mod tests {
             domain,
             runtime: None,
             browser_locked: false,
+            mirror: Default::default(),
+            remote_profiles: Default::default(),
             pending_profile_import: None,
             last_payload_checkpoint: Instant::now(),
             durability: None,
@@ -5558,6 +5862,7 @@ mod tests {
             headers.insert("x-kaigen-csrf".to_string(), fixture.csrf.clone());
         }
         HttpRequest {
+            query: String::new(),
             method: "POST".to_string(),
             path: "/api/v1/workspaces/destroy".to_string(),
             headers,
@@ -5971,29 +6276,84 @@ mod tests {
         let stored = inner.workspaces.get_mut(&fixture.workspace_hash).unwrap();
         stored.domain.quota.user_limit_bytes = 64 * 1024 * 1024;
         stored.domain.quota.reserve_limit_bytes = 16 * 1024 * 1024;
-        stored.domain.profiles.set_presence("only-profile", tauri_app_lib::web_core::Presence::Offline).unwrap();
+        stored
+            .domain
+            .profiles
+            .set_presence("only-profile", tauri_app_lib::web_core::Presence::Offline)
+            .unwrap();
         let resource = fixture.test_root.join("resources");
+        let mut runtime = tauri_app_lib::web_core::WebWorkspaceRuntime::start(
+            resource.clone(),
+            fixture.active_root.clone(),
+        )
+        .unwrap();
+        runtime
+            .create_profile("only-profile", "Disposable", None)
+            .unwrap();
+        stored.runtime = Some(runtime);
+        // Seed durability before wiring a manually created fixture runtime.
+        stored.checkpoint(true).unwrap();
         stored.ensure_runtime(&resource).unwrap();
-        stored.checkpoint(true).unwrap(); AppState::persist(stored).unwrap();
-        let device_hash = stored.domain.devices.token_hash(&fixture.device_token).unwrap();
-        let session = SessionContext { workspace_hash: fixture.workspace_hash, device_hash };
+        AppState::persist(stored).unwrap();
+        // Reopen the sealed fixture through the same durability wiring as a real workspace.
+        stored.stop_runtime().unwrap();
+        stored.durability = None;
+        stored.ensure_runtime(&resource).unwrap();
+        let device_hash = stored
+            .domain
+            .devices
+            .token_hash(&fixture.device_token)
+            .unwrap();
+        let session = SessionContext {
+            workspace_hash: fixture.workspace_hash,
+            device_hash,
+        };
         let baseline = fs::read(stored.root.join("domain.json")).unwrap();
-        let blocker = stored.root.join("domain.json.new"); fs::create_dir(&blocker).unwrap();
+        let blocker = stored.root.join("domain.json.new");
+        fs::create_dir(&blocker).unwrap();
         let args = json!({"profileId":"only-profile", "currentPassword":null, "newPassword":"synthetic-A"});
-        assert!(dispatch_command(stored, session, false, "change_profile_password", &args).is_err());
-        stored.runtime.as_ref().unwrap().verify_profile_password("only-profile", None).unwrap();
+        assert!(
+            dispatch_command(stored, session, false, "change_profile_password", &args).is_err()
+        );
+        stored
+            .runtime
+            .as_ref()
+            .unwrap()
+            .verify_profile_password("only-profile", None)
+            .unwrap();
         assert_eq!(fs::read(stored.root.join("domain.json")).unwrap(), baseline);
-        fs::remove_dir(&blocker).unwrap(); stored.stop_runtime().unwrap(); stored.durability = None;
-        stored.domain = serde_json::from_slice(&baseline).unwrap(); stored.domain.unlock("workspace access").unwrap();
-        stored.ensure_runtime(&resource).unwrap().verify_profile_password("only-profile", None).unwrap();
-        let result = dispatch_command(stored, session, false, "change_profile_password", &args).unwrap();
+        fs::remove_dir(&blocker).unwrap();
+        stored.stop_runtime().unwrap();
+        stored.durability = None;
+        stored.domain = serde_json::from_slice(&baseline).unwrap();
+        stored.domain.unlock("workspace access").unwrap();
+        stored
+            .ensure_runtime(&resource)
+            .unwrap()
+            .verify_profile_password("only-profile", None)
+            .unwrap();
+        let result =
+            dispatch_command(stored, session, false, "change_profile_password", &args).unwrap();
         assert_eq!(result[0]["encrypted"], true);
-        stored.stop_runtime().unwrap(); stored.durability = None;
-        stored.domain = serde_json::from_slice(&fs::read(stored.root.join("domain.json")).unwrap()).unwrap(); stored.domain.unlock("workspace access").unwrap();
+        stored.stop_runtime().unwrap();
+        stored.durability = None;
+        stored.domain =
+            serde_json::from_slice(&fs::read(stored.root.join("domain.json")).unwrap()).unwrap();
+        stored.domain.unlock("workspace access").unwrap();
         let error = stored.ensure_runtime(&resource).err().unwrap();
         assert_eq!(error, "PROFILE_PASSWORD_REQUIRED");
-        stored.runtime.as_mut().unwrap().load_profile("only-profile", Some("synthetic-A")).unwrap();
-        stored.runtime.as_ref().unwrap().verify_profile_password("only-profile", Some("synthetic-A")).unwrap();
+        stored
+            .runtime
+            .as_mut()
+            .unwrap()
+            .load_profile("only-profile", Some("synthetic-A"))
+            .unwrap();
+        stored
+            .runtime
+            .as_ref()
+            .unwrap()
+            .verify_profile_password("only-profile", Some("synthetic-A"))
+            .unwrap();
         stored.stop_runtime().unwrap();
     }
 
@@ -6027,6 +6387,7 @@ mod tests {
                     profile_id: "only-profile".into(),
                     message_id: "close-message".into(),
                     friend_public_key: "AB".repeat(32),
+                    contact_incarnation: 0,
                     direction: StoreDirection::Outgoing,
                     name: "retained.bin".into(),
                     mime: "application/octet-stream".into(),
@@ -6133,7 +6494,7 @@ mod tests {
             let first = StoreSpec {
                 object_id: "first-transfer".into(), operation_id: Some("first-operation".into()),
                 profile_id: "only-profile".into(), message_id: "first-message".into(),
-                friend_public_key: "AB".repeat(32), direction: StoreDirection::Outgoing,
+                friend_public_key: "AB".repeat(32), contact_incarnation: 0, direction: StoreDirection::Outgoing,
                 name: "retained.bin".into(), mime: "application/octet-stream".into(),
                 size_bytes: bytes.len() as u64, expected_sha256: Some(Sha256::digest(bytes).into()),
             };
@@ -6367,7 +6728,7 @@ mod tests {
         let first_token = "A".repeat(43);
         let second_token = "B".repeat(43);
         let cookies = format!(
-            "{DEVICE_COOKIE_PREFIX}{first_selector}={first_token}; {DEVICE_COOKIE_PREFIX}{second_selector}={second_token}; {LEGACY_DEVICE_COOKIE_NAME}={second_token}"
+            "{DEVICE_COOKIE_PREFIX}{first_selector}={first_token}; {DEVICE_COOKIE_PREFIX}{second_selector}={second_token}"
         );
 
         let first = request(&[
@@ -6402,10 +6763,13 @@ mod tests {
     }
 
     #[test]
-    fn invalid_workspace_selector_does_not_fall_back_to_legacy_cookie() {
+    fn invalid_workspace_selector_does_not_use_a_scoped_cookie() {
         let token = "D".repeat(43);
         let request = request(&[
-            ("cookie", format!("{LEGACY_DEVICE_COOKIE_NAME}={token}")),
+            (
+                "cookie",
+                format!("{}={token}", workspace_cookie_name(&[3_u8; 32])),
+            ),
             (WORKSPACE_SELECTOR_HEADER, "invalid".to_string()),
         ]);
 
@@ -6413,7 +6777,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_tab_can_match_its_device_among_workspace_cookies() {
+    fn unscoped_request_can_match_its_device_among_workspace_cookies() {
         let first_selector = workspace_selector(&[4_u8; 32]);
         let second_selector = workspace_selector(&[5_u8; 32]);
         let first_token = "E".repeat(43);
@@ -6421,7 +6785,7 @@ mod tests {
         let request = request(&[(
             "cookie",
             format!(
-                "{LEGACY_DEVICE_COOKIE_NAME}={second_token}; {DEVICE_COOKIE_PREFIX}{first_selector}={first_token}; {DEVICE_COOKIE_PREFIX}{second_selector}={second_token}"
+                "{DEVICE_COOKIE_PREFIX}{first_selector}={first_token}; {DEVICE_COOKIE_PREFIX}{second_selector}={second_token}"
             ),
         )]);
 

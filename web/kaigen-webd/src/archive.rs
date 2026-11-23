@@ -1062,109 +1062,6 @@ fn collect_payload_files(workspace_root: &Path) -> Result<Vec<SourceFile>, Strin
     Ok(output)
 }
 
-fn collect_profile_files(
-    profile_root: &Path,
-    profile_path: &Path,
-) -> Result<Vec<SourceFile>, String> {
-    let metadata = fs::symlink_metadata(profile_root)
-        .map_err(|error| format!("Could not inspect profile export payload: {error}"))?;
-    if metadata.file_type().is_symlink() || !metadata.is_dir() {
-        return Err("PROFILE_EXPORT_BOUNDARY_INVALID".to_string());
-    }
-    let mut writing_path = profile_path.as_os_str().to_os_string();
-    writing_path.push(".writing");
-    let writing_path = PathBuf::from(writing_path);
-
-    fn visit(
-        profile_root: &Path,
-        directory: &Path,
-        profile_path: &Path,
-        writing_path: &Path,
-        output: &mut Vec<SourceFile>,
-    ) -> Result<(), String> {
-        for entry in fs::read_dir(directory)
-            .map_err(|error| format!("Could not inspect profile export payload: {error}"))?
-        {
-            let entry = entry
-                .map_err(|error| format!("Could not inspect profile export payload: {error}"))?;
-            let source = entry.path();
-            let metadata = fs::symlink_metadata(&source)
-                .map_err(|error| format!("Could not inspect profile export payload: {error}"))?;
-            if metadata.file_type().is_symlink() {
-                return Err("PROFILE_EXPORT_SYMLINK_FORBIDDEN".to_string());
-            }
-            if metadata.is_dir() {
-                visit(profile_root, &source, profile_path, writing_path, output)?;
-            } else if metadata.is_file() && source != profile_path && source != writing_path {
-                let relative = source
-                    .strip_prefix(profile_root)
-                    .map_err(|_| "PROFILE_EXPORT_BOUNDARY_INVALID")?;
-                let relative = relative
-                    .components()
-                    .map(|component| {
-                        component
-                            .as_os_str()
-                            .to_str()
-                            .ok_or("PROFILE_EXPORT_PATH_INVALID")
-                    })
-                    .collect::<Result<Vec<_>, _>>()?
-                    .join("/");
-                if relative.is_empty()
-                    || relative
-                        .split('/')
-                        .any(|part| part.is_empty() || part == "." || part == "..")
-                {
-                    return Err("PROFILE_EXPORT_PATH_INVALID".to_string());
-                }
-                if relative == "data/logs" || relative.starts_with("data/logs/") {
-                    continue;
-                }
-                output.push(SourceFile {
-                    expected_sha256: Some(hash_source_file(&source, metadata.len())?),
-                    source,
-                    archive_path: format!("profile/{relative}"),
-                    bytes: metadata.len(),
-                });
-            }
-        }
-        Ok(())
-    }
-
-    let mut output = Vec::new();
-    visit(
-        profile_root,
-        profile_root,
-        profile_path,
-        &writing_path,
-        &mut output,
-    )?;
-    output.sort_by(|left, right| left.archive_path.cmp(&right.archive_path));
-    Ok(output)
-}
-
-fn hash_source_file(path: &Path, expected_bytes: u64) -> Result<[u8; 32], String> {
-    let mut input = fs::File::open(path)
-        .map_err(|error| format!("Could not read profile export payload: {error}"))?;
-    let mut buffer = vec![0_u8; FRAME_DATA_BYTES];
-    let mut digest = Sha256::new();
-    let mut bytes = 0_u64;
-    loop {
-        let read = input
-            .read(&mut buffer)
-            .map_err(|error| format!("Could not read profile export payload: {error}"))?;
-        if read == 0 {
-            break;
-        }
-        digest.update(&buffer[..read]);
-        bytes = bytes.saturating_add(read as u64);
-    }
-    wipe(&mut buffer);
-    if bytes != expected_bytes {
-        return Err("ARCHIVE_SOURCE_CHANGED".to_string());
-    }
-    Ok(digest.finalize().into())
-}
-
 struct ArchiveWriter {
     output: fs::File,
     digest: Sha256,
@@ -1337,15 +1234,10 @@ fn random_array<const N: usize>() -> Result<[u8; N], String> {
     Ok(value)
 }
 
-fn wipe(value: &mut [u8]) {
-    for byte in value {
-        unsafe { std::ptr::write_volatile(byte, 0) };
-    }
-}
+use tauri_app_lib::wipe_secret_bytes as wipe;
 
 fn wipe_string(value: &mut String) {
-    unsafe { wipe(value.as_bytes_mut()) };
-    value.clear();
+    wipe(&mut std::mem::take(value).into_bytes());
 }
 
 fn remove_exact_file(path: &Path) -> Result<(), String> {

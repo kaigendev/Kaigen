@@ -24,6 +24,7 @@ if [[ ${KAIGEN_BUILD_APPIMAGE_FUNCTIONS_ONLY-} != 1 ]]; then
 fi
 
 app_run_template="$project_root/packaging/AppRun-linux.sh"
+app_entry_template="$project_root/packaging/kaigen-appimage-entry.sh"
 app_run_marker='KAIGEN_APPRUN_BACKEND_POLICY_V1'
 linuxdeploy_sha256='bd9521cd5ff3ca351fecb78cd9b236a4e37b3621014ac05cac0c2d767ffa0474'
 linuxdeploy_size='19810808'
@@ -333,6 +334,10 @@ if [[ ! -f "$app_run_template" || -L "$app_run_template" ]]; then
   echo "Tracked Linux AppRun template must be a regular file: $app_run_template" >&2
   exit 1
 fi
+if [[ ! -f "$app_entry_template" || -L "$app_entry_template" ]]; then
+  echo "Tracked AppImage entry must be a regular file: $app_entry_template" >&2
+  exit 1
+fi
 if [[ "$(count_exact_line "# $app_run_marker" "$app_run_template")" != 1 ]]; then
   echo "Tracked Linux AppRun template must contain exactly one $app_run_marker marker" >&2
   exit 1
@@ -346,6 +351,8 @@ verify_kaigen_appdir() {
     AppRun.wrapped \
     apprun-hooks/linuxdeploy-plugin-gtk.sh \
     usr/bin/Kaigen \
+    usr/bin/kaigen-appimage-entry \
+    usr/share/applications/Kaigen.desktop \
     usr/lib/libtoxcore.so.2 \
     usr/lib/Kaigen/libtoxcore.so \
     usr/lib/Kaigen/libtoxcore.so.2 \
@@ -385,6 +392,15 @@ verify_kaigen_appdir() {
   fi
   if ! cmp -s "$app_run_template" "$appdir/AppRun"; then
     echo "AppImage AppRun does not match the tracked backend policy template" >&2
+    exit 1
+  fi
+  local entry="$appdir/usr/bin/kaigen-appimage-entry"
+  if [[ ! -f "$entry" || -L "$entry" || ! -x "$entry" ]] || ! cmp -s "$app_entry_template" "$entry"; then
+    echo "AppImage entry does not match the tracked GStreamer environment launcher" >&2
+    exit 1
+  fi
+  if [[ "$(count_exact_line 'Exec=kaigen-appimage-entry' "$appdir/usr/share/applications/Kaigen.desktop")" != 1 ]]; then
+    echo "AppImage desktop entry must launch through the GStreamer environment launcher" >&2
     exit 1
   fi
   if [[ "$(count_exact_line "# $app_run_marker" "$appdir/AppRun")" != 1 ]]; then
@@ -488,6 +504,8 @@ cleanup_build_temporaries() {
   done
 }
 trap cleanup_build_temporaries EXIT
+# Materialize Cargo's pinned path patches before hashing the build inputs.
+node "$project_root/scripts/prepare-windows-core.mjs"
 write_source_byte_manifest "$source_manifest_before"
 
 if [[ "${KAIGEN_BUILD_TEST_MODE:-none}" == "full" && "${KAIGEN_CI_TEST_POLICY:-}" != "verify-only" ]]; then
@@ -512,7 +530,6 @@ export NPM_CONFIG_OFFLINE=true
 export CARGO_NET_OFFLINE=true
 cd "$project_root"
 npm ci --offline
-node "$project_root/scripts/prepare-windows-core.mjs"
 cargo metadata --offline --locked --format-version 1 --manifest-path src-tauri/Cargo.toml >/dev/null
 
 bash "$project_root/scripts/prepare-unix-dependencies.sh" linux
@@ -542,6 +559,7 @@ env HTTPS_PROXY=http://127.0.0.1:9 HTTP_PROXY=http://127.0.0.1:9 ALL_PROXY=http:
   --bundles appimage
 require_sha256 "$managed_tauri_executable" "$managed_tauri_sha256" "Managed Tauri CLI after packaging"
 verify_pinned_tauri_cache "$tauri_cache_root" exact
+cargo build --locked --release --manifest-path src-tauri/Cargo.toml --bin kaigen-updater
 
 write_source_byte_manifest "$source_manifest_after"
 if ! cmp -s "$source_manifest_before" "$source_manifest_after"; then
@@ -634,6 +652,14 @@ if [[ "$(count_active_gdk_backend_assignment_lines "$generated_gtk_hook")" != 0 
 fi
 
 install -p -m 0755 "$app_run_template" "$generated_app_run"
+generated_desktop="$original_appdir/usr/share/applications/Kaigen.desktop"
+if [[ ! -f "$generated_desktop" || -L "$generated_desktop" ]] ||
+   [[ "$(count_exact_line 'Exec=Kaigen' "$generated_desktop")" != 1 ]]; then
+  echo "Generated Kaigen desktop entry does not launch the expected native executable" >&2
+  exit 1
+fi
+install -p -m 0755 "$app_entry_template" "$original_appdir/usr/bin/kaigen-appimage-entry"
+sed -i 's/^Exec=Kaigen$/Exec=kaigen-appimage-entry/' "$generated_desktop"
 verify_kaigen_appdir "$original_appdir"
 
 if [[ -z "$tauri_cache_root" || "$tauri_cache_root" != "$tauri_cache_sandbox/tauri" ]]; then
@@ -726,6 +752,7 @@ esac
 rm -rf "$stage"
 mkdir -p "$stage/data" "$stage/downloads" "$stage/profiles"
 install -m 0755 "$appimage" "$stage/Kaigen-x86_64.AppImage"
+install -m 0755 "$project_root/src-tauri/target/release/kaigen-updater" "$stage/kaigen-updater"
 install -m 0644 "$project_root/packaging/PORTABLE-LINUX.txt" "$stage/PORTABLE.txt"
 install -m 0644 "$project_root/README.md" "$stage/README.md"
 install -m 0644 "$project_root/POST_QUANTUM.txt" "$stage/POST_QUANTUM.txt"

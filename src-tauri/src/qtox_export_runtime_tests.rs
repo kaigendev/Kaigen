@@ -17,23 +17,10 @@ pub(super) fn after_record_snapshot() {
 fn record_native_runtime() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
-        #[link(name = "kernel32")]
-        extern "system" {
-            fn GetModuleHandleW(name: *const u16) -> *mut c_void;
-            fn GetModuleFileNameW(module: *mut c_void, path: *mut u16, size: u32) -> u32;
-        }
         for library in ["toxcore.dll", "pthreadVC3.dll"] {
-            let name = format!("{library}\0").encode_utf16().collect::<Vec<_>>();
-            let module = unsafe { GetModuleHandleW(name.as_ptr()) };
-            assert!(!module.is_null(), "native module must be loaded: {library}");
-            let mut path = vec![0u16; 32768];
-            let length = unsafe { GetModuleFileNameW(module, path.as_mut_ptr(), path.len() as u32) }
-                as usize;
-            assert!(length > 0 && length < path.len());
-            println!(
-                "QTOX_EXPORT_NATIVE_RUNTIME {library}={}",
-                String::from_utf16(&path[..length]).unwrap()
-            );
+            let path = tox_native::test_loaded_module_path(library)
+                .expect("native module must be loaded");
+            println!("QTOX_EXPORT_NATIVE_RUNTIME {library}={path}");
         }
     });
 }
@@ -104,20 +91,15 @@ impl Fixture {
             initialize_created_profile_offline(&state).unwrap();
             let guard = state.handle.lock().unwrap();
             let handle = guard.as_ref().unwrap();
-            let mut address = [0u8; 38];
-            unsafe { tox_self_get_address(handle.instance.as_ptr(), address.as_mut_ptr()) };
+            let address = handle.address();
             let mut key = [0u8; 32];
             key.copy_from_slice(&address[..32]);
             keys.push(key);
             let friend_key = [0x55 + index as u8; 32];
             let mut error = 0;
-            let friend = unsafe {
-                tox_friend_add_norequest(handle.instance.as_ptr(), friend_key.as_ptr(), &mut error)
-            };
+            let friend = handle.native().friend_add_norequest(&friend_key, &mut error);
             assert_eq!(error, 0);
-            let mut bytes = vec![0u8; unsafe { tox_get_savedata_size(handle.instance.as_ptr()) }];
-            unsafe { tox_get_savedata(handle.instance.as_ptr(), bytes.as_mut_ptr()) };
-            savedata.push(bytes);
+            savedata.push(handle.savedata());
             drop(guard);
             atomic_write(&state.avatars_dir.join("self-100.png"), avatar(index, true)).unwrap();
             atomic_write(

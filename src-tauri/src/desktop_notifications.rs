@@ -3,11 +3,11 @@
 //! message and preferences after the chat transaction has released its locks.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet, VecDeque},
     sync::{
         atomic::{AtomicBool, Ordering},
         mpsc::{self, SyncSender},
-        OnceLock,
+        Arc, Mutex, OnceLock, Weak,
     },
     thread,
     time::{Duration, Instant},
@@ -17,6 +17,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tauri::{Emitter, Manager};
 
+use crate::webgate::{HopIdentity, RemoteProfile, StreamEvent};
+use crate::webgate_notifications::{NotificationKind, NotificationProjection};
 use crate::{AppState, ProfileNotification};
 
 const QUEUE_LIMIT: usize = 64;
@@ -25,8 +27,36 @@ static FOREGROUND: AtomicBool = AtomicBool::new(true);
 
 struct Pending {
     profile_id: String,
-    event: ProfileNotification,
+    event: PendingEvent,
     received: Instant,
+}
+
+enum PendingEvent {
+    Native(ProfileNotification),
+    Remote {
+        projection: NotificationProjection,
+        binding: String,
+    },
+}
+
+#[derive(Clone)]
+struct RemoteBinding {
+    token: String,
+    profile: Weak<RemoteProfile>,
+    root: HopIdentity,
+}
+
+#[derive(Default)]
+struct RemoteNotices {
+    bindings: HashMap<String, RemoteBinding>,
+    seen: HashSet<(String, String)>,
+    order: VecDeque<(String, String)>,
+}
+
+static REMOTE_NOTICES: OnceLock<Mutex<RemoteNotices>> = OnceLock::new();
+
+fn remote_notices() -> &'static Mutex<RemoteNotices> {
+    REMOTE_NOTICES.get_or_init(|| Mutex::new(RemoteNotices::default()))
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -34,6 +64,8 @@ struct Pending {
 struct Target {
     profile_id: String,
     target: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    remote_binding: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -81,9 +113,128 @@ pub(super) fn enqueue(profile_id: &str, event: ProfileNotification) {
     if let Some(queue) = QUEUE.get() {
         let _ = queue.try_send(Pending {
             profile_id: profile_id.to_string(),
-            event,
+            event: PendingEvent::Native(event),
             received: Instant::now(),
         });
+    }
+}
+
+/// The callback receives an already authenticated, cursor-checked event.
+/// Record receipt before focus suppression; replay must never create a late popup.
+pub(super) fn notify_webgate_event(app: &tauri::AppHandle, profile_id: &str, event: &StreamEvent) {
+    if event.event != "profile-changed" {
+        return;
+    }
+    let Some(projection) = NotificationProjection::from_payload(&event.payload) else {
+        return;
+    };
+    let Some(state) = app.try_state::<AppState>() else {
+        return;
+    };
+    let Some(profile) = state.remote_profiles.get(profile_id) else {
+        return;
+    };
+    if !profile.is_connected() {
+        return;
+    }
+    let Some(root) = profile.cached_root_identity() else {
+        return;
+    };
+    let Ok(root_key) = serde_json::to_string(&root) else {
+        return;
+    };
+    let Ok(mut notices) = remote_notices().lock() else {
+        return;
+    };
+    let weak = Arc::downgrade(&profile);
+    let existing = notices.bindings.get(profile_id);
+    let token = if let Some(binding) =
+        existing.filter(|binding| binding.profile.ptr_eq(&weak) && binding.root == root)
+    {
+        binding.token.clone()
+    } else {
+        if notices.bindings.len() >= 1024 && existing.is_none() {
+            return;
+        }
+        let Ok(token) = crate::webgate::new_operation_id() else {
+            return;
+        };
+        notices.bindings.insert(
+            profile_id.to_string(),
+            RemoteBinding {
+                token: token.clone(),
+                profile: weak,
+                root,
+            },
+        );
+        token
+    };
+    let identity = (root_key, projection.event_id.clone());
+    if !notices.seen.insert(identity.clone()) {
+        return;
+    }
+    notices.order.push_back(identity);
+    while notices.order.len() > 8192 {
+        if let Some(old) = notices.order.pop_front() {
+            notices.seen.remove(&old);
+        }
+    }
+    drop(notices);
+    if FOREGROUND.load(Ordering::Acquire) {
+        return;
+    }
+    if let Some(queue) = QUEUE.get() {
+        let _ = queue.try_send(Pending {
+            profile_id: profile_id.to_string(),
+            event: PendingEvent::Remote {
+                projection,
+                binding: token,
+            },
+            received: Instant::now(),
+        });
+    }
+}
+
+pub(super) fn forget_webgate_profile(profile_id: &str) {
+    if let Ok(mut notices) = remote_notices().lock() {
+        notices.bindings.remove(profile_id);
+        let roots: HashSet<String> = notices
+            .bindings
+            .values()
+            .filter_map(|binding| serde_json::to_string(&binding.root).ok())
+            .collect();
+        notices.seen.retain(|(root, _)| roots.contains(root));
+        notices.order.retain(|(root, _)| roots.contains(root));
+    }
+}
+
+fn available(app: &AppState, target: &Target) -> bool {
+    let Some(token) = target.remote_binding.as_deref() else {
+        return app.loaded_profile(&target.profile_id).is_ok();
+    };
+    // Do not hold the notification registry while taking host/session locks.
+    let binding = remote_notices()
+        .lock()
+        .ok()
+        .and_then(|notices| notices.bindings.get(&target.profile_id).cloned());
+    let Some(binding) = binding.filter(|binding| binding.token == token) else {
+        return false;
+    };
+    let Some(expected) = binding.profile.upgrade() else {
+        return false;
+    };
+    let Some(current) = app.remote_profiles.get(&target.profile_id) else {
+        return false;
+    };
+    Arc::ptr_eq(&expected, &current)
+        && current.is_connected()
+        && current.cached_root_identity().as_ref() == Some(&binding.root)
+}
+
+fn pending_target(event: &PendingEvent) -> Option<String> {
+    match event {
+        PendingEvent::Native(event) => target_key(event),
+        PendingEvent::Remote { projection, .. } => projection.target_key(),
     }
 }
 
@@ -118,7 +269,7 @@ fn background(app: &tauri::AppHandle) -> bool {
 }
 
 fn stage_pending(pending: &mut HashMap<(String, String), Pending>, item: Pending) {
-    if let Some(target) = target_key(&item.event) {
+    if let Some(target) = pending_target(&item.event) {
         let key = (item.profile_id.clone(), target);
         if pending.len() < QUEUE_LIMIT || pending.contains_key(&key) {
             pending.insert(key, item);
@@ -181,8 +332,7 @@ pub(super) fn start(app: tauri::AppHandle) -> Result<(), String> {
                     let Some(notice) = prepare(&state, &item) else {
                         continue;
                     };
-                    if !background(&app) || state.loaded_profile(&notice.target.profile_id).is_err()
-                    {
+                    if !background(&app) || !available(&state, &notice.target) {
                         continue;
                     }
                     if let Some(volume) = notice.volume.filter(|_| {
@@ -191,7 +341,7 @@ pub(super) fn start(app: tauri::AppHandle) -> Result<(), String> {
                         let _ = app.emit_to("main", "kaigen-message-sound", volume);
                         last_sound = Some(Instant::now());
                     }
-                    if notice.popup {
+                    if notice.popup && background(&app) && available(&state, &notice.target) {
                         // Errors carry no message text, and never create an in-app fallback.
                         let _ = show(&app, notice);
                     }
@@ -215,6 +365,57 @@ fn excerpt(text: &str) -> String {
 }
 
 fn prepare(app: &AppState, pending: &Pending) -> Option<Notice> {
+    let event = match &pending.event {
+        PendingEvent::Native(event) => event,
+        PendingEvent::Remote {
+            projection,
+            binding,
+        } => {
+            let target = Target {
+                profile_id: pending.profile_id.clone(),
+                target: projection.target_key()?,
+                remote_binding: Some(binding.clone()),
+            };
+            if !available(app, &target) {
+                return None;
+            }
+            let profile = app.remote_profiles.get(&pending.profile_id)?;
+            let local = profile.cached_notification_preferences()?;
+            let preferences = Preferences::from_local_state(&local);
+            let ru = app.settings.lock().ok()?.language != "en";
+            return match projection.kind {
+                NotificationKind::Message => {
+                    if !preferences.messages && (!preferences.sound || preferences.volume == 0.0) {
+                        return None;
+                    }
+                    Some(Notice {
+                        target,
+                        title: if projection.title.is_empty() {
+                            if ru { "Контакт" } else { "Contact" }.to_string()
+                        } else {
+                            excerpt(&projection.title)
+                        },
+                        body: excerpt(&projection.body),
+                        popup: preferences.messages,
+                        volume: (preferences.sound && preferences.volume > 0.0)
+                            .then_some(preferences.volume),
+                    })
+                }
+                NotificationKind::Request => preferences.requests.then(|| Notice {
+                    target,
+                    title: if ru {
+                        "Запрос в контакты"
+                    } else {
+                        "Contact request"
+                    }
+                    .to_string(),
+                    body: excerpt(&projection.body),
+                    popup: true,
+                    volume: None,
+                }),
+            };
+        }
+    };
     let state = app.loaded_profile(&pending.profile_id).ok()?;
     let local_path = state.history_path.parent()?.join("local-state.json");
     let bytes = crate::profiles::read_file(&local_path).ok()?;
@@ -223,9 +424,10 @@ fn prepare(app: &AppState, pending: &Pending) -> Option<Notice> {
     let ru = app.settings.lock().ok()?.language != "en";
     let target = Target {
         profile_id: pending.profile_id.clone(),
-        target: target_key(&pending.event)?,
+        target: target_key(event)?,
+        remote_binding: None,
     };
-    match &pending.event {
+    match event {
         ProfileNotification::Message {
             friend_number,
             friend_public_key,
@@ -323,23 +525,22 @@ fn activate(app: &tauri::AppHandle, target: &Target) {
     let Some(state) = app.try_state::<AppState>() else {
         return;
     };
-    if state.loaded_profile(&target.profile_id).is_err() {
+    if !available(&state, target) {
         return;
     }
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.show();
         let _ = window.unminimize();
         let _ = window.set_focus();
-        let _ = window.emit("kaigen-notification-activate", target);
+        if available(&state, target) {
+            let _ = window.emit("kaigen-notification-activate", target);
+        }
     }
 }
 
 #[cfg(target_os = "windows")]
 fn show(app: &tauri::AppHandle, notice: Notice) -> Result<(), ()> {
     use tauri_winrt_notification::{Duration as ToastDuration, Toast};
-    if !windows_identity::initialize_apartment() {
-        return Err(());
-    }
     let app_id = windows_identity::register(&app.config().identifier)?;
     if !background(app) {
         return Ok(());
@@ -361,7 +562,7 @@ fn show(app: &tauri::AppHandle, notice: Notice) -> Result<(), ()> {
 #[cfg(target_os = "windows")]
 mod windows_identity {
     use sha2::{Digest, Sha256};
-    use std::{mem::ManuallyDrop, path::PathBuf, sync::OnceLock};
+    use std::{marker::PhantomData, mem::ManuallyDrop, path::PathBuf, rc::Rc, sync::OnceLock};
     use windows::{
         core::{Interface, GUID, HSTRING, PWSTR},
         Win32::{
@@ -384,36 +585,42 @@ mod windows_identity {
         },
     };
 
-    struct Apartment;
+    struct Apartment(PhantomData<Rc<()>>);
     impl Apartment {
         fn new() -> Option<Self> {
-            // Both S_OK and S_FALSE require one balanced RoUninitialize; a
-            // failed initialization must never decrement another COM owner.
-            unsafe { RoInitialize(RO_INIT_MULTITHREADED).ok().map(|_| Self) }
+            // SAFETY: Both success statuses require one balanced uninitialize
+            // on the same thread. The marker prevents moving the guard.
+            unsafe {
+                RoInitialize(RO_INIT_MULTITHREADED)
+                    .ok()
+                    .map(|_| Self(PhantomData))
+            }
         }
     }
     impl Drop for Apartment {
         fn drop(&mut self) {
+            // SAFETY: Only successful initialization constructs this guard.
             unsafe {
                 RoUninitialize();
             }
         }
     }
     thread_local! { static APARTMENT: Option<Apartment> = Apartment::new(); }
-    pub(super) fn initialize_apartment() -> bool {
-        APARTMENT.with(Option::is_some)
+    pub(super) fn register(identifier: &str) -> Result<String, ()> {
+        APARTMENT.with(|apartment| register_initialized(apartment.as_ref().ok_or(())?, identifier))
     }
 
     struct ShellPath(PWSTR);
     impl Drop for ShellPath {
         fn drop(&mut self) {
+            // SAFETY: SHGetKnownFolderPath transfers one COM allocation.
             unsafe {
                 CoTaskMemFree(Some(self.0.as_ptr().cast()));
             }
         }
     }
 
-    pub(super) fn register(identifier: &str) -> Result<String, ()> {
+    fn register_initialized(_apartment: &Apartment, identifier: &str) -> Result<String, ()> {
         static REGISTERED: OnceLock<String> = OnceLock::new();
         if let Some(app_id) = REGISTERED.get() {
             return Ok(app_id.clone());
@@ -432,6 +639,8 @@ mod windows_identity {
             identifier.chars().take(96).collect::<String>()
         );
         let app_id_wide = HSTRING::from(app_id.as_str());
+        // SAFETY: This runs in the initialized notification apartment.
+        // COM interfaces and all borrowed string buffers remain live until use.
         unsafe {
             let programs = ShellPath(
                 SHGetKnownFolderPath(&FOLDERID_Programs, KF_FLAG_DEFAULT, None).map_err(|_| ())?,
@@ -485,11 +694,19 @@ mod windows_identity {
 
     fn register_display_name(app_id: &str) -> Result<(), ()> {
         use windows_sys::Win32::System::Registry::*;
+        struct RegistryKey(HKEY);
+        impl Drop for RegistryKey {
+            fn drop(&mut self) {
+                // SAFETY: This guard owns a successful RegCreateKeyExW result.
+                unsafe { RegCloseKey(self.0) };
+            }
+        }
         let wide = |value: &str| value.encode_utf16().chain(Some(0)).collect::<Vec<_>>();
         let path = wide(&format!("Software\\Classes\\AppUserModelId\\{app_id}"));
         let mut key = std::ptr::null_mut();
-        unsafe {
-            if RegCreateKeyExW(
+        // SAFETY: The path is NUL-terminated and the output is a live HKEY slot.
+        if unsafe {
+            RegCreateKeyExW(
                 HKEY_CURRENT_USER,
                 path.as_ptr(),
                 0,
@@ -499,24 +716,27 @@ mod windows_identity {
                 std::ptr::null(),
                 &mut key,
                 std::ptr::null_mut(),
-            ) != 0
-            {
-                return Err(());
-            }
-            let name = wide("DisplayName");
-            let value = wide("Kaigen");
-            let result = RegSetValueExW(
-                key,
+            )
+        } != 0
+        {
+            return Err(());
+        }
+        let key = RegistryKey(key);
+        let name = wide("DisplayName");
+        let value = wide("Kaigen");
+        // SAFETY: The key is owned and both UTF-16 buffers stay live.
+        let result = unsafe {
+            RegSetValueExW(
+                key.0,
                 name.as_ptr(),
                 0,
                 REG_SZ,
                 value.as_ptr().cast(),
                 (value.len() * 2) as u32,
-            );
-            RegCloseKey(key);
-            if result != 0 {
-                return Err(());
-            }
+            )
+        };
+        if result != 0 {
+            return Err(());
         }
         Ok(())
     }
@@ -616,15 +836,7 @@ fn block_until<F: std::future::Future>(future: F, deadline: Instant) -> Option<F
 
 #[cfg(target_os = "macos")]
 fn show(app: &tauri::AppHandle, notice: Notice) -> Result<(), ()> {
-    let handle = app.clone();
-    app.run_on_main_thread(move || {
-        if background(&handle) {
-            unsafe {
-                macos::show(&handle, notice);
-            }
-        }
-    })
-    .map_err(|_| ())
+    macos::show(app, notice)
 }
 
 #[cfg(target_os = "macos")]
@@ -635,8 +847,19 @@ mod macos {
     use super::*;
     use std::{
         ffi::{c_char, c_void, CStr, CString},
+        marker::PhantomData,
+        rc::Rc,
         sync::Mutex,
     };
+
+    struct MainThread(PhantomData<Rc<()>>);
+
+    impl MainThread {
+        fn current() -> Option<Self> {
+            // SAFETY: pthread_main_np reads the identity of the calling thread.
+            (unsafe { libc::pthread_main_np() } != 0).then_some(Self(PhantomData))
+        }
+    }
 
     type Id = *mut c_void;
     type Sel = *const c_void;
@@ -664,61 +887,96 @@ mod macos {
     static RUNTIME: Mutex<Option<Runtime>> = Mutex::new(None);
     static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-    unsafe fn selector(name: &'static [u8]) -> Sel {
-        sel_registerName(name.as_ptr().cast())
+    /// Registers a NUL-terminated Objective-C selector.
+    fn selector(name: &'static CStr) -> Sel {
+        // SAFETY: The runtime receives a live, NUL-terminated selector name.
+        unsafe { sel_registerName(name.as_ptr()) }
     }
-    unsafe fn send0<R>(receiver: Id, name: &'static [u8]) -> R {
+    /// # Safety
+    ///
+    /// The receiver must be valid for this selector, and R must match the
+    /// Objective-C method's ABI result type.
+    unsafe fn send0<R>(receiver: Id, name: &'static CStr) -> R {
         let send: unsafe extern "C" fn(Id, Sel) -> R =
-            std::mem::transmute(objc_msgSend as *const ());
-        send(receiver, selector(name))
+            unsafe { std::mem::transmute(objc_msgSend as *const ()) };
+        unsafe { send(receiver, selector(name)) }
     }
-    unsafe fn send1<A, R>(receiver: Id, name: &'static [u8], argument: A) -> R {
+    /// # Safety
+    ///
+    /// The receiver must be valid for this selector, and A and R must match
+    /// the Objective-C method's ABI argument and result types.
+    unsafe fn send1<A, R>(receiver: Id, name: &'static CStr, argument: A) -> R {
         let send: unsafe extern "C" fn(Id, Sel, A) -> R =
-            std::mem::transmute(objc_msgSend as *const ());
-        send(receiver, selector(name), argument)
+            unsafe { std::mem::transmute(objc_msgSend as *const ()) };
+        unsafe { send(receiver, selector(name), argument) }
     }
-    unsafe fn string(value: &str) -> Option<Id> {
+    /// Creates an autoreleased NSString inside the active pool or callback.
+    fn string(value: &str) -> Option<Id> {
         let value = CString::new(value).ok()?;
-        let class = objc_getClass(c"NSString".as_ptr());
-        let result: Id = send1(class, b"stringWithUTF8String:\0", value.as_ptr());
+        // SAFETY: The Foundation class method copies this valid UTF-8 C string.
+        let result: Id = unsafe {
+            let class = objc_getClass(c"NSString".as_ptr());
+            send1(class, c"stringWithUTF8String:", value.as_ptr())
+        };
         (!result.is_null()).then_some(result)
     }
     struct Pool(Id);
     impl Drop for Pool {
         fn drop(&mut self) {
+            // SAFETY: Only a main-thread pool constructed with +new is stored here.
             unsafe {
-                send0::<()>(self.0, b"drain\0");
+                send0::<()>(self.0, c"drain");
             }
         }
     }
     struct Owned(Id);
     impl Drop for Owned {
         fn drop(&mut self) {
+            // SAFETY: The stored notification is +1 retained, or nil (a no-op).
             unsafe {
-                send0::<()>(self.0, b"release\0");
+                send0::<()>(self.0, c"release");
             }
         }
     }
-    unsafe extern "C" fn should_present(_: Id, _: Sel, _: Id, _: Id) -> bool {
+    extern "C" fn should_present(_: Id, _: Sel, _: Id, _: Id) -> bool {
         !FOREGROUND.load(Ordering::Acquire)
     }
+
+    /// Reads an owned Rust target while Foundation still owns its callback objects.
+    ///
+    /// # Safety
+    ///
+    /// notification must be the live NSUserNotification supplied to the delegate.
+    unsafe fn read_target(notification: Id) -> Option<Target> {
+        let key = string("kaigen-target")?;
+        // SAFETY: Foundation provides a typed notification and its dictionary.
+        // Check the value's class before calling NSString's UTF8String method.
+        // The callback keeps the string and its UTF-8 buffer live until decoding.
+        unsafe {
+            let info: Id = send0(notification, c"userInfo");
+            let value: Id = send1(info, c"objectForKey:", key);
+            if value.is_null() {
+                return None;
+            }
+            let string_class = objc_getClass(c"NSString".as_ptr());
+            // Read the one-byte BOOL as a byte on both Apple architectures.
+            if string_class.is_null() || send1::<_, u8>(value, c"isKindOfClass:", string_class) == 0
+            {
+                return None;
+            }
+            let bytes: *const c_char = send0(value, c"UTF8String");
+            if bytes.is_null() {
+                return None;
+            }
+            serde_json::from_slice(CStr::from_ptr(bytes).to_bytes()).ok()
+        }
+    }
+
     unsafe extern "C" fn activated(_: Id, _: Sel, center: Id, notification: Id) {
         // Never unwind through an Objective-C callback boundary.
         let _ = std::panic::catch_unwind(|| {
-            let info: Id = send0(notification, b"userInfo\0");
-            let Some(key) = string("kaigen-target") else {
-                return;
-            };
-            let json: Id = send1(info, b"objectForKey:\0", key);
-            if json.is_null() {
-                return;
-            }
-            let bytes: *const c_char = send0(json, b"UTF8String\0");
-            if bytes.is_null() {
-                return;
-            }
-            let Ok(target) = serde_json::from_slice::<Target>(CStr::from_ptr(bytes).to_bytes())
-            else {
+            // SAFETY: Foundation supplies the live callback notification.
+            let Some(target) = (unsafe { read_target(notification) }) else {
                 return;
             };
             let valid = target.target == "requests"
@@ -738,119 +996,151 @@ mod macos {
             if let Some(app) = app {
                 activate(&app, &target);
             }
-            send1::<_, ()>(center, b"removeDeliveredNotification:\0", notification);
+            // SAFETY: Both callback objects are still live.
+            unsafe { send1::<_, ()>(center, c"removeDeliveredNotification:", notification) };
         });
     }
 
-    pub(super) unsafe fn show(app: &tauri::AppHandle, notice: Notice) {
-        let pool_class = objc_getClass(c"NSAutoreleasePool".as_ptr());
-        let _pool = Pool(send0(pool_class, b"new\0"));
-        let center_class = objc_getClass(c"NSUserNotificationCenter".as_ptr());
-        let center: Id = send0(center_class, b"defaultUserNotificationCenter\0");
-        if center.is_null() {
-            return;
-        }
-        {
-            let Ok(mut runtime) = RUNTIME.lock() else {
+    pub(super) fn show(app: &tauri::AppHandle, notice: Notice) -> Result<(), ()> {
+        let handle = app.clone();
+        app.run_on_main_thread(move || {
+            if background(&handle) {
+                if let Some(thread) = MainThread::current() {
+                    deliver(&thread, &handle, notice);
+                }
+            }
+        })
+        .map_err(|_| ())
+    }
+
+    fn deliver(_thread: &MainThread, app: &tauri::AppHandle, notice: Notice) {
+        // SAFETY: The thread-bound proof restricts the notification center to
+        // its main thread. The selected Objective-C classes and signatures match
+        // Foundation, and the pool and owned notification cover their lifetimes.
+        unsafe {
+            let pool_class = objc_getClass(c"NSAutoreleasePool".as_ptr());
+            let _pool = Pool(send0(pool_class, c"new"));
+            let center_class = objc_getClass(c"NSUserNotificationCenter".as_ptr());
+            let center: Id = send0(center_class, c"defaultUserNotificationCenter");
+            if center.is_null() {
                 return;
-            };
-            if runtime.is_none() {
-                let name = c"KaigenMessageNotificationDelegate";
-                let mut class = objc_getClass(name.as_ptr());
-                if class.is_null() {
-                    class = objc_allocateClassPair(
-                        objc_getClass(c"NSObject".as_ptr()),
-                        name.as_ptr(),
-                        0,
-                    );
+            }
+            {
+                let Ok(mut runtime) = RUNTIME.lock() else {
+                    return;
+                };
+                if runtime.is_none() {
+                    let name = c"KaigenMessageNotificationDelegate";
+                    let mut class = objc_getClass(name.as_ptr());
                     if class.is_null() {
+                        class = objc_allocateClassPair(
+                            objc_getClass(c"NSObject".as_ptr()),
+                            name.as_ptr(),
+                            0,
+                        );
+                        if class.is_null() {
+                            return;
+                        }
+                        class_addMethod(
+                            class,
+                            selector(c"userNotificationCenter:didActivateNotification:"),
+                            activated as *const c_void,
+                            c"v@:@@".as_ptr(),
+                        );
+                        class_addMethod(
+                            class,
+                            selector(c"userNotificationCenter:shouldPresentNotification:"),
+                            should_present as *const c_void,
+                            c"B@:@@".as_ptr(),
+                        );
+                        objc_registerClassPair(class);
+                    }
+                    let delegate: Id = send0(class, c"new");
+                    if delegate.is_null() {
                         return;
                     }
-                    class_addMethod(
-                        class,
-                        selector(b"userNotificationCenter:didActivateNotification:\0"),
-                        activated as *const c_void,
-                        c"v@:@@".as_ptr(),
-                    );
-                    class_addMethod(
-                        class,
-                        selector(b"userNotificationCenter:shouldPresentNotification:\0"),
-                        should_present as *const c_void,
-                        c"B@:@@".as_ptr(),
-                    );
-                    objc_registerClassPair(class);
+                    send1::<_, ()>(center, c"setDelegate:", delegate);
+                    *runtime = Some(Runtime {
+                        app: app.clone(),
+                        delegate: delegate.expose_provenance(),
+                    });
                 }
-                let delegate: Id = send0(class, b"new\0");
-                if delegate.is_null() {
-                    return;
-                }
-                send1::<_, ()>(center, b"setDelegate:\0", delegate);
-                *runtime = Some(Runtime {
-                    app: app.clone(),
-                    delegate: delegate as usize,
-                });
             }
-        }
-        let notification_class = objc_getClass(c"NSUserNotification".as_ptr());
-        let notification = Owned(send0(notification_class, b"new\0"));
-        if notification.0.is_null() {
-            return;
-        }
-        let (Some(title), Some(body), Ok(target)) = (
-            string(&notice.title),
-            string(&notice.body),
-            serde_json::to_string(&notice.target),
-        ) else {
-            return;
-        };
-        let (Some(key), Some(target)) = (string("kaigen-target"), string(&target)) else {
-            return;
-        };
-        let dictionary_class = objc_getClass(c"NSDictionary".as_ptr());
-        let dictionary: unsafe extern "C" fn(Id, Sel, Id, Id) -> Id =
-            std::mem::transmute(objc_msgSend as *const ());
-        let info = dictionary(
-            dictionary_class,
-            selector(b"dictionaryWithObject:forKey:\0"),
-            target,
-            key,
-        );
-        send1::<_, ()>(notification.0, b"setTitle:\0", title);
-        send1::<_, ()>(notification.0, b"setInformativeText:\0", body);
-        send1::<_, ()>(notification.0, b"setUserInfo:\0", info);
-        send1::<_, ()>(
-            notification.0,
-            b"setSoundName:\0",
-            std::ptr::null_mut::<c_void>(),
-        );
-        if let Some(identifier) = string(&format!(
-            "kaigen-{}",
-            SEQUENCE.fetch_add(1, Ordering::Relaxed)
-        )) {
-            send1::<_, ()>(notification.0, b"setIdentifier:\0", identifier);
-        }
-        let delivered: Id = send0(center, b"deliveredNotifications\0");
-        let count: usize = send0(delivered, b"count\0");
-        if count >= QUEUE_LIMIT {
-            send0::<()>(center, b"removeAllDeliveredNotifications\0");
-        }
-        if !FOREGROUND.load(Ordering::Acquire) {
-            send1::<_, ()>(center, b"deliverNotification:\0", notification.0);
+            let notification_class = objc_getClass(c"NSUserNotification".as_ptr());
+            let notification = Owned(send0(notification_class, c"new"));
+            if notification.0.is_null() {
+                return;
+            }
+            let (Some(title), Some(body), Ok(target)) = (
+                string(&notice.title),
+                string(&notice.body),
+                serde_json::to_string(&notice.target),
+            ) else {
+                return;
+            };
+            let (Some(key), Some(target)) = (string("kaigen-target"), string(&target)) else {
+                return;
+            };
+            let dictionary_class = objc_getClass(c"NSDictionary".as_ptr());
+            // SAFETY: NSDictionary's class method takes two objects and returns one.
+            let dictionary: unsafe extern "C" fn(Id, Sel, Id, Id) -> Id =
+                std::mem::transmute(objc_msgSend as *const ());
+            let info = dictionary(
+                dictionary_class,
+                selector(c"dictionaryWithObject:forKey:"),
+                target,
+                key,
+            );
+            send1::<_, ()>(notification.0, c"setTitle:", title);
+            send1::<_, ()>(notification.0, c"setInformativeText:", body);
+            send1::<_, ()>(notification.0, c"setUserInfo:", info);
+            send1::<_, ()>(
+                notification.0,
+                c"setSoundName:",
+                std::ptr::null_mut::<c_void>(),
+            );
+            if let Some(identifier) = string(&format!(
+                "kaigen-{}",
+                SEQUENCE.fetch_add(1, Ordering::Relaxed)
+            )) {
+                send1::<_, ()>(notification.0, c"setIdentifier:", identifier);
+            }
+            let delivered: Id = send0(center, c"deliveredNotifications");
+            let count: usize = send0(delivered, c"count");
+            if count >= QUEUE_LIMIT {
+                send0::<()>(center, c"removeAllDeliveredNotifications");
+            }
+            if !FOREGROUND.load(Ordering::Acquire) {
+                send1::<_, ()>(center, c"deliverNotification:", notification.0);
+            }
         }
     }
 
     pub(super) fn shutdown(app: &tauri::AppHandle) {
-        let _ = app.run_on_main_thread(|| unsafe {
-            let runtime = RUNTIME.lock().ok().and_then(|mut runtime| runtime.take());
-            if let Some(runtime) = runtime {
-                let center: Id = send0(
-                    objc_getClass(c"NSUserNotificationCenter".as_ptr()),
-                    b"defaultUserNotificationCenter\0",
-                );
-                send1::<_, ()>(center, b"setDelegate:\0", std::ptr::null_mut::<c_void>());
-                send0::<()>(runtime.delegate as Id, b"release\0");
+        let _ = app.run_on_main_thread(|| {
+            if let Some(thread) = MainThread::current() {
+                release_delegate(&thread);
             }
         });
+    }
+
+    fn release_delegate(_thread: &MainThread) {
+        let runtime = RUNTIME.lock().ok().and_then(|mut runtime| runtime.take());
+        if let Some(runtime) = runtime {
+            // SAFETY: The delegate is retained by Runtime. Detach it on the
+            // same main thread before relinquishing that ownership.
+            unsafe {
+                let center: Id = send0(
+                    objc_getClass(c"NSUserNotificationCenter".as_ptr()),
+                    c"defaultUserNotificationCenter",
+                );
+                send1::<_, ()>(center, c"setDelegate:", std::ptr::null_mut::<c_void>());
+                send0::<()>(
+                    std::ptr::with_exposed_provenance_mut::<c_void>(runtime.delegate),
+                    c"release",
+                );
+            }
+        }
     }
 }
 
@@ -897,11 +1187,11 @@ mod tests {
     fn pending(index: usize, message_id: &str) -> Pending {
         Pending {
             profile_id: "profile".to_string(),
-            event: ProfileNotification::Message {
+            event: PendingEvent::Native(ProfileNotification::Message {
                 friend_number: index as u32,
                 friend_public_key: format!("{index:064X}"),
                 message_id: message_id.to_string(),
-            },
+            }),
             received: Instant::now(),
         }
     }
@@ -914,7 +1204,7 @@ mod tests {
         }
         assert_eq!(staged.len(), QUEUE_LIMIT);
         stage_pending(&mut staged, pending(0, "latest"));
-        assert!(staged.values().any(|item| matches!(&item.event, ProfileNotification::Message { message_id, .. } if message_id == "latest")));
+        assert!(staged.values().any(|item| matches!(&item.event, PendingEvent::Native(ProfileNotification::Message { message_id, .. }) if message_id == "latest")));
         let (sender, receiver) = mpsc::channel();
         for index in 0..QUEUE_LIMIT * 2 {
             sender.send(pending(index, "queued")).unwrap();

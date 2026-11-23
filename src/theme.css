@@ -33,8 +33,6 @@
     --kaigen-theme-app-rail-background-1f0aoae: radial-gradient(ellipse at 50% 47%, #263c4a 0, #20333f 45%, #192b36 100%);
     --kaigen-theme-app-rail-after-background-h4voob: linear-gradient(180deg, #e7f6ff04, transparent 27%, #8ccbec07 57%, transparent 86%);
     --kaigen-theme-app-rail-button-color-69hqtg: #dce7ed;
-    --kaigen-theme-app-add-contact-button-color-1561s6t: #dce7ed;
-    --kaigen-theme-app-add-contact-button-hover-color-7c62eg: #fff;
     --kaigen-theme-app-rail-button-hover-background-2dlisw: linear-gradient(100deg, #d5ecf619, #a9d5e924 52%, #8cbcd51a);
     --kaigen-theme-app-rail-button-hover-color-10929pf: #f8fcff;
     --kaigen-theme-app-rail-button-hover-box-shadow-3pifif: 0 0 18px #8acbe51a;
@@ -59,15 +57,12 @@
     --kaigen-theme-app-status-menu-button-hover-background-1wm5gxb: #3b5566;
     --kaigen-theme-app-tor-indicator-color-1fqln38: #70e59a;
     --kaigen-theme-app-tor-indicator-tor-shield-fill-f1hvg6: #294351;
-    --kaigen-theme-app-tor-state-dot-background-1hsplir: #70e59a;
     --kaigen-theme-app-tor-indicator-enabled-color-118x1um: #70e59a;
     --kaigen-theme-app-tor-indicator-enabled-filter-1fzidbm: drop-shadow(0 0 5px rgba(89, 225, 143, .3));
     --kaigen-theme-app-tor-indicator-disabled-color-rqi8zh: #8f9ca5;
     --kaigen-theme-app-tor-indicator-disabled-tor-shield-fill-s2lflt: #2b3942;
-    --kaigen-theme-app-tor-indicator-disabled-tor-state-dot-background-158absn: #9aa3aa;
     --kaigen-theme-app-tor-indicator-proxy-color-4omtfm: #69bdf1;
     --kaigen-theme-app-tor-indicator-proxy-filter-uogper: drop-shadow(0 0 5px rgba(80, 167, 226, .35));
-    --kaigen-theme-app-tor-indicator-proxy-tor-state-dot-background-1ukcfxl: #69bdf1;
     --kaigen-theme-app-theme-switch-button-border-1dup8ip: 1px solid #4e6675;
     --kaigen-theme-app-theme-switch-button-background-ad3l1s: #263640;
     --kaigen-theme-app-theme-switch-button-color-41ji: #d5dde6;
@@ -155,14 +150,8 @@
     --kaigen-theme-app-conversation-header-avatar-box-shadow-18t57hx: 0 0 13px 3px rgba(185, 211, 228, .12);
     --kaigen-theme-app-conversation-header-avatar-after-box-shadow-1ytec50: inset 0 0 10px 4px rgba(32, 46, 57, .5);
     --kaigen-theme-app-header-copy-small-color-m9uslm: #afc5d6;
-    --kaigen-theme-app-header-pq-color-1r56sqo: #70e59a;
     --kaigen-theme-app-header-actions-button-color-8g5ud5: #b5c6d2;
     --kaigen-theme-app-header-meta-pq-active-color-1xojo3t: #78dfa2;
-    --kaigen-theme-app-header-actions-pq-header-button-border-mjsa9n: 1px solid #5ea77b;
-    --kaigen-theme-app-header-actions-pq-header-button-background-vmrxhe: #274b3a;
-    --kaigen-theme-app-header-actions-pq-header-button-color-17zq2eq: #a7efc1;
-    --kaigen-theme-app-header-actions-pq-header-button-hover-background-gjv4hk: #32634a;
-    --kaigen-theme-app-header-actions-pq-header-button-active-box-shadow-zbuywq: 0 0 13px #61d89433;
     --kaigen-theme-app-pq-confirm-button-background-19hd7g: #3b805d;
     --kaigen-theme-app-pq-confirm-button-color-ex2asg: #f2fff7;
     --kaigen-theme-app-pq-confirm-button-hover-background-14mifvi: #4a9b70;
@@ -179,15 +168,10 @@
     --kaigen-theme-app-composer-border-top-oq4lw6: 1px solid #273a46;
     --kaigen-theme-app-composer-after-background-1jj3d97: #202e39;
     --kaigen-theme-app-security-status-color-1ppq2ru: #d2b077;
-    --kaigen-theme-app-status-lock-color-1ygyqr0: #e3a24a;
     --kaigen-theme-app-attach-color-aehihq: #bbcbd6;
-    --kaigen-theme-app-compose-row-textarea-background-p7o3jc: #2d3e4a;
-    --kaigen-theme-app-compose-row-textarea-color-5bawp8: #e6edf2;
-    --kaigen-theme-app-compose-row-textarea-scrollbar-color-xflhs8: #758995 #24343f;
-    --kaigen-theme-app-compose-row-textarea-webkit-scrollbar-track-background-1isgzk1: #24343f;
-    --kaigen-theme-app-compose-row-textarea-webkit-scrollbar-thumb-border-1ni8bzh: 2px solid #24343f;
-    --kaigen-theme-app-compose-row-textarea-webkit-scrollbar-thumb-background-9d7xlb: #758995;
-    --kaigen-theme-app-compose-row-textarea-placeholder-color-1r08goh: #9daab4;
+    --kaigen-theme-app-rich-composer-editor-color-5bawp8: #e6edf2;
+    --kaigen-theme-app-rich-composer-editor-scrollbar-color-xflhs8: #758995 #24343f;
+    --kaigen-theme-app-rich-composer-editor-placeholder-color-1r08goh: #9daab4;
     --kaigen-theme-app-send-background-shfk6b: #4b8abd;
     --kaigen-theme-app-send-color-1rso10f: white;
     --kaigen-theme-app-send-hover-background-1hqa9x: #5a9bd0;
@@ -249,10 +233,6 @@
     --kaigen-theme-app-text-button-color-1vnarpb: #9ccceb;
     --kaigen-theme-app-danger-button-color-12pl1es: #f1c3c3;
     --kaigen-theme-app-danger-button-background-1cuzoqm: #4a2f35;
-    --kaigen-theme-app-security-banner-background-1bl6mny: #273c45;
-    --kaigen-theme-app-security-banner-span-color-6onnp2: #e1a24d;
-    --kaigen-theme-app-security-banner-b-color-hxvfvv: #e9f1f5;
-    --kaigen-theme-app-security-banner-small-color-1yy98z: #b7cbd7;
     --kaigen-theme-app-about-list-div-border-bottom-1dav09a: 1px solid #2b3e49;
     --kaigen-theme-app-about-list-dt-color-f25l5d: #9fb4c3;
     --kaigen-theme-app-settings-footer-background-1wxitic: #202e39;
@@ -282,9 +262,6 @@
     --kaigen-theme-app-destroy-confirm-border-z68ut7: 1px solid #70454d;
     --kaigen-theme-app-destroy-confirm-background-1g1ovs8: #35252b;
     --kaigen-theme-app-destroy-confirm-p-color-ra14vi: #e6c9cc;
-    --kaigen-theme-app-settings-import-candidate-border-1gi507i: 1px solid #334b5a;
-    --kaigen-theme-app-settings-import-candidate-background-1ufz2t3: #172731;
-    --kaigen-theme-app-settings-import-candidate-small-color-14bftgq: #8ca0ae;
     --kaigen-theme-app-settings-active-profile-line-border-d64bh5: 1px solid #3d5667;
     --kaigen-theme-app-settings-active-profile-line-background-s6oghr: #1d2e39;
     --kaigen-theme-app-settings-active-profile-line-color-vdpv5d: #cbd8df;
@@ -325,8 +302,6 @@
     --kaigen-theme-app-rail-profile-menu-button-danger-color-15btw6d: #ff9ca3;
     --kaigen-theme-app-rail-profile-menu-button-danger-hover-not-disabled-background-29j551: #673740;
     --kaigen-theme-app-rail-profile-menu-button-danger-hover-not-disabled-color-1qppfix: #ffd4d7;
-    --kaigen-theme-app-profile-destroy-overlay-file-confirm-card-span-color-mz5y82: #e4edf2;
-    --kaigen-theme-app-profile-destroy-overlay-strong-color-u8hgr6: #fff;
     --kaigen-theme-app-rail-profile-avatar-background-1dbmun2: #438db9;
     --kaigen-theme-app-rail-profile-avatar-color-1wsnq20: #fff;
     --kaigen-theme-app-rail-profile-avatar-box-shadow-1hsxck: 0 0 10px 2px rgba(185, 211, 228, .12);
@@ -411,7 +386,6 @@
     --kaigen-theme-app-outgoing-request-cancel-request-button-hover-color-z2v8zb: #f0f8fc;
     --kaigen-theme-app-outgoing-request-cancel-request-button-hover-background-wy7n4h: #365666;
     --kaigen-theme-app-requests-note-color-3ji7ix: #a8bcc8;
-    --kaigen-theme-app-add-contact-overlay-background-1v3dyf1: #07101599;
     --kaigen-theme-app-add-contact-card-border-1g6akqe: 1px solid #547184;
     --kaigen-theme-app-add-contact-card-background-j739mr: #263944;
     --kaigen-theme-app-add-contact-card-box-shadow-1gk358u: 0 14px 35px #0008;
@@ -428,12 +402,6 @@
     --kaigen-theme-app-copy-toast-box-shadow-2mmdp8: 0 10px 24px #071015aa;
     --kaigen-theme-app-copy-toast-transfer-toast-background-1tsensc: #5d3340;
     --kaigen-theme-app-copy-toast-transfer-toast-border-color-uplepj: #b76a7b;
-    --kaigen-theme-app-event-notice-border-11imvgv: 1px solid #466a80;
-    --kaigen-theme-app-event-notice-background-1k8ds82: #1e3442f2;
-    --kaigen-theme-app-event-notice-box-shadow-xhgpev: 0 12px 32px #061019aa;
-    --kaigen-theme-app-event-notice-b-color-8qtis3: #eaf5fb;
-    --kaigen-theme-app-event-notice-span-color-1y2l0f6: #b8cbd6;
-    --kaigen-theme-app-event-notice-button-color-1df0dkx: #c8d7df;
     --kaigen-theme-app-contact-context-menu-border-1h20b9a: 1px solid #4b6170;
     --kaigen-theme-app-contact-context-menu-background-31n8zz: #263944;
     --kaigen-theme-app-contact-context-menu-box-shadow-d5pxhd: 0 8px 22px #07101599;
@@ -450,7 +418,7 @@
     --kaigen-theme-app-hidden-image-card-background-1ly0lhs: rgba(25, 48, 63, .78);
     --kaigen-theme-app-hidden-image-card-b-color-1htj9py: #82c8f4;
     --kaigen-theme-app-spellcheck-editor-background-1g8nd1x: #2d3e4a;
-    --kaigen-theme-app-spellcheck-error-text-decoration-d3tp3d: underline wavy #ef7272 1.5px;
+    --kaigen-theme-app-rich-composer-spelling-text-decoration-d3tp3d: underline wavy #ef7272 1.5px;
     --kaigen-theme-app-spellcheck-context-menu-border-tgogtd: 1px solid #4b6170;
     --kaigen-theme-app-spellcheck-context-menu-background-j9a4ga: #263944;
     --kaigen-theme-app-spellcheck-context-menu-box-shadow-ub8bt: 0 8px 22px #07101599;
@@ -679,7 +647,6 @@
     --kaigen-theme-web-web-app-window-border-9tq2y7: 1px solid #304a55;
     --kaigen-theme-web-web-app-window-background-uvj786: #050a10;
     --kaigen-theme-web-web-app-window-box-shadow-uc94u7: 0 30px 80px #000c;
-    --kaigen-theme-web-web-window-handle-span-background-1953kfl: #42616b;
     --kaigen-theme-web-web-modal-backdrop-background-1tdz79h: #000b;
     --kaigen-theme-web-web-close-modal-border-yy3d5u: 1px solid #304954;
     --kaigen-theme-web-web-close-modal-background-5zp82h: #09141c;
@@ -729,8 +696,6 @@
     --kaigen-theme-startup-startup-language-button-active-color-9c9ac9c: #fff;
     --kaigen-theme-startup-startup-language-button-active-text-shadow-d0dba6f: #59a9ff;
     --kaigen-theme-startup-startup-brand-small-color-f8bf7b2: #d7dce2;
-    --kaigen-theme-startup-kaigen-mark-filter-f9e7aa5: #ffffff20;
-    --kaigen-theme-startup-kaigen-mark-after-background-6343efc: #fff;
     --kaigen-theme-startup-welcome-screen-header-p-unlock-screen-header-p-color-4ab1f82: #9ca7b6;
     --kaigen-theme-startup-welcome-card-border-d9ac170: #315f90;
     --kaigen-theme-startup-welcome-card-background-56a0555: #142131d1;
@@ -820,12 +785,6 @@
     --kaigen-theme-startup-unlock-add-profile-hover-unlock-add-profile-focus-visible-color-298d438: #eef8ff;
     --kaigen-theme-startup-startup-fatal-p-color-c71efd2: #e8aaad;
     --kaigen-theme-startup-startup-fatal-button-background-41ab72f: #3c7196;
-    --kaigen-theme-startup-profile-event-notices-article-border-d9194fd: #416277;
-    --kaigen-theme-startup-profile-event-notices-article-background-e721056: #172934f2;
-    --kaigen-theme-startup-profile-event-notices-article-box-shadow-3c8506f: #0008;
-    --kaigen-theme-startup-profile-event-notices-article-color-83d234a: #dce9ef;
-    --kaigen-theme-startup-profile-event-notices-article-button-color-2dcb02d: #aebdc7;
-    --kaigen-theme-startup-profile-event-notices-article-span-color-e1e62c8: #9fb2bf;
     --kaigen-theme-startup-startup-brand-img-filter-2e11c80: #ffffff1c;
     --kaigen-theme-startup-welcome-card-background-7afbb5d: #17314c65;
     --kaigen-theme-startup-welcome-card-background-53774ba: #0b1420c4;
@@ -1021,7 +980,6 @@
   border-top-color: #273a46;
 }
 
-:root[data-kaigen-theme="softlifegreen"] .app-shell .compose-row textarea,
 :root[data-kaigen-theme="softlifegreen"] .app-shell .spellcheck-editor {
   color: #e6edf2;
   background: #2d3e4a;
@@ -1129,8 +1087,7 @@
   box-shadow: none;
 }
 
-:root[data-kaigen-theme="softlifegreen"] .app-shell .copy-toast,
-:root[data-kaigen-theme="softlifegreen"] .app-shell .event-notice {
+:root[data-kaigen-theme="softlifegreen"] .app-shell .copy-toast {
   border-color: #4b6170;
   color: #e7eef5;
   background: rgba(38, 57, 68, .96);
@@ -1303,8 +1260,6 @@
     --kaigen-theme-app-rail-background-1f0aoae: radial-gradient(ellipse at 50% 47%, #263c4a 0, #20333f 45%, #192b36 100%);
     --kaigen-theme-app-rail-after-background-h4voob: linear-gradient(180deg, #e7f6ff04, transparent 27%, #8ccbec07 57%, transparent 86%);
     --kaigen-theme-app-rail-button-color-69hqtg: #dce7ed;
-    --kaigen-theme-app-add-contact-button-color-1561s6t: #dce7ed;
-    --kaigen-theme-app-add-contact-button-hover-color-7c62eg: #fff;
     --kaigen-theme-app-rail-button-hover-background-2dlisw: linear-gradient(100deg, #d5ecf619, #a9d5e924 52%, #8cbcd51a);
     --kaigen-theme-app-rail-button-hover-color-10929pf: #f8fcff;
     --kaigen-theme-app-rail-button-hover-box-shadow-3pifif: 0 0 18px #8acbe51a;
@@ -1329,15 +1284,12 @@
     --kaigen-theme-app-status-menu-button-hover-background-1wm5gxb: #3b5566;
     --kaigen-theme-app-tor-indicator-color-1fqln38: #70e59a;
     --kaigen-theme-app-tor-indicator-tor-shield-fill-f1hvg6: #294351;
-    --kaigen-theme-app-tor-state-dot-background-1hsplir: #70e59a;
     --kaigen-theme-app-tor-indicator-enabled-color-118x1um: #70e59a;
     --kaigen-theme-app-tor-indicator-enabled-filter-1fzidbm: drop-shadow(0 0 5px rgba(89, 225, 143, .3));
     --kaigen-theme-app-tor-indicator-disabled-color-rqi8zh: #8f9ca5;
     --kaigen-theme-app-tor-indicator-disabled-tor-shield-fill-s2lflt: #2b3942;
-    --kaigen-theme-app-tor-indicator-disabled-tor-state-dot-background-158absn: #9aa3aa;
     --kaigen-theme-app-tor-indicator-proxy-color-4omtfm: #69bdf1;
     --kaigen-theme-app-tor-indicator-proxy-filter-uogper: drop-shadow(0 0 5px rgba(80, 167, 226, .35));
-    --kaigen-theme-app-tor-indicator-proxy-tor-state-dot-background-1ukcfxl: #69bdf1;
     --kaigen-theme-app-theme-switch-button-border-1dup8ip: 1px solid #425e73;
     --kaigen-theme-app-theme-switch-button-background-ad3l1s: #24343d;
     --kaigen-theme-app-theme-switch-button-color-41ji: #c0d4e1;
@@ -1425,14 +1377,8 @@
     --kaigen-theme-app-conversation-header-avatar-box-shadow-18t57hx: 0 0 13px 3px rgba(185, 211, 228, .12);
     --kaigen-theme-app-conversation-header-avatar-after-box-shadow-1ytec50: inset 0 0 10px 4px rgba(32, 46, 57, .5);
     --kaigen-theme-app-header-copy-small-color-m9uslm: #afc5d6;
-    --kaigen-theme-app-header-pq-color-1r56sqo: #70e59a;
     --kaigen-theme-app-header-actions-button-color-8g5ud5: #b5c6d2;
     --kaigen-theme-app-header-meta-pq-active-color-1xojo3t: #78dfa2;
-    --kaigen-theme-app-header-actions-pq-header-button-border-mjsa9n: 1px solid #5ea77b;
-    --kaigen-theme-app-header-actions-pq-header-button-background-vmrxhe: #274b3a;
-    --kaigen-theme-app-header-actions-pq-header-button-color-17zq2eq: #a7efc1;
-    --kaigen-theme-app-header-actions-pq-header-button-hover-background-gjv4hk: #32634a;
-    --kaigen-theme-app-header-actions-pq-header-button-active-box-shadow-zbuywq: 0 0 13px #61d89433;
     --kaigen-theme-app-pq-confirm-button-background-19hd7g: #3b805d;
     --kaigen-theme-app-pq-confirm-button-color-ex2asg: #f2fff7;
     --kaigen-theme-app-pq-confirm-button-hover-background-14mifvi: #4a9b70;
@@ -1449,15 +1395,10 @@
     --kaigen-theme-app-composer-border-top-oq4lw6: 1px solid #273a46;
     --kaigen-theme-app-composer-after-background-1jj3d97: #202e39;
     --kaigen-theme-app-security-status-color-1ppq2ru: #d2b077;
-    --kaigen-theme-app-status-lock-color-1ygyqr0: #e3a24a;
     --kaigen-theme-app-attach-color-aehihq: #bbcbd6;
-    --kaigen-theme-app-compose-row-textarea-background-p7o3jc: #2d3e4a;
-    --kaigen-theme-app-compose-row-textarea-color-5bawp8: #e6edf2;
-    --kaigen-theme-app-compose-row-textarea-scrollbar-color-xflhs8: #758995 #24343f;
-    --kaigen-theme-app-compose-row-textarea-webkit-scrollbar-track-background-1isgzk1: #24343f;
-    --kaigen-theme-app-compose-row-textarea-webkit-scrollbar-thumb-border-1ni8bzh: 2px solid #24343f;
-    --kaigen-theme-app-compose-row-textarea-webkit-scrollbar-thumb-background-9d7xlb: #758995;
-    --kaigen-theme-app-compose-row-textarea-placeholder-color-1r08goh: #9daab4;
+    --kaigen-theme-app-rich-composer-editor-color-5bawp8: #e6edf2;
+    --kaigen-theme-app-rich-composer-editor-scrollbar-color-xflhs8: #758995 #24343f;
+    --kaigen-theme-app-rich-composer-editor-placeholder-color-1r08goh: #9daab4;
     --kaigen-theme-app-send-background-shfk6b: #4b8abd;
     --kaigen-theme-app-send-color-1rso10f: white;
     --kaigen-theme-app-send-hover-background-1hqa9x: #5a9bd0;
@@ -1519,10 +1460,6 @@
     --kaigen-theme-app-text-button-color-1vnarpb: #9ccceb;
     --kaigen-theme-app-danger-button-color-12pl1es: #f1c3c3;
     --kaigen-theme-app-danger-button-background-1cuzoqm: #4a2f35;
-    --kaigen-theme-app-security-banner-background-1bl6mny: #273c45;
-    --kaigen-theme-app-security-banner-span-color-6onnp2: #e1a24d;
-    --kaigen-theme-app-security-banner-b-color-hxvfvv: #e9f1f5;
-    --kaigen-theme-app-security-banner-small-color-1yy98z: #b7cbd7;
     --kaigen-theme-app-about-list-div-border-bottom-1dav09a: 1px solid #2b3e49;
     --kaigen-theme-app-about-list-dt-color-f25l5d: #9fb4c3;
     --kaigen-theme-app-settings-footer-background-1wxitic: #202e39;
@@ -1552,9 +1489,6 @@
     --kaigen-theme-app-destroy-confirm-border-z68ut7: 1px solid #70454d;
     --kaigen-theme-app-destroy-confirm-background-1g1ovs8: #35252b;
     --kaigen-theme-app-destroy-confirm-p-color-ra14vi: #e6c9cc;
-    --kaigen-theme-app-settings-import-candidate-border-1gi507i: 1px solid #334b5a;
-    --kaigen-theme-app-settings-import-candidate-background-1ufz2t3: #172731;
-    --kaigen-theme-app-settings-import-candidate-small-color-14bftgq: #8ca0ae;
     --kaigen-theme-app-settings-active-profile-line-border-d64bh5: 1px solid #3d5667;
     --kaigen-theme-app-settings-active-profile-line-background-s6oghr: #1d2e39;
     --kaigen-theme-app-settings-active-profile-line-color-vdpv5d: #cbd8df;
@@ -1595,8 +1529,6 @@
     --kaigen-theme-app-rail-profile-menu-button-danger-color-15btw6d: #ff9ca3;
     --kaigen-theme-app-rail-profile-menu-button-danger-hover-not-disabled-background-29j551: #673740;
     --kaigen-theme-app-rail-profile-menu-button-danger-hover-not-disabled-color-1qppfix: #ffd4d7;
-    --kaigen-theme-app-profile-destroy-overlay-file-confirm-card-span-color-mz5y82: #e4edf2;
-    --kaigen-theme-app-profile-destroy-overlay-strong-color-u8hgr6: #fff;
     --kaigen-theme-app-rail-profile-avatar-background-1dbmun2: #438db9;
     --kaigen-theme-app-rail-profile-avatar-color-1wsnq20: #fff;
     --kaigen-theme-app-rail-profile-avatar-box-shadow-1hsxck: 0 0 10px 2px rgba(185, 211, 228, .12);
@@ -1681,7 +1613,6 @@
     --kaigen-theme-app-outgoing-request-cancel-request-button-hover-color-z2v8zb: #f0f8fc;
     --kaigen-theme-app-outgoing-request-cancel-request-button-hover-background-wy7n4h: #365666;
     --kaigen-theme-app-requests-note-color-3ji7ix: #a8bcc8;
-    --kaigen-theme-app-add-contact-overlay-background-1v3dyf1: #07101599;
     --kaigen-theme-app-add-contact-card-border-1g6akqe: 1px solid #547184;
     --kaigen-theme-app-add-contact-card-background-j739mr: #263944;
     --kaigen-theme-app-add-contact-card-box-shadow-1gk358u: 0 14px 35px #0008;
@@ -1698,12 +1629,6 @@
     --kaigen-theme-app-copy-toast-box-shadow-2mmdp8: 0 10px 24px #071015aa;
     --kaigen-theme-app-copy-toast-transfer-toast-background-1tsensc: #5d3340;
     --kaigen-theme-app-copy-toast-transfer-toast-border-color-uplepj: #b76a7b;
-    --kaigen-theme-app-event-notice-border-11imvgv: 1px solid #466a80;
-    --kaigen-theme-app-event-notice-background-1k8ds82: #1e3442f2;
-    --kaigen-theme-app-event-notice-box-shadow-xhgpev: 0 12px 32px #061019aa;
-    --kaigen-theme-app-event-notice-b-color-8qtis3: #eaf5fb;
-    --kaigen-theme-app-event-notice-span-color-1y2l0f6: #b8cbd6;
-    --kaigen-theme-app-event-notice-button-color-1df0dkx: #c8d7df;
     --kaigen-theme-app-contact-context-menu-border-1h20b9a: 1px solid #4b6170;
     --kaigen-theme-app-contact-context-menu-background-31n8zz: #263944;
     --kaigen-theme-app-contact-context-menu-box-shadow-d5pxhd: 0 8px 22px #07101599;
@@ -1720,7 +1645,7 @@
     --kaigen-theme-app-hidden-image-card-background-1ly0lhs: rgba(25, 48, 63, .78);
     --kaigen-theme-app-hidden-image-card-b-color-1htj9py: #82c8f4;
     --kaigen-theme-app-spellcheck-editor-background-1g8nd1x: #2d3e4a;
-    --kaigen-theme-app-spellcheck-error-text-decoration-d3tp3d: underline wavy #ef7272 1.5px;
+    --kaigen-theme-app-rich-composer-spelling-text-decoration-d3tp3d: underline wavy #ef7272 1.5px;
     --kaigen-theme-app-spellcheck-context-menu-border-tgogtd: 1px solid #4b6170;
     --kaigen-theme-app-spellcheck-context-menu-background-j9a4ga: #263944;
     --kaigen-theme-app-spellcheck-context-menu-box-shadow-ub8bt: 0 8px 22px #07101599;
@@ -1947,7 +1872,6 @@
     --kaigen-theme-web-web-app-window-border-9tq2y7: 1px solid #4b6170;
     --kaigen-theme-web-web-app-window-background-uvj786: #15212a;
     --kaigen-theme-web-web-app-window-box-shadow-uc94u7: 0 30px 80px #071015cc;
-    --kaigen-theme-web-web-window-handle-span-background-1953kfl: #607899;
     --kaigen-theme-web-web-modal-backdrop-background-1tdz79h: #071015aa;
     --kaigen-theme-web-web-close-modal-border-yy3d5u: 1px solid #4b6170;
     --kaigen-theme-web-web-close-modal-background-5zp82h: #263944;
@@ -1997,8 +1921,6 @@
     --kaigen-theme-startup-startup-language-button-active-color-9c9ac9c: #fff;
     --kaigen-theme-startup-startup-language-button-active-text-shadow-d0dba6f: #59a9ff;
     --kaigen-theme-startup-startup-brand-small-color-f8bf7b2: #d7dce2;
-    --kaigen-theme-startup-kaigen-mark-filter-f9e7aa5: #ffffff20;
-    --kaigen-theme-startup-kaigen-mark-after-background-6343efc: #fff;
     --kaigen-theme-startup-welcome-screen-header-p-unlock-screen-header-p-color-4ab1f82: #9ca7b6;
     --kaigen-theme-startup-welcome-card-border-d9ac170: #315f90;
     --kaigen-theme-startup-welcome-card-background-56a0555: #142131d1;
@@ -2088,12 +2010,6 @@
     --kaigen-theme-startup-unlock-add-profile-hover-unlock-add-profile-focus-visible-color-298d438: #eef8ff;
     --kaigen-theme-startup-startup-fatal-p-color-c71efd2: #e8aaad;
     --kaigen-theme-startup-startup-fatal-button-background-41ab72f: #3c7196;
-    --kaigen-theme-startup-profile-event-notices-article-border-d9194fd: #416277;
-    --kaigen-theme-startup-profile-event-notices-article-background-e721056: #172934f2;
-    --kaigen-theme-startup-profile-event-notices-article-box-shadow-3c8506f: #0008;
-    --kaigen-theme-startup-profile-event-notices-article-color-83d234a: #dce9ef;
-    --kaigen-theme-startup-profile-event-notices-article-button-color-2dcb02d: #aebdc7;
-    --kaigen-theme-startup-profile-event-notices-article-span-color-e1e62c8: #9fb2bf;
     --kaigen-theme-startup-startup-brand-img-filter-2e11c80: #ffffff1c;
     --kaigen-theme-startup-welcome-card-background-7afbb5d: #17314c65;
     --kaigen-theme-startup-welcome-card-background-53774ba: #0b1420c4;

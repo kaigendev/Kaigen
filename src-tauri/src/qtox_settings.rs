@@ -41,11 +41,11 @@ pub(crate) fn read_friend_aliases(
             .ok_or_else(|| "PROFILE_PASSWORD_REQUIRED".to_string())
             .and_then(|password| ProfileCipher::unlock(&bytes, password))
             .and_then(|cipher| cipher.decrypt(&bytes));
-        crate::wipe_sensitive_bytes(&mut bytes);
+        crate::wipe_secret_bytes(&mut bytes);
         bytes = decrypted?;
     }
     let result = parse_friend_aliases(&bytes);
-    crate::wipe_sensitive_bytes(&mut bytes);
+    crate::wipe_secret_bytes(&mut bytes);
     result
 }
 

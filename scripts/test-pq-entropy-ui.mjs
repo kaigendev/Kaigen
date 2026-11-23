@@ -22,7 +22,7 @@ const collectionMs = 15_000;
 assert.match(component, /PQ_ENTROPY_COLLECTION_MS = 15_000/u, "every entropy choice retains fifteen visible seconds");
 assert.match(component, /PQ_ENTROPY_SUCCESS_NOTICE_MS = 5_000 \+ 2_000/u, "additional entropy success remains visible two seconds beyond the usual notice");
 assert.match(core, /IDENTITY_ENTROPY_UI_LEASE: Duration = Duration::from_secs\(20\)/u, "the core lease reserves fifteen seconds plus the existing five-second latency margin");
-assert.match(component, /onBeginRef\.current\(friendNumber\)/u, "the collector reserves a real backend window before gathering noise");
+assert.match(component, /const beginForRun = onBeginRef\.current;[^]*const run = \{ identityKey, publicKey, friendNumber,[^]*runRef\.current = run;[^]*const remainingMs = await beginForRun\(run\.friendNumber, run\.publicKey\);\s*if \(!currentRun\(run\)\) return;[^]*const usableMs = remainingMs - \(performance\.now\(\) - requestedAt\);\s*if \(usableMs >= PQ_ENTROPY_MIN_LEASE_MS\) \{\s*run\.deadline = requestedAt \+ remainingMs;\s*setCollectionReady\(true\);/u, "the captured contact and current run must receive a sufficient real backend lease before collection becomes ready");
 assert.match(component, /if \(!collectionReady && !error\) return null/u, "an unavailable backend lease must not show a fake collector");
 assert.match(component, /PQ_ENTROPY_SAMPLE_LIMIT = 96/u, "pointer samples are bounded");
 assert.match(component, /PQ_ENTROPY_DIGEST_BYTES = 32/u, "the backend receives at most one SHA-256 digest");
@@ -50,8 +50,10 @@ assert.match(app, /The contact's PQ key changed\. The new key was not trusted au
   "the warning must not imply that a changed key was accepted");
 assert.match(app, /PQ-ключ изменился — не принят/u, "the compact warning must not imply that a changed key was accepted");
 assert.match(app, /remainingMs < PQ_ENTROPY_MIN_LEASE_MS/u, "status refresh uses the same minimum usable lease as the collector");
-assert.match(app, /invoke<PqStatus>\("complete_pq_identity", \{ friendNumber, extraNoise \}\)/u, "the digest is scoped to the waiting contact");
-assert.match(app, /extraNoise\.length === 0 \|\| generation !== viewOwnerRef\.current\.generation/u, "system-only completion and a changed chat cannot show a stale additional-entropy success");
+assert.ok(/const pqContactArgs = \(\{ profileId, friendNumber, expectedPublicKey \}: PqContactTarget\) => \(\{ profileId, friendNumber, expectedPublicKey \}\)/u.test(app)
+  && /const completePqIdentity = useCallback\(async \(friendNumber: number, extraNoise: number\[\], expectedPublicKey: string\) => \{\s*const target = capturePqTarget\(friendNumber, expectedPublicKey\);[^]*await invoke<PqStatus>\("complete_pq_identity", \{ \.\.\.pqContactArgs\(target\), extraNoise \}\)/u.test(app)
+  && /await run\.complete\(run\.friendNumber, extraNoise, run\.publicKey\)/u.test(component), "the digest is scoped to the waiting contact and its captured profile/public-key owner");
+assert.match(app, /await invoke<PqStatus>\("complete_pq_identity", \{ \.\.\.pqContactArgs\(target\), extraNoise \}\);\s*if \(!currentPqTarget\(target\) \|\| generation !== viewOwnerRef\.current\.generation\) return;[^]*if \(extraNoise\.length === 0\) return;\s*setPqEntropySuccess\(\{ profileId: target\.profileId, chatId: target\.chatId, friendNumber \}\)/u, "system-only completion and a changed chat cannot show a stale additional-entropy success");
 assert.match(app, /setTimeout\(\(\) => \{\s*setPqEntropySuccess\(null\);[\s\S]*?\}, PQ_ENTROPY_SUCCESS_NOTICE_MS\)/u, "the success notice expires without delaying identity completion");
 assert.match(app, /\(!activePq\.supported \|\| activePqCancelledAwaitingDecision\)/u, "unknown capability and cancelled first negotiation both keep the first send behind an explicit decision");
 assert.match(app, /reason=\{activePqCancelledAwaitingDecision \? "cancelled" : "checking"\}/u, "the decision row distinguishes stopped negotiation from a pending capability check");
@@ -59,8 +61,8 @@ for (const errorCode of ["PQ_AUTO_ALREADY_NEGOTIATING", "PQ_CONTACT_IDENTITY_CHA
   assert.match(app, new RegExp(errorCode, "u"), `${errorCode} must have a friendly PQ-specific UI message`);
 }
 assert.match(app, /formatPqUserFacingError\(error, \{ ru: "Не удалось отправить сообщение"/u, "send failures must use friendly PQ error labels");
-assert.match(app, /invoke<PqStatus>\("skip_pq_auto", \{ friendNumber \}\)/u, "plain Tox fallback requires an explicit contact-scoped command");
-assert.match(app, /key=\{`\$\{activeProfileId\}:\$\{active\.friendNumber\}`\}/u, "profile or contact changes remount and clear the collector");
+assert.match(app, /const skipPqAuto = useCallback\(async \(friendNumber: number, expectedPublicKey: string\) => \{\s*const target = capturePqTarget\(friendNumber, expectedPublicKey\);[^]*await invoke<PqStatus>\("skip_pq_auto", pqContactArgs\(target\)\);\s*if \(!currentPqTarget\(target\) \|\| generation !== viewOwnerRef\.current\.generation\) return;/u, "plain Tox fallback requires an explicit command bound to the captured profile and public-key contact");
+assert.match(app, /<PqEntropy key=\{\x60\$\{pqContactKey\(activeProfileId, active\.publicKey\)\}:entropy\x60\} identityKey=\{pqContactKey\(activeProfileId, active\.publicKey\)\} publicKey=\{active\.publicKey\} friendNumber=\{active\.friendNumber\}/u, "profile or stable contact changes remount and clear the collector");
 
 assert.match(styles, /var\(--kaigen-color-accent\)/u);
 assert.match(styles, /var\(--palette4-composer\)/u);
@@ -74,7 +76,9 @@ for (const selector of ["pq-entropy-panel", "pq-capability-wait"]) {
   assert.doesNotMatch(block, /position:\s*absolute/u, `${selector} must reserve space above the composer instead of covering history`);
   assert.match(block, /flex:\s*0 0 auto/u, `${selector} must remain a bounded row in the composer section`);
 }
-assert.match(app, /\[active\.id, activePqComposerStage, screen\]/u, "PQ row geometry must reposition a followed chat at its latest message");
+const pqGeometryEffect = app.match(/useLayoutEffect\(\(\) => \{\s*const container = messageScrollRef\.current;[^]*?\}, \[active\.id, activePqComposerStage, screen,[^\]]*\]\);/u)?.[0] ?? "";
+assert.match(pqGeometryEffect, /!followLatestRef\.current\) return;[^]*if \(!followLatestRef\.current \|\| incomingOwnsScroll\(\)\s*\|\| pendingNavigationRef\.current \|\| pendingScrollRestore\.current === active\.id\) return;[^]*container\.scrollTop = container\.scrollHeight;[^]*keepLatestVisible\(\);[^]*scheduleViewFrame\(keepLatestVisible\)/u,
+  "PQ row geometry follows the latest message only when no incoming, navigation or history restore owns scroll");
 
 for (const phrase of [
   "Дополнительная случайность для нового PQ-ключа",
@@ -148,40 +152,157 @@ async function connectCdp(url, timeoutMs = 2_000) {
   let sequence = 0;
   let intentionalClose = false;
   const pending = new Map();
+  const pendingNavigations = new Map();
+  const settledNavigations = [];
+  const rememberSettledNavigation = (record) => {
+    pendingNavigations.delete(record.id);
+    settledNavigations.push(record);
+    if (settledNavigations.length > 32) settledNavigations.shift();
+  };
+  const validateNavigationReply = (record) => {
+    if (record.replyAt === undefined || !record.requiresDocumentIdentity) return;
+    const reply = record.reply;
+    if (!reply?.frameId || !reply.loaderId) {
+      firstNavigationError ??= new Error("Observed navigation reply has no document identity");
+    } else if (record.documentProof &&
+      (reply.frameId !== record.documentProof.frameId || reply.loaderId !== record.documentProof.loaderId)) {
+      firstNavigationError ??= new Error("Observed navigation reply contradicts the verified document");
+    }
+  };
+  let firstNavigationError;
   socket.addEventListener("message", ({ data }) => {
     const response = JSON.parse(String(data));
+    const navigation = pendingNavigations.get(response.id);
+    if (navigation) {
+      navigation.replyAt = Date.now(); navigation.reply = response.result; navigation.protocolError = response.error;
+      const message = response.error?.message ?? response.result?.errorText;
+      if (response.error || message) firstNavigationError ??= new Error("Observed navigation failure: " + (message || "CDP protocol error"));
+      validateNavigationReply(navigation);
+      rememberSettledNavigation(navigation);
+    }
     const request = pending.get(response.id);
     if (!request) return;
     pending.delete(response.id);
     clearTimeout(request.timer);
-    if (response.error) request.reject(new Error(response.error.message));
+    if (response.error) request.reject(Object.assign(new Error(response.error.message), { code: "CDP_PROTOCOL_ERROR" }));
     else request.resolve(response.result);
   });
   socket.addEventListener("close", () => {
+    for (const navigation of [...pendingNavigations.values()]) {
+      navigation.closedAt = Date.now();
+      rememberSettledNavigation(navigation);
+    }
     if (intentionalClose) return;
     for (const request of pending.values()) request.reject(new Error(`${request.method} was interrupted`));
     pending.clear();
   });
   return {
     close: () => socket.close(),
+    navigationDiagnostics: () => [...settledNavigations, ...pendingNavigations.values()],
+    validateNavigationReply,
+    throwIfNavigationFailed() { if (firstNavigationError) throw firstNavigationError; },
     shutdown() {
       intentionalClose = true;
       if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ id: ++sequence, method: "Browser.close", params: {} }));
     },
     send(method, params = {}, timeoutMs = 2_000) {
       const id = ++sequence;
+      const navigationRecord = method === "Page.navigate" ? { id, url: params.url, sentAt: Date.now() } : null;
+      if (navigationRecord) pendingNavigations.set(id, navigationRecord);
       const response = new Promise((resolve, reject) => {
         const timer = setTimeout(() => {
           pending.delete(id);
-          reject(new Error(`${method} timed out`));
+          if (navigationRecord) navigationRecord.timedOutAt = Date.now();
+          reject(Object.assign(new Error(`${method} timed out`), { code: "CDP_REQUEST_TIMEOUT", method }));
         }, timeoutMs);
         pending.set(id, { resolve, reject, timer, method });
         socket.send(JSON.stringify({ id, method, params }));
       });
       response.catch(() => {});
+      response.navigationRecord = navigationRecord;
       return response;
     },
   };
+}
+
+
+const verifiedFixtureNavigations = new WeakMap();
+async function navigateOwnedFixture(cdp, url, ownerOrigin, label, readyBudgetMs, rpcBudgetMs, ready, scale = 1, focusBudgetMs = rpcBudgetMs) {
+  const expected = new URL(url);
+  if (expected.origin !== ownerOrigin || expected.username || expected.password) throw new Error("Navigation target is not the owned fixture");
+  const startedAt = Date.now();
+  const deadline = startedAt + Math.ceil((rpcBudgetMs + focusBudgetMs + readyBudgetMs) * scale);
+  const remaining = () => Math.max(0, deadline - Date.now());
+  const sendWithin = (method, params, cap = 500) => {
+    const left = remaining();
+    if (left <= 0) throw new Error(label + ": navigation budget exhausted");
+    return cdp.send(method, params, Math.min(cap, left / scale));
+  };
+  sendWithin.remaining = remaining;
+  cdp.throwIfNavigationFailed();
+  // The same owned target is focused before navigation, never a host GUI window.
+  if (focusBudgetMs > 0) await sendWithin("Page.bringToFront", {}, focusBudgetMs);
+  const baseline = (await sendWithin("Page.getFrameTree", {})).frameTree?.frame;
+  if (!baseline?.id || !baseline.loaderId) throw new Error(label + ": baseline document identity missing");
+  const request = cdp.send("Page.navigate", { url: expected.href }, Math.min(rpcBudgetMs, remaining() / scale));
+  const record = request.navigationRecord;
+  if (!record) throw new Error(label + ": missing owned navigation record");
+  record.requiresDocumentIdentity = true;
+  let reply;
+  const currentReply = () => {
+    cdp.validateNavigationReply(record);
+    cdp.throwIfNavigationFailed();
+    if (record.replyAt !== undefined) reply = record.reply;
+    if (reply?.errorText) throw new Error(label + ": " + reply.errorText);
+    if (record.replyAt !== undefined && (!reply?.frameId || !reply.loaderId)) {
+      throw new Error(label + ": navigation document identity missing");
+    }
+    if (reply && reply.frameId !== baseline.id) throw new Error(label + ": navigation reply changed the owned frame");
+    return reply;
+  };
+  try { reply = await request; }
+  catch (error) {
+    if (error.code !== "CDP_REQUEST_TIMEOUT" || error.method !== "Page.navigate") throw error;
+    // A local RPC timer is not evidence that the navigation had no effect.
+  }
+  if (reply?.errorText) throw new Error(label + ": " + reply.errorText);
+  if (reply && (!reply.frameId || !reply.loaderId)) throw new Error(label + ": navigation document identity missing");
+  while (remaining() > 0) {
+    cdp.throwIfNavigationFailed();
+    try {
+      const frame = (await sendWithin("Page.getFrameTree", {})).frameTree?.frame;
+      currentReply();
+      const sameOwner = frame?.id === (reply?.frameId ?? baseline.id);
+      const newDocument = !!frame?.loaderId && frame.loaderId !== baseline.loaderId;
+      const exactAck = !reply || frame.loaderId === reply.loaderId;
+      if (sameOwner && newDocument && exactAck && frame.url === expected.href) {
+        const current = await sendWithin("Runtime.evaluate", {
+          expression: "location.href === " + JSON.stringify(expected.href) + " && window === window.top",
+          returnByValue: true,
+        });
+        if (current.exceptionDetails) throw new Error(label + ": document identity evaluation failed");
+        if (current.result?.value && await ready(sendWithin) && remaining() > 0) {
+          currentReply();
+          if (reply && (reply.frameId !== frame.id || reply.loaderId !== frame.loaderId)) {
+            throw new Error(label + ": navigation reply changed during document readiness");
+          }
+          const navigation = reply ?? { frameId: frame.id, loaderId: frame.loaderId };
+          const proof = { url: expected.href, frameId: frame.id, loaderId: frame.loaderId,
+            baselineLoaderId: baseline.loaderId, startedAt, deadline, readyAt: Date.now(), rpcTimedOut: record.timedOutAt !== undefined };
+          record.documentProof = proof;
+          cdp.validateNavigationReply(record);
+          cdp.throwIfNavigationFailed();
+          verifiedFixtureNavigations.set(navigation, proof);
+          return navigation;
+        }
+      }
+    } catch (error) {
+      const transientContext = /Execution context was destroyed|Cannot find context with specified id|Cannot find default execution context/u.test(error.message);
+      if (error.code !== "CDP_REQUEST_TIMEOUT" && !transientContext) throw error;
+    }
+    if (remaining() > 0) await new Promise((resolve) => setTimeout(resolve, Math.min(25, remaining())));
+  }
+  throw new Error(label + ": no exact new owned document/ready milestone within the original combined navigation budget");
 }
 
 const profile = await mkdtemp(path.join(os.tmpdir(), "kaigen-pq-entropy-ui-"));
@@ -199,6 +320,7 @@ const server = await createServer({
 let browser;
 let cdp;
 let browserErrors = "";
+let primaryError;
 try {
   await server.listen();
   const address = server.httpServer?.address();
@@ -224,7 +346,15 @@ try {
       return Number.isInteger(parsed) && parsed > 0 ? parsed : undefined;
     }, 4_000, "Chrome DevTools endpoint");
   } catch (error) {
-    throw new Error(`${error.message}\n${browserErrors}`);
+    const endpointState = await readFile(activePort, "utf8").then((text) => ({
+      exists: true, bytes: Buffer.byteLength(text),
+      portLineIsDecimal: /^[0-9]+$/.test(text.trim().split(/\r?\n/u)[0]),
+      webSocketPathPresent: text.includes("/devtools/browser/"),
+    })).catch((readError) => ({ exists: false, errorCode: readError.code ?? "unknown" }));
+    throw new Error(`${error.message}\nPQ_BROWSER_STARTUP_FAILURE ${JSON.stringify({
+      pid: browser?.pid ?? null, exitCode: browser?.exitCode, signal: browser?.signalCode,
+      fixtureExists: existsSync(profile), serverListening: server.httpServer?.listening ?? false, endpointState,
+    })}\n${browserErrors}`);
   }
   const page = await fetch(`http://127.0.0.1:${debugPort}/json/new?about%3Ablank`, {
     method: "PUT",
@@ -254,19 +384,18 @@ try {
   if (process.argv.includes("--compact-inputs")) {
     // Real components and browser input, synthetic backend lease/completion only.
     // This subset proves UI reachability, not a cryptographic peer handshake.
-    const evaluate = async (expression) => {
-      const result = await cdp.send("Runtime.evaluate", { expression, returnByValue: true });
+    const evaluate = async (expression, timeoutMs = 2_000) => {
+      const result = await cdp.send("Runtime.evaluate", { expression, returnByValue: true }, timeoutMs);
       assert.equal(result.exceptionDetails, undefined, "fixture evaluation must succeed");
       return result.result?.value;
     };
     const open = async (mode, width, height, extraQuery = "") => {
       await cdp.send("Emulation.setDeviceMetricsOverride", { width, height, deviceScaleFactor: 1, mobile: false });
-      await cdp.send("Page.navigate", { url: `${origin}/?mode=${mode}&compact=true${themeQuery}${extraQuery}` });
-      await cdp.send("Page.bringToFront");
-      return waitFor(async () => {
-        const ready = await evaluate(`new URLSearchParams(location.search).get('mode') === '${mode}' && document.hasFocus() && !!document.querySelector('${mode === "control" ? "[data-pq-control] button" : mode === "capability" ? ".pq-capability-wait" : ".pq-entropy-panel"}')`);
-        return ready ? true : undefined;
-      }, 3_000, `${mode} ${width}x${height}`);
+      const url = `${origin}/?mode=${mode}&compact=true${themeQuery}${extraQuery}`;
+      return navigateOwnedFixture(cdp, url, origin, `${mode} ${width}x${height}`, 3_000, 2_000, async (sendWithin) => {
+        const ready = await evaluate(`new URLSearchParams(location.search).get('mode') === '${mode}' && document.hasFocus() && !!document.querySelector('${mode === "control" ? "[data-pq-control] button" : mode === "capability" ? ".pq-capability-wait" : ".pq-entropy-panel"}')`, Math.min(500, sendWithin.remaining()));
+        return ready === true;
+      });
     };
     const geometry = () => evaluate(`(() => {
       const selectors = ['.conversation-header', '.pq-entropy-panel', '.pq-capability-wait', '.pq-entropy-constellation', '.composer', '.attach', '.send', 'textarea', '.pq-entropy-actions button', '.pq-capability-wait > button'];
@@ -367,9 +496,19 @@ try {
     console.log(JSON.stringify({ scope: "PQ compact UI fixture; no real peer handshake", viewports: layouts.map(({mode,width,height}) => ({mode,width,height})), inputTypes: ["mouse", "touch"], controlStates: ["available", "offered", "active", "incoming_offer"], result: "PASS" }));
     process.exitCode = 0;
   } else {
-  await cdp.send("Page.navigate", { url: `${origin}/?mode=baseline${themeQuery}` });
-  const baseline = await waitFor(async () => {
-    const evaluated = await cdp.send("Runtime.evaluate", {
+  const openFullFixture = async (url, label, readReady, focusBudgetMs = 0) => {
+    let value;
+    const navigation = await navigateOwnedFixture(cdp, url, origin, label, 3_000, 2_000, async (sendWithin) => {
+      value = await readReady(sendWithin);
+      return Boolean(value);
+    }, 1, focusBudgetMs);
+    const proof = verifiedFixtureNavigations.get(navigation);
+    assert.ok(proof?.loaderId && proof.loaderId !== proof.baselineLoaderId, "full fixture must own a new document");
+    console.log("PQ_FIXTURE_NAVIGATION " + JSON.stringify({ label, rpcTimedOut: proof.rpcTimedOut, elapsedMs: proof.readyAt - proof.startedAt }));
+    return value;
+  };
+  const baseline = await openFullFixture(`${origin}/?mode=baseline${themeQuery}`, "PQ baseline fixture", async (sendWithin) => {
+    const evaluated = await sendWithin("Runtime.evaluate", {
       expression: `(() => {
         const composer = document.querySelector('.composer');
         const header = document.querySelector('.conversation-header');
@@ -381,10 +520,9 @@ try {
       returnByValue: true,
     });
     return evaluated.result?.value;
-  }, 3_000, "PQ baseline fixture");
-  await cdp.send("Page.navigate", { url: `${origin}/?mode=entropy${themeQuery}` });
-  const layout = await waitFor(async () => {
-    const evaluated = await cdp.send("Runtime.evaluate", {
+  });
+  const layout = await openFullFixture(`${origin}/?mode=entropy${themeQuery}`, "PQ entropy fixture", async (sendWithin) => {
+    const evaluated = await sendWithin("Runtime.evaluate", {
       expression: `(() => {
         const panel = document.querySelector('.pq-entropy-panel');
         const field = document.querySelector('.pq-entropy-constellation');
@@ -415,7 +553,7 @@ try {
       returnByValue: true,
     });
     return evaluated.result?.value;
-  }, 3_000, "PQ entropy fixture");
+  });
   if (process.argv.includes("--debug-layout")) console.log(JSON.stringify(layout));
   assert.equal(layout.headerHeight, 68, "the in-chat collector must preserve the current header geometry");
   assert.equal(layout.headerHeight, baseline.headerHeight, "the PQ row must not move or resize the header");
@@ -515,9 +653,8 @@ try {
   assert.equal(restoredMotion.result?.value.prefersReducedMotion, false, "ordinary media is restored explicitly");
   assert.equal(restoredMotion.result?.value.animation, "pq-star-breathe", "restoring no-preference restores the decorative animation");
 
-  await cdp.send("Page.navigate", { url: `${origin}/?mode=capability${themeQuery}` });
-  const capabilityLayout = await waitFor(async () => {
-    const evaluated = await cdp.send("Runtime.evaluate", {
+  const capabilityLayout = await openFullFixture(`${origin}/?mode=capability${themeQuery}`, "PQ capability fixture", async (sendWithin) => {
+    const evaluated = await sendWithin("Runtime.evaluate", {
       expression: `(() => {
         const panel = document.querySelector('.pq-capability-wait');
         const scroller = document.querySelector('.message-scroll');
@@ -535,7 +672,7 @@ try {
       returnByValue: true,
     });
     return evaluated.result?.value;
-  }, 3_000, "PQ capability fixture");
+  });
   assert.ok(capabilityLayout.scrollerBottom <= capabilityLayout.panelTop + 0.5, "the capability row must not overlay history");
   assert.ok(capabilityLayout.pendingBottom <= capabilityLayout.scrollerBottom + 0.5, "the pending first message stays visible during capability detection");
   assert.equal(capabilityLayout.headerTop, 0, "the capability row must not displace the fixed chat header");
@@ -557,7 +694,7 @@ try {
     { mode: "control", state: "available", label: "Включить PQ", command: "request_pq_session" },
     { mode: "control", state: "error", label: "Включить PQ", command: "request_pq_session" },
     { mode: "control", state: "offered", label: "Отозвать предложение PQ", command: "withdraw_pq_session" },
-    { mode: "control", state: "active", label: "Отменить PQ", command: "request_pq_shutdown" },
+    { mode: "control", state: "active", label: "Отключить PQ", command: "request_pq_shutdown" },
     { mode: "control", state: "incoming_offer", decision: "peer", label: "Инициация PQ", command: null },
     { mode: "control", state: "accepting", label: "Инициация PQ", command: null },
     { mode: "control", state: "accepting", manualWaiting: "true", supported: "false", label: "Отменить ожидание PQ", command: "withdraw_pq_session" },
@@ -570,21 +707,21 @@ try {
   ];
   for (const controlCase of controlCases) {
     const { label, command, ...query } = controlCase;
-    await cdp.send("Page.navigate", { url: `${origin}/?${new URLSearchParams(query)}${themeQuery}` });
-    const rendered = await waitFor(async () => {
-      const evaluated = await cdp.send("Runtime.evaluate", {
+    const rendered = await openFullFixture(`${origin}/?${new URLSearchParams(query)}${themeQuery}`, `PQ action ${JSON.stringify(query)}`, async (sendWithin) => {
+      const evaluated = await sendWithin("Runtime.evaluate", {
         expression: `(() => {
           const control = document.querySelector('[data-pq-control]');
           if (!control || !window.__PQ_CONTROL_COMMANDS__) return undefined;
           const button = control.querySelector('button');
           const panel = document.querySelector('.pq-capability-wait');
-          return { present: !!button, label: button?.textContent, disabled: button?.disabled, copy: panel?.textContent };
+          return { present: !!button, buttons: control.querySelectorAll('button').length, label: button?.textContent, disabled: button?.disabled, copy: panel?.textContent };
         })()`,
         returnByValue: true,
       });
       return evaluated.result?.value;
-    }, 3_000, `PQ action ${JSON.stringify(query)}`);
+    });
     assert.equal(rendered.present, query.supported !== "false" || query.manualWaiting === "true", "unknown peers cannot start PQ, but an explicit discovery wait remains cancellable");
+    assert.equal(rendered.buttons, rendered.present ? 1 : 0, "the menu exposes only the current PQ action");
     if (rendered.present) {
       assert.equal(rendered.label, label);
       assert.equal(rendered.disabled, !command, `${query.state} must expose only a valid action`);
@@ -604,28 +741,8 @@ try {
     assert.equal(dispatched.result?.value?.skipped, undefined, "retry never converts waiting messages to plain Tox");
   }
 
-  for (const language of ["ru", "en"]) {
-    await cdp.send("Page.navigate", { url: `${origin}/?mode=control&state=available&protocolVersion=1&legacyAvailable=true&language=${language}${themeQuery}` });
-    await waitFor(async () => {
-      const result = await cdp.send("Runtime.evaluate", { expression: "!!document.querySelector('.pq-legacy-mode') && !!window.__PQ_CONTROL_LEGACY__", returnByValue: true });
-      return result.result?.value || undefined;
-    }, 3_000, "explicit legacy compatibility control");
-    await cdp.send("Runtime.evaluate", { expression: "document.querySelector('[data-pq-control] > button').click(); document.querySelector('.pq-legacy-mode').click()" });
-    const warning = await waitFor(async () => {
-      const result = await cdp.send("Runtime.evaluate", { expression: "document.querySelector('.pq-legacy-confirm small')?.textContent", returnByValue: true });
-      return result.result?.value;
-    }, 3_000, "legacy persistence warning");
-    assert.match(warning, language === "ru" ? /не восстанавливается после перезапуска/u : /does not survive restart/u);
-    const beforeConsent = await cdp.send("Runtime.evaluate", { expression: "window.__PQ_CONTROL_LEGACY__", returnByValue: true });
-    assert.deepEqual(beforeConsent.result?.value, [false], "normal manual PQ and opening a warning must not authorize legacy fallback");
-    await cdp.send("Runtime.evaluate", { expression: "document.querySelector('.pq-legacy-accept').click()" });
-    const afterConsent = await cdp.send("Runtime.evaluate", { expression: "({ commands: window.__PQ_CONTROL_COMMANDS__, legacy: window.__PQ_CONTROL_LEGACY__ })", returnByValue: true });
-    assert.deepEqual(afterConsent.result?.value, { commands: ["request_pq_session", "request_pq_session"], legacy: [false, true] });
-  }
-
-  await cdp.send("Page.navigate", { url: `${origin}/?mode=entropy&shell=full${themeQuery}` });
-  const narrowLayout = await waitFor(async () => {
-    const evaluated = await cdp.send("Runtime.evaluate", {
+  const narrowLayout = await openFullFixture(`${origin}/?mode=entropy&shell=full${themeQuery}`, "narrow full-shell PQ fixture", async (sendWithin) => {
+    const evaluated = await sendWithin("Runtime.evaluate", {
       expression: `(() => {
         const conversation = document.querySelector('.conversation');
         const panel = document.querySelector('.pq-entropy-panel');
@@ -657,7 +774,7 @@ try {
       returnByValue: true,
     });
     return evaluated.result?.value;
-  }, 3_000, "narrow full-shell PQ fixture");
+  });
   if (process.argv.includes("--debug-layout")) console.log(JSON.stringify(narrowLayout));
   assert.ok(narrowLayout.conversationWidth >= 480 && narrowLayout.conversationWidth <= 500, "the 860px full shell must exercise the actual narrow conversation width");
   assert.ok(narrowLayout.panelLeft >= narrowLayout.conversationLeft && narrowLayout.panelRight <= narrowLayout.conversationRight, "the collector must stay inside the narrow chat column");
@@ -671,15 +788,13 @@ try {
     await writeFile(path.resolve(narrowScreenshotTarget), Buffer.from(narrowScreenshot.data, "base64"));
   }
 
-  await cdp.send("Page.navigate", { url: `${origin}/?mode=entropy${themeQuery}` });
-  await cdp.send("Page.bringToFront");
-  await waitFor(async () => {
-    const evaluated = await cdp.send("Runtime.evaluate", {
+  await openFullFixture(`${origin}/?mode=entropy${themeQuery}`, "OS-only keyboard action", async (sendWithin) => {
+    const evaluated = await sendWithin("Runtime.evaluate", {
       expression: `(() => { const button = document.querySelector('.pq-entropy-system'); if (!button || !window.__PQ_ENTROPY_VISIBLE_AT__ || !document.hasFocus()) return false; button.focus(); return document.activeElement === button; })()`,
       returnByValue: true,
     });
     return evaluated.result?.value ? true : undefined;
-  }, 3_000, "OS-only keyboard action");
+  }, 2_000);
   await cdp.send("Input.dispatchKeyEvent", { type: "rawKeyDown", key: " ", code: "Space", windowsVirtualKeyCode: 32, nativeVirtualKeyCode: 32 });
   await cdp.send("Input.dispatchKeyEvent", { type: "keyUp", key: " ", code: "Space", windowsVirtualKeyCode: 32, nativeVirtualKeyCode: 32 });
   const systemResult = await waitFor(async () => {
@@ -692,30 +807,28 @@ try {
   const systemVisibleMs = systemResult.completedAt - systemVisibleAt.result.value;
   assert.ok(systemVisibleMs >= collectionMs, `an early system-only choice retains the same fifteen visible seconds (observed ${systemVisibleMs}ms)`);
 
-  const readRuntime = async () => {
-    const evaluated = await cdp.send("Runtime.evaluate", {
+  const readRuntime = async (send = cdp.send) => {
+    const evaluated = await send("Runtime.evaluate", {
       expression: `({ mode: new URLSearchParams(location.search).get('mode'), begin: window.__PQ_ENTROPY_BEGIN__, visibleAt: window.__PQ_ENTROPY_VISIBLE_AT__, result: window.__PQ_ENTROPY_RUNTIME__, visible: !!document.querySelector('.pq-entropy-panel') })`,
       returnByValue: true,
     });
     return evaluated.result?.value;
   };
   for (const mode of ["denied", "expired"]) {
-    await cdp.send("Page.navigate", { url: `${origin}/?mode=${mode}${themeQuery}` });
-    await waitFor(async () => {
-      const state = await readRuntime();
+    await openFullFixture(`${origin}/?mode=${mode}${themeQuery}`, `${mode} entropy lease`, async (sendWithin) => {
+      const state = await readRuntime(sendWithin);
       return state?.mode === mode && state.begin?.calls ? state : undefined;
-    }, 3_000, `${mode} entropy lease`);
+    });
     await new Promise((resolve) => setTimeout(resolve, 3_200));
     const denied = await readRuntime();
     assert.equal(denied.visible, false, `${mode} lease never displays a collector after the key is unavailable`);
     assert.equal(denied.result, undefined, `${mode} lease never submits synthetic completion`);
   }
 
-  await cdp.send("Page.navigate", { url: `${origin}/?mode=delayed${themeQuery}` });
-  await waitFor(async () => {
-    const state = await readRuntime();
+  await openFullFixture(`${origin}/?mode=delayed${themeQuery}`, "reservation pending before owner leaves", async (sendWithin) => {
+    const state = await readRuntime(sendWithin);
     return state?.mode === "delayed" && state.begin?.calls && !state.begin.grantedAt ? state : undefined;
-  }, 3_000, "reservation pending before owner leaves");
+  });
   await cdp.send("Runtime.evaluate", { expression: "window.__PQ_ENTROPY_UNMOUNT__()" });
   await new Promise((resolve) => setTimeout(resolve, 1_300));
   const staleGrant = await readRuntime();
@@ -723,11 +836,10 @@ try {
   assert.equal(staleGrant.visible, false, "a stale lease cannot remount the old contact collector");
   assert.equal(staleGrant.result, undefined, "a stale lease never completes for the old contact");
 
-  await cdp.send("Page.navigate", { url: `${origin}/?mode=delayed${themeQuery}` });
-  const beforeGrant = await waitFor(async () => {
-    const state = await readRuntime();
+  const beforeGrant = await openFullFixture(`${origin}/?mode=delayed${themeQuery}`, "delayed entropy lease request", async (sendWithin) => {
+    const state = await readRuntime(sendWithin);
     return state?.mode === "delayed" && state.begin?.calls && !state.begin.grantedAt ? state : undefined;
-  }, 3_000, "delayed entropy lease request");
+  });
   assert.equal(beforeGrant.visible, false, "a pending reservation cannot pretend to gather noise");
   const delayed = await waitFor(async () => {
     const state = await readRuntime();
@@ -737,11 +849,10 @@ try {
   assert.ok(delayed.result.completedAt - delayed.visibleAt >= collectionMs, "lease latency cannot consume the visible collection window");
   assert.deepEqual(delayed.result.noise, [], "an untouched constellation uses only OS randomness");
 
-  await cdp.send("Page.navigate", { url: `${origin}/?mode=slow-complete${themeQuery}` });
-  await waitFor(async () => {
-    const state = await readRuntime();
+  await openFullFixture(`${origin}/?mode=slow-complete${themeQuery}`, "slow completion collector", async (sendWithin) => {
+    const state = await readRuntime(sendWithin);
     return state?.mode === "slow-complete" && state.visible ? state : undefined;
-  }, 3_000, "slow completion collector");
+  });
   await cdp.send("Runtime.evaluate", {
     expression: `(() => {
       const field = document.querySelector('.pq-entropy-constellation');
@@ -782,11 +893,10 @@ try {
   }, 2_000, "slow backend completion");
   assert.equal(slowDone.result.calls, 1, "a slow completion must not dispatch twice");
 
-  await cdp.send("Page.navigate", { url: `${origin}/?mode=begin-error${themeQuery}` });
-  await waitFor(async () => {
-    const state = await readRuntime();
+  await openFullFixture(`${origin}/?mode=begin-error${themeQuery}`, "failed entropy reservation", async (sendWithin) => {
+    const state = await readRuntime(sendWithin);
     return state?.mode === "begin-error" && state.visible ? state : undefined;
-  }, 3_000, "failed entropy reservation");
+  });
   await cdp.send("Runtime.evaluate", { expression: "document.querySelector('.pq-entropy-continue').click()" });
   const retried = await waitFor(async () => {
     const state = await readRuntime();
@@ -802,6 +912,10 @@ try {
 
   console.log(`PQ entropy chat UI: static contract + real DOM timing, lease, error/retry, ${controlCases.length} PQ menu actions and unmount assertions passed (panel=${Math.round(layout.panel.width)}px, narrow-chat=${Math.round(narrowLayout.conversationWidth)}px, digest=${autoResult.noise.length} bytes, motion=no-preference/reduce/no-preference, visible=${Math.round(autoResult.completedAt - visibleAt.result.value)}ms).`);
   }
+} catch (error) {
+  primaryError = error;
+  process.stderr.write("PQ_NAVIGATION_FAILURE " + JSON.stringify(cdp?.navigationDiagnostics() ?? []) + "\n");
+  throw error;
 } finally {
   if (cdp) {
     cdp.shutdown();
@@ -811,4 +925,5 @@ try {
   browser?.kill();
   await server.close().catch(() => {});
   await rm(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+  if (!primaryError) cdp?.throwIfNavigationFailed();
 }

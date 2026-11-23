@@ -211,6 +211,25 @@ export async function runMessageVisibilityEdges(): Promise<Result> {
     check(row(retryId)?.textContent?.includes("Tail retry same identity"), "tail retry card text missing");
     details.retry = { id: retryId, fixed, failed, recovered };
 
+    const beforeConditionalFailure = geometrySnapshotCalls(2).at(-1)?.id ?? 0;
+    const historyRetryVisible = () => [...document.querySelectorAll<HTMLButtonElement>(".history-action")]
+      .some((button) => /не удалось загрузить историю|history could not load/i.test(button.textContent ?? ""));
+    geometryFailNextTailSnapshot(2);
+    const conditionalFailure = await waitFor(() => geometrySnapshotCalls(2).find((call) =>
+      call.id > beforeConditionalFailure && call.status === "failed" && call.requestKnownRevision === recovered.revision),
+    "failed poll with the known live revision");
+    await waitFor(() => historyRetryVisible() ? true : undefined, "history retry after the failed poll");
+    const conditionalRecovery = await waitFor(() => {
+      const snapshot = geometrySnapshotEvidence(2);
+      const poll = geometrySnapshotCalls(2).find((call) => call.id > conditionalFailure.id && call.status === "resolved"
+        && call.requestKnownRevision === recovered.revision && call.revision === recovered.revision);
+      return poll && snapshot?.returnedMessages === false && snapshot.latestMessageId === retryId ? poll : undefined;
+    }, "successful unchanged snapshot after the failed poll", 5500);
+    await twoFrames();
+    details.conditionalRecovery = { failed: conditionalFailure, recovered: conditionalRecovery };
+    check(!historyRetryVisible(), "an unchanged successful snapshot leaves the history retry visible");
+    check(row(retryId)?.textContent?.includes("Tail retry same identity"), "an unchanged successful snapshot drops the cached card");
+
     // The tail response can arrive after a large burst and after the reader
     // manually moves into still-visible older rows. Keep that owner anchor.
     await select("QA Carol");
@@ -366,15 +385,22 @@ export async function runMessageVisibilityEdges(): Promise<Result> {
         chatSettings.click();
         const switchFor = (name: string) => [...document.querySelectorAll<HTMLLabelElement>(".setting-switch")]
           .find((label) => label.querySelector("b")?.textContent === name)?.querySelector<HTMLInputElement>('input[type="checkbox"]');
-        const enabled = await waitFor(() => switchFor("Проверять орфографию") ?? undefined, "spellcheck switch");
-        if (!enabled.checked) enabled.click();
-        await twoFrames();
-        const russian = switchFor("Русский")!;
-        if (russian.checked) russian.click();
-        const english = switchFor("English")!;
-        if (!english.checked) english.click();
-        await twoFrames();
-        check(enabled.checked && english.checked && !russian.checked, "enabled English worker configuration");
+        const setSpellcheckSwitch = async (name: string, checked: boolean) => {
+          const input = await waitFor(() => {
+            const control = switchFor(name);
+            return control && !control.disabled ? control : undefined;
+          }, `available ${name} spellcheck switch`);
+          if (input.checked !== checked) input.click();
+          await waitFor(() => {
+            const control = switchFor(name);
+            return control && !control.disabled && control.checked === checked ? true : undefined;
+          }, `saved ${name} spellcheck switch`);
+        };
+        await setSpellcheckSwitch("Проверять орфографию", true);
+        await setSpellcheckSwitch("English", true);
+        await setSpellcheckSwitch("Русский", false);
+        check(switchFor("Проверять орфографию")?.checked && switchFor("English")?.checked
+          && !switchFor("Русский")?.checked, "enabled English worker configuration");
         document.querySelector<HTMLButtonElement>(".chats-button")!.click();
         await select("QA Dave");
       }
@@ -485,6 +511,65 @@ export async function runMessageVisibilityEdges(): Promise<Result> {
     check(searchRaceOffset !== null && Math.abs(searchRaceOffset - searchRaceAnchor.offset) <= 4,
       "search-open delayed range moved the reader anchor");
     document.querySelector<HTMLButtonElement>('button[aria-label="Закрыть поиск"]')!.click();
+
+    // A native scroll notification can be missed while a loaded tail remains
+    // virtualized. A settled snapshot must reveal the reader's actual viewport.
+    geometryPrepareEmptyChat(3);
+    for (let index = 0; index < 160; index += 1) geometryAppendMessage(3, `Loaded spacer recovery ${index}`);
+    await select("QA Erin");
+    await waitFor(() => {
+      const snapshot = geometrySnapshotEvidence(3);
+      return snapshot?.total === 160 && !snapshot.hasMoreBefore && !snapshot.hasMoreAfter ? true : undefined;
+    }, "fully loaded spacer-recovery history");
+    await bottomByUi();
+    const gapScroll = scroller()!;
+    gapScroll.dispatchEvent(new WheelEvent("wheel", { bubbles: true, cancelable: true, deltaY: -24 }));
+    gapScroll.scrollTop = Math.max(0, gapScroll.scrollHeight - gapScroll.clientHeight - 24);
+    gapScroll.dispatchEvent(new Event("scroll", { bubbles: true }));
+    await new Promise((resolve) => setTimeout(resolve, 1200));
+    await twoFrames();
+    let suppressedNativeScrolls = 0;
+    const suppressNativeScroll = (event: Event) => {
+      if (event.target === gapScroll && event.isTrusted) {
+        suppressedNativeScrolls += 1;
+        event.stopImmediatePropagation();
+      }
+    };
+    document.addEventListener("scroll", suppressNativeScroll, true);
+    try {
+      gapScroll.scrollTop = 0;
+      await twoFrames();
+    } finally {
+      document.removeEventListener("scroll", suppressNativeScroll, true);
+    }
+    const gapViewport = gapScroll.getBoundingClientRect();
+    const gapRows = [...gapScroll.querySelectorAll<HTMLElement>("[data-message-key]")];
+    const leadingSpace = gapScroll.querySelector<HTMLElement>(".history-space");
+    details.loadedSpacerBefore = { suppressedNativeScrolls, scrollTop: gapScroll.scrollTop,
+      leadingSpace: leadingSpace?.getBoundingClientRect().height ?? 0, mountedRows: gapRows.length,
+      firstRowOffset: gapRows[0]?.getBoundingClientRect().top - gapViewport.top,
+      snapshot: geometrySnapshotEvidence(3) };
+    check(suppressedNativeScrolls > 0, "native scroll notification was not suppressed");
+    check(!!leadingSpace && leadingSpace.getBoundingClientRect().height > gapScroll.clientHeight
+      && gapRows.length > 0 && gapRows.every((element) => element.getBoundingClientRect().top >= gapViewport.bottom),
+    "spacer-recovery setup did not leave the whole viewport in leading padding");
+    const settledOutgoing = geometryAppendOutgoingText(3, "Settled outgoing spacer recovery", "delivered");
+    await waitFor(() => geometrySnapshotEvidence(3)?.latestMessageId === settledOutgoing ? true : undefined,
+      "settled spacer-recovery snapshot");
+    const recoveredFirst = await waitFor(() => {
+      const element = row(geometryMessageId(3, 0));
+      const bounds = element?.getBoundingClientRect();
+      const viewport = gapScroll.getBoundingClientRect();
+      return bounds && bounds.bottom > viewport.top && bounds.top < viewport.bottom ? element : undefined;
+    }, "first loaded row overlaps recovered viewport");
+    await twoFrames();
+    details.loadedSpacerAfter = { scrollTop: gapScroll.scrollTop,
+      firstRowOffset: recoveredFirst.getBoundingClientRect().top - gapScroll.getBoundingClientRect().top,
+      snapshot: geometrySnapshotEvidence(3) };
+    check(gapScroll.scrollTop <= 1, "spacer recovery forced the reader to another scroll position");
+    check(recoveredFirst.getBoundingClientRect().bottom > gapScroll.getBoundingClientRect().top
+      && recoveredFirst.getBoundingClientRect().top < gapScroll.getBoundingClientRect().bottom,
+    "recovered loaded row vanished from the unchanged viewport");
 
     return { ok: true, assertions, details };
   } catch (error) {

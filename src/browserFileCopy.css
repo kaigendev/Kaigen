@@ -1,0 +1,25 @@
+.browser-file-share {
+  box-sizing: border-box;
+  width: min(28rem, calc(100vw - 2rem));
+  max-height: calc(100dvh - 2rem);
+  padding: 1.25rem;
+  overflow-y: auto;
+  border: 1px solid var(--kaigen-color-muted, #87949c);
+  border-radius: 12px;
+  background: var(--kaigen-color-control, #20272c);
+  color: var(--kaigen-color-text, #eef3f5);
+  font: inherit;
+}
+.browser-file-share::backdrop { background: rgb(0 0 0 / 55%); }
+.browser-file-share h2 { margin: 0 0 1rem; font-size: 1.2em; }
+.browser-file-share p { margin: 0 0 1rem; overflow-wrap: anywhere; }
+.browser-file-share-name { font-weight: 600; }
+.browser-file-share-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: .5rem; }
+.browser-file-share-actions button {
+  min-height: 44px;
+  max-width: 100%;
+  padding: .6rem .8rem;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  font: inherit;
+}

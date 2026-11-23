@@ -145,10 +145,7 @@ function pointAt(target: HTMLElement, parsed: EditorDocument, requested: number)
   return parsed.pieces[parsed.pieces.length - 1]?.to ?? { node: target, offset: 0 };
 }
 
-export function richTextRange(target: HTMLElement, start: number, end: number) {
-  return richTextRanges(target, [{ start, end }])[0];
-}
-
+/** Map multiple text offsets to DOM ranges using one parsed editor snapshot. */
 export function richTextRanges(target: HTMLElement, positions: readonly { start: number; end: number }[]) {
   const parsed = editorDocument(target, false);
   return positions.map(({ start, end }) => {

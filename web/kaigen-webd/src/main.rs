@@ -1,5 +1,9 @@
+#![deny(unsafe_op_in_unsafe_fn)]
+
 mod archive;
 mod config;
+#[cfg(unix)]
+mod native;
 mod proof;
 mod server;
 mod state;
@@ -19,33 +23,39 @@ pub(crate) fn request_shutdown() {
 }
 
 #[cfg(unix)]
-extern "C" fn shutdown_signal(_signal: libc::c_int) {
-    SHUTDOWN_REQUESTED.store(true, Ordering::Release);
-}
+use native::install_shutdown_signals;
 
-#[cfg(unix)]
+#[cfg(windows)]
 fn install_shutdown_signals() -> Result<(), &'static str> {
-    let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
-    action.sa_sigaction = shutdown_signal as *const () as usize;
-    action.sa_flags = libc::SA_RESTART;
-    if unsafe { libc::sigemptyset(&mut action.sa_mask) } != 0 {
-        return Err("WEB_SHUTDOWN_SIGNAL_REGISTRATION_FAILED");
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn SetConsoleCtrlHandler(handler: Option<extern "system" fn(u32) -> i32>, add: i32) -> i32;
     }
-    let mut previous = std::mem::MaybeUninit::<libc::sigaction>::uninit();
-    if unsafe { libc::sigaction(libc::SIGTERM, &action, previous.as_mut_ptr()) } != 0 {
-        return Err("WEB_SHUTDOWN_SIGNAL_REGISTRATION_FAILED");
-    }
-    let previous = unsafe { previous.assume_init() };
-    if unsafe { libc::sigaction(libc::SIGINT, &action, std::ptr::null_mut()) } != 0 {
-        if unsafe { libc::sigaction(libc::SIGTERM, &previous, std::ptr::null_mut()) } != 0 {
-            return Err("WEB_SHUTDOWN_SIGNAL_RESTORE_FAILED");
+
+    extern "system" fn console_control(control: u32) -> i32 {
+        match control {
+            // CTRL_C_EVENT and CTRL_BREAK_EVENT allow the existing server loop
+            // to stop accepting requests and finish its normal durable shutdown.
+            0 | 1 => {
+                request_shutdown();
+                1
+            }
+            // Close, logoff and system shutdown have OS-enforced termination
+            // deadlines. Do not claim that an atomic request handles those.
+            _ => 0,
         }
-        return Err("WEB_SHUTDOWN_SIGNAL_REGISTRATION_FAILED");
     }
-    Ok(())
+
+    // SAFETY: the callback has the Windows HANDLER_ROUTINE ABI and static
+    // lifetime. It only requests shutdown through the existing atomic flag.
+    if unsafe { SetConsoleCtrlHandler(Some(console_control), 1) } == 0 {
+        Err("WEB_SHUTDOWN_SIGNAL_REGISTRATION_FAILED")
+    } else {
+        Ok(())
+    }
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 fn install_shutdown_signals() -> Result<(), &'static str> {
     Err("WEB_SHUTDOWN_SIGNAL_UNSUPPORTED")
 }

@@ -3,6 +3,8 @@
   "targetCore": "0.100.0",
   "recipeVersion": 1,
   "generation": "Published windows 0.62.2 generated bindings, fixed compatibility transformations; no new SDK/metadata/generator.",
+  "procMacroBuildSha256": "198854727e07fae0ff63115d3bea133e9c4e4a4efd248ff78a908492218842aa",
+  "procMacroBuildPreviousSha256": "0c10987b4af9fbd9f25f01646336768619beedf7565c85bea6d06eaa202e0133",
   "packages": [
     {
       "name": "windows-core",
@@ -67,7 +69,11 @@
       "acquisition": "downloaded-exact-registry-archive",
       "materialization": "Verified offline sources in local-data/windows-core-0100; recipe patches/windows-core-0100/manifest.json",
       "group": "windows",
-      "treeSha256": "75a75fa39aeefda5d2201bf9f8d2b25a6bfbd50782706b3284caaa3b5cad11fa"
+      "treeSha256": "46b24a00fadc0377006472f99c914960bd89196cf7f9b03786f113785d50afc7",
+      "materializedUpgrade": {
+        "treeBefore": "75a75fa39aeefda5d2201bf9f8d2b25a6bfbd50782706b3284caaa3b5cad11fa",
+        "path": "Cargo.toml"
+      }
     },
     {
       "name": "windows-interface",
@@ -80,7 +86,11 @@
       "acquisition": "downloaded-exact-registry-archive",
       "materialization": "Verified offline sources in local-data/windows-core-0100; recipe patches/windows-core-0100/manifest.json",
       "group": "windows",
-      "treeSha256": "d2de57add5a8992a94ec490f3e3c5b396e60c06f81f0694bb27d2c847e3c1937"
+      "treeSha256": "461ce987311ae03ea797f080a751b9fe5686941a7b4e2f925d0cbfacb353bd9d",
+      "materializedUpgrade": {
+        "treeBefore": "d2de57add5a8992a94ec490f3e3c5b396e60c06f81f0694bb27d2c847e3c1937",
+        "path": "Cargo.toml"
+      }
     },
     {
       "name": "windows-collections",
@@ -145,7 +155,12 @@
       "acquisition": "reused-verified-existing-archive",
       "materialization": "Verified offline sources in local-data/windows-core-0100; recipe patches/windows-core-0100/manifest.json",
       "group": "windows",
-      "treeSha256": "f7e68501bbd9ba794e66d09086a348ce2edb60d4b927db3e96d4f56ea722dd10"
+      "treeSha256": "9a78fd2e31fa067ea91f88bd36c7f562e3e85bd7d94ea3465f07f136c546062b",
+      "materializedUpgrade": {
+        "treeBefore": "f7e68501bbd9ba794e66d09086a348ce2edb60d4b927db3e96d4f56ea722dd10",
+        "path": "Cargo.toml",
+        "fileBefore": "b3dc2d9ff27c559580c7471d88bc1bc8b8181bc2aeed579f0da25d9fd6cab1b1"
+      }
     },
     {
       "name": "webview2-com",
@@ -158,7 +173,11 @@
       "acquisition": "reused-verified-existing-archive",
       "materialization": "Verified offline sources in local-data/windows-core-0100; recipe patches/windows-core-0100/manifest.json",
       "group": "webview2",
-      "treeSha256": "fbc19d9b3172c03ef4287cc11de1a1e0bb77aeb37d857150412adbeea02fc012"
+      "treeSha256": "a72425a8c53e063aed1d4968abfd852d8b6fc48068511d934ef76e0db83caf8f",
+      "materializedUpgrade": {
+        "treeBefore": "fbc19d9b3172c03ef4287cc11de1a1e0bb77aeb37d857150412adbeea02fc012",
+        "path": "src/options.rs"
+      }
     },
     {
       "name": "webview2-com-sys",
@@ -184,7 +203,11 @@
       "acquisition": "reused-verified-existing-archive",
       "materialization": "Verified offline sources in local-data/windows-core-0100; recipe patches/windows-core-0100/manifest.json",
       "group": "webview2",
-      "treeSha256": "5a7f22e833b30a57fead06249d4f9d9d67866d369a5ef23f8c349cd4975b2f6e"
+      "treeSha256": "6d62cfac68de497f160eb3a54c910ec9d9a034624405e9228405f2ad169945f8",
+      "materializedUpgrade": {
+        "treeBefore": "5a7f22e833b30a57fead06249d4f9d9d67866d369a5ef23f8c349cd4975b2f6e",
+        "path": "Cargo.toml"
+      }
     },
     {
       "name": "tao",
@@ -210,7 +233,19 @@
       "acquisition": "reused-verified-existing-archive",
       "materialization": "Verified offline sources in local-data/windows-core-0100; recipe patches/windows-core-0100/manifest.json",
       "group": "consumers",
-      "treeSha256": "dc526bbcf602fe78fe0296a5e3d1054795520bc310cfd13172acda48430f4fe1"
+      "treeSha256": "287ab1102fbcc322d22f0362d5b177885ea4e4591c9e7425a2dab7897d78b32c",
+      "materializedUpgrades": [
+        {
+          "treeBefore": "dc526bbcf602fe78fe0296a5e3d1054795520bc310cfd13172acda48430f4fe1",
+          "treeAfter": "7c8c0995850e51b68d700e39defe6d3890a8b2296c9d00bd03f0a24a8350852f",
+          "path": "build.rs"
+        },
+        {
+          "treeBefore": "7c8c0995850e51b68d700e39defe6d3890a8b2296c9d00bd03f0a24a8350852f",
+          "treeAfter": "287ab1102fbcc322d22f0362d5b177885ea4e4591c9e7425a2dab7897d78b32c",
+          "path": "src/wkwebview/mod.rs"
+        }
+      ]
     },
     {
       "name": "tauri-winrt-notification",
@@ -225,6 +260,32 @@
       "group": "consumers",
       "treeSha256": "a34627e41435c8dc0d750dd52dc838e0539b7d4702059e93f3796f0d56b82251",
       "materialization": "Verified offline sources in local-data/windows-core-0100; recipe patches/windows-core-0100/manifest.json"
+    },
+    {
+      "name": "embed-resource",
+      "version": "3.0.12",
+      "filename": "embed-resource-3.0.12.crate",
+      "bytes": 20995,
+      "sha256": "6168487b5e7eb2673e6efe1200b1848016e436a6ca0b8031bf04bd9d493a249f",
+      "license": "MIT",
+      "source": "https://static.crates.io/crates/embed-resource/embed-resource-3.0.12.crate",
+      "acquisition": "downloaded-exact-registry-archive",
+      "materialization": "Verified offline sources in local-data/windows-core-0100; recipe patches/windows-core-0100/manifest.json",
+      "group": "desktop-build-diagnostics",
+      "treeSha256": "6fe890f5a162e05cf746730e8bf25ca758cc05e79ce6d87c5f67246573d1d67e"
+    },
+    {
+      "name": "tauri-plugin-fs",
+      "version": "2.7.1",
+      "filename": "tauri-plugin-fs-2.7.1.crate",
+      "bytes": 96227,
+      "sha256": "5d58eb1d4984e535f47a642ffec09a2da6f5c18a12b5902d12126cb7626d628b",
+      "license": "Apache-2.0 OR MIT",
+      "source": "https://static.crates.io/crates/tauri-plugin-fs/tauri-plugin-fs-2.7.1.crate",
+      "acquisition": "downloaded-exact-registry-archive",
+      "materialization": "Verified offline sources in local-data/windows-core-0100; recipe patches/windows-core-0100/manifest.json",
+      "group": "desktop-build-diagnostics",
+      "treeSha256": "6278170fffb2b63f693a3e791b15416fbb50929bf49ed75f8b586d78d44e81ab"
     }
   ],
   "provenanceInputs": [
@@ -242,9 +303,24 @@
   ],
   "patches": [
     {
+      "path": "windows-interface-0.100.0/Cargo.toml",
+      "before": "85750d23c3c93c28f8ce4bbb4892a2dfbae3a2be476e5efbf993f93d6bae4770",
+      "after": "0eaeb6d61219aba2b1f84074d95dc0340b88107061fb23823d204fd991bfd17a"
+    },
+    {
+      "path": "windows-implement-0.100.0/Cargo.toml",
+      "before": "718ac5f7d8535cf75a48cd64e44951ab5d1366a7ba197f0fbc3b3112d5d1684a",
+      "after": "24f19d987b32e682487f8cf5d16f9eaed48041e5e28edcffef9f5ab276cd08ad"
+    },
+    {
+      "path": "webview2-com-macros-0.8.1/Cargo.toml",
+      "before": "b006cef88171ef3675df724a900cb31eb1f74158f77a20680915f1dbe95d457e",
+      "after": "21a85ad76c4ea7cf155af7a7748e2cab36b8166093dae105cfcb0eedc37f13ed"
+    },
+    {
       "path": "windows-0.62.2/Cargo.toml",
       "before": "1faa29a77d208ba8b39979243819dbf07fb10a6e075420c8a847d5eca108db4a",
-      "after": "b3dc2d9ff27c559580c7471d88bc1bc8b8181bc2aeed579f0da25d9fd6cab1b1"
+      "after": "893124894db23265c71269cbb2fef1f916a76c6e261080540a589fa72527ec6c"
     },
     {
       "path": "windows-0.62.2/src/extensions/Win32/Foundation/NTSTATUS.rs",
@@ -2683,6 +2759,11 @@
       "after": "71c354e8226386bac8084461090261e66846e0f070bb65e8e9d430a78a5aa4d1"
     },
     {
+      "path": "webview2-com-0.39.1/src/options.rs",
+      "before": "24ea22c47e0a1540bdd64f8c4a2d22c2e718c939264ec75d24bd5b8db9d69024",
+      "after": "c0cb6ea4aeafb3fb1258ea01465d307a2805d39f8762426ccdef30ffbcb38933"
+    },
+    {
       "path": "webview2-com-sys-0.39.1/Cargo.toml",
       "before": "1a3e5684710cb1d2e7e7afdd32af011a4a8038c259f6592ade3f871ca31cad7d",
       "after": "8d63d9fbb539f7da3e2f58c77062887bd49b15a929758555019dd553e8670ec3"
@@ -2711,6 +2792,26 @@
       "path": "tauri-winrt-notification-0.8.1/src/lib.rs",
       "before": "981acfcbdf455f2f70767c10dc6195d5f5ccca189890016a73cfbe6db075d313",
       "after": "8457ec23a48e0a87cc3b2d7f97d783e50b94c02db3d2d8f6ca4570a8aa39f27f"
+    },
+    {
+      "path": "embed-resource-3.0.12/src/windows_msvc.rs",
+      "before": "12874118d350c48c79343c245ad092ef2cca56754147ba708be21147fb86bb43",
+      "after": "c00d677f153eb8d9e5bfacf7ab806a03e72f292990ae9aa5880bb4aee5083bbf"
+    },
+    {
+      "path": "tauri-plugin-fs-2.7.1/src/commands.rs",
+      "before": "c634789dc7f01f6dc7ba3a75b16b055d9d23fc2f5bb9819dd4b8a630783b1beb",
+      "after": "b248fcb0c3de8ea54b04a469a22114fe47bf02965c1773af17ca7b32ecbfebcd"
+    },
+    {
+      "path": "wry-0.57.0/build.rs",
+      "before": "689c618b57d95f2d9e4578744c8126615d93c5624d9b3747af20650e577ccb1b",
+      "after": "48b97c616e4b9f5357daf41721a3fab3d320e9b6d67bbdeacd31411b835e6f99"
+    },
+    {
+      "path": "wry-0.57.0/src/wkwebview/mod.rs",
+      "before": "a466a6d6a5fa75013876492a2074c3693601bcac63716de0c9cc54bceab5bf6b",
+      "after": "06e72736b9877125a00ed9686f71b5de2c4c02eb6a5b6614264460516bdfd488"
     }
   ],
   "retainedRaiiSource": "windows-core-0.62.2/src/handles.rs"

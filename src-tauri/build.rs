@@ -122,8 +122,7 @@ fn main() {
         // Keep mlkem-native's consumer-supplied RNG callback distinct from
         // libsodium's public randombytes symbol when both static archives are
         // linked into Kaigen.
-        .define("randombytes", "kaigen_mlkem_randombytes")
-        .warnings(false);
+        .define("randombytes", "kaigen_mlkem_randombytes");
     for directory in [&mlkem_src, &fips202_src] {
         for entry in fs::read_dir(directory).expect("read mlkem-native source directory") {
             let path = entry.expect("read mlkem-native source entry").path();

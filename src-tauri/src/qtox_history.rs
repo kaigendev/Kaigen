@@ -1,7 +1,7 @@
 use std::{
-    ffi::{c_char, c_int, c_uchar, c_void, CString},
+    ffi::{c_char, c_int, c_uchar, c_void, CStr, CString},
     path::{Path, PathBuf},
-    ptr,
+    ptr::{self, NonNull},
 };
 
 #[cfg(all(test, target_os = "windows"))]
@@ -21,19 +21,17 @@ pub struct ImportedHistoryRow {
     pub file_size: u64,
 }
 
-#[cfg(target_os = "windows")]
-type Module = *mut c_void;
-#[cfg(not(target_os = "windows"))]
-type Module = *mut c_void;
 type Sqlite = *mut c_void;
 type Statement = *mut c_void;
 
 type OpenV2 = unsafe extern "C" fn(*const c_char, *mut Sqlite, c_int, *const c_char) -> c_int;
 type Close = unsafe extern "C" fn(Sqlite) -> c_int;
+type ExecCallback =
+    unsafe extern "C" fn(*mut c_void, c_int, *mut *mut c_char, *mut *mut c_char) -> c_int;
 type Exec = unsafe extern "C" fn(
     Sqlite,
     *const c_char,
-    *const c_void,
+    Option<ExecCallback>,
     *mut c_void,
     *mut *mut c_char,
 ) -> c_int;
@@ -46,10 +44,11 @@ type ColumnText = unsafe extern "C" fn(Statement, c_int) -> *const c_uchar;
 type ColumnBlob = unsafe extern "C" fn(Statement, c_int) -> *const c_void;
 type ColumnBytes = unsafe extern "C" fn(Statement, c_int) -> c_int;
 type ColumnType = unsafe extern "C" fn(Statement, c_int) -> c_int;
+type ColumnCount = unsafe extern "C" fn(Statement) -> c_int;
 type ErrorMessage = unsafe extern "C" fn(Sqlite) -> *const c_char;
 
 struct Api {
-    module: Module,
+    _module: LoadedModule,
     open_v2: OpenV2,
     close: Close,
     exec: Exec,
@@ -61,111 +60,35 @@ struct Api {
     column_blob: ColumnBlob,
     column_bytes: ColumnBytes,
     column_type: ColumnType,
+    column_count: ColumnCount,
     error_message: ErrorMessage,
 }
 
-unsafe impl Send for Api {}
-
 impl Api {
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
     fn load(path: &Path) -> Result<Self, String> {
-        use std::os::windows::ffi::OsStrExt;
-        let wide = path
-            .as_os_str()
-            .encode_wide()
-            .chain(Some(0))
-            .collect::<Vec<_>>();
-        const LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR: u32 = 0x0000_0100;
-        const LOAD_LIBRARY_SEARCH_DEFAULT_DIRS: u32 = 0x0000_1000;
-        let module = unsafe {
-            LoadLibraryExW(
-                wide.as_ptr(),
-                ptr::null_mut(),
-                LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS,
-            )
-        };
-        if module.is_null() {
-            return Err(format!(
-                "Could not load SQLCipher from {}: {}",
-                path.display(),
-                std::io::Error::last_os_error()
-            ));
-        }
-        unsafe fn symbol<T: Copy>(module: Module, name: &'static [u8]) -> Result<T, String> {
-            let address = unsafe { GetProcAddress(module, name.as_ptr() as *const c_char) };
-            if address.is_null() {
-                return Err(format!(
-                    "SQLCipher export {} is missing",
-                    String::from_utf8_lossy(&name[..name.len().saturating_sub(1)])
-                ));
-            }
-            Ok(unsafe { std::mem::transmute_copy(&address) })
-        }
-        let loaded = unsafe {
+        let module = LoadedModule::open(path)?;
+        // SAFETY: The bundled SQLCipher runtime supplies these SQLite C ABI
+        // symbols. The module remains owned during resolution and use.
+        let api = unsafe {
             Self {
-                module,
-                open_v2: symbol(module, b"sqlite3_open_v2\0")?,
-                close: symbol(module, b"sqlite3_close\0")?,
-                exec: symbol(module, b"sqlite3_exec\0")?,
-                prepare_v2: symbol(module, b"sqlite3_prepare_v2\0")?,
-                step: symbol(module, b"sqlite3_step\0")?,
-                finalize: symbol(module, b"sqlite3_finalize\0")?,
-                column_int64: symbol(module, b"sqlite3_column_int64\0")?,
-                column_text: symbol(module, b"sqlite3_column_text\0")?,
-                column_blob: symbol(module, b"sqlite3_column_blob\0")?,
-                column_bytes: symbol(module, b"sqlite3_column_bytes\0")?,
-                column_type: symbol(module, b"sqlite3_column_type\0")?,
-                error_message: symbol(module, b"sqlite3_errmsg\0")?,
+                open_v2: module.symbol(c"sqlite3_open_v2")?,
+                close: module.symbol(c"sqlite3_close")?,
+                exec: module.symbol(c"sqlite3_exec")?,
+                prepare_v2: module.symbol(c"sqlite3_prepare_v2")?,
+                step: module.symbol(c"sqlite3_step")?,
+                finalize: module.symbol(c"sqlite3_finalize")?,
+                column_int64: module.symbol(c"sqlite3_column_int64")?,
+                column_text: module.symbol(c"sqlite3_column_text")?,
+                column_blob: module.symbol(c"sqlite3_column_blob")?,
+                column_bytes: module.symbol(c"sqlite3_column_bytes")?,
+                column_type: module.symbol(c"sqlite3_column_type")?,
+                column_count: module.symbol(c"sqlite3_column_count")?,
+                error_message: module.symbol(c"sqlite3_errmsg")?,
+                _module: module,
             }
         };
-        Ok(loaded)
-    }
-
-    #[cfg(target_os = "linux")]
-    fn load(path: &Path) -> Result<Self, String> {
-        use std::os::unix::ffi::OsStrExt;
-        // This path comes only from the bundled-resource candidate below.
-        if !path.is_absolute() {
-            return Err("SQLCipher requires an absolute bundled path".to_string());
-        }
-        let name = CString::new(path.as_os_str().as_bytes())
-            .map_err(|_| "Invalid bundled SQLCipher path".to_string())?;
-        let module = unsafe { libc::dlopen(name.as_ptr(), libc::RTLD_NOW | libc::RTLD_LOCAL) };
-        if module.is_null() {
-            return Err("Could not load the bundled Linux SQLCipher runtime".to_string());
-        }
-        unsafe fn symbol<T: Copy>(module: Module, name: &'static [u8]) -> Result<T, String> {
-            let address = unsafe { libc::dlsym(module, name.as_ptr().cast()) };
-            if address.is_null() {
-                return Err(format!(
-                    "SQLCipher export {} is missing",
-                    String::from_utf8_lossy(&name[..name.len().saturating_sub(1)])
-                ));
-            }
-            Ok(unsafe { std::mem::transmute_copy(&address) })
-        }
-        // A missing export must release the handle acquired by dlopen.
-        let loaded = (|| unsafe {
-            Ok(Self {
-                module,
-                open_v2: symbol(module, b"sqlite3_open_v2\0")?,
-                close: symbol(module, b"sqlite3_close\0")?,
-                exec: symbol(module, b"sqlite3_exec\0")?,
-                prepare_v2: symbol(module, b"sqlite3_prepare_v2\0")?,
-                step: symbol(module, b"sqlite3_step\0")?,
-                finalize: symbol(module, b"sqlite3_finalize\0")?,
-                column_int64: symbol(module, b"sqlite3_column_int64\0")?,
-                column_text: symbol(module, b"sqlite3_column_text\0")?,
-                column_blob: symbol(module, b"sqlite3_column_blob\0")?,
-                column_bytes: symbol(module, b"sqlite3_column_bytes\0")?,
-                column_type: symbol(module, b"sqlite3_column_type\0")?,
-                error_message: symbol(module, b"sqlite3_errmsg\0")?,
-            })
-        })();
-        if loaded.is_err() {
-            unsafe { libc::dlclose(module) };
-        }
-        loaded
+        Ok(api)
     }
 
     #[cfg(not(any(target_os = "windows", target_os = "linux")))]
@@ -173,110 +96,261 @@ impl Api {
         Err("qTox history import is currently available in Windows and Linux builds".to_string())
     }
 
-    fn error(&self, database: Sqlite) -> String {
-        let pointer = unsafe { (self.error_message)(database) };
-        if pointer.is_null() {
-            return "unknown SQLCipher error".to_string();
+}
+
+/// Owns a single loader reference, including while the API table is incomplete.
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+struct LoadedModule(NonNull<c_void>);
+
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
+struct LoadedModule;
+
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+impl LoadedModule {
+    #[cfg(target_os = "windows")]
+    fn open(path: &Path) -> Result<Self, String> {
+        use std::os::windows::ffi::OsStrExt;
+        let mut wide = path.as_os_str().encode_wide().collect::<Vec<_>>();
+        if wide.contains(&0) {
+            return Err("Invalid bundled SQLCipher path".to_string());
         }
-        unsafe { std::ffi::CStr::from_ptr(pointer) }
-            .to_string_lossy()
-            .into_owned()
+        wide.push(0);
+        const LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR: u32 = 0x0000_0100;
+        const LOAD_LIBRARY_SEARCH_DEFAULT_DIRS: u32 = 0x0000_1000;
+        // SAFETY: The path is NUL-terminated and live during the call.
+        let module = unsafe {
+            LoadLibraryExW(
+                wide.as_ptr(),
+                ptr::null_mut(),
+                LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS,
+            )
+        };
+        NonNull::new(module).map(Self).ok_or_else(|| {
+            format!(
+                "Could not load SQLCipher from {}: {}",
+                path.display(),
+                std::io::Error::last_os_error()
+            )
+        })
+    }
+
+    #[cfg(target_os = "linux")]
+    fn open(path: &Path) -> Result<Self, String> {
+        use std::os::unix::ffi::OsStrExt;
+        if !path.is_absolute() {
+            return Err("SQLCipher requires an absolute bundled path".to_string());
+        }
+        let name = CString::new(path.as_os_str().as_bytes())
+            .map_err(|_| "Invalid bundled SQLCipher path".to_string())?;
+        // SAFETY: The absolute bundled path is a live C string.
+        let module = unsafe { libc::dlopen(name.as_ptr(), libc::RTLD_NOW | libc::RTLD_LOCAL) };
+        NonNull::new(module)
+            .map(Self)
+            .ok_or_else(|| "Could not load the bundled Linux SQLCipher runtime".to_string())
+    }
+
+    /// Resolves a C function from this loaded SQLCipher module.
+    ///
+    /// # Safety
+    ///
+    /// T must be the precise C ABI function-pointer type for the named export.
+    /// The caller must keep this module alive while the function is used.
+    unsafe fn symbol<T: Copy>(&self, name: &CStr) -> Result<T, String> {
+        #[cfg(target_os = "windows")]
+        // SAFETY: The module and NUL-terminated name are live during resolution.
+        let address = unsafe { GetProcAddress(self.0.as_ptr(), name.as_ptr()) };
+        #[cfg(target_os = "linux")]
+        // SAFETY: The module and NUL-terminated name are live during resolution.
+        let address = unsafe { libc::dlsym(self.0.as_ptr(), name.as_ptr()) };
+        if address.is_null() {
+            return Err(format!(
+                "SQLCipher export {} is missing",
+                name.to_string_lossy()
+            ));
+        }
+        if std::mem::size_of::<T>() != std::mem::size_of_val(&address) {
+            return Err(format!(
+                "SQLCipher export {} has an unsupported pointer size",
+                name.to_string_lossy()
+            ));
+        }
+        // SAFETY: The caller matches the ABI, and the copy is exactly pointer-sized.
+        Ok(unsafe { std::mem::transmute_copy(&address) })
     }
 }
 
-impl Drop for Api {
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+impl Drop for LoadedModule {
     fn drop(&mut self) {
+        // SAFETY: The loader returned this owned reference, and Drop runs once.
         #[cfg(target_os = "windows")]
         unsafe {
-            FreeLibrary(self.module);
+            FreeLibrary(self.0.as_ptr());
         }
         #[cfg(target_os = "linux")]
         unsafe {
-            libc::dlclose(self.module);
+            libc::dlclose(self.0.as_ptr());
         }
     }
 }
 
+/// Owns a thread-local SQLite connection and borrows its loaded API.
 struct Database<'a> {
     api: &'a Api,
-    raw: Sqlite,
+    raw: NonNull<c_void>,
+}
+
+impl<'a> Database<'a> {
+    fn open(api: &'a Api, path: &CStr, flags: c_int) -> Result<Self, String> {
+        const SQLITE_OPEN_NOMUTEX: c_int = 0x8000;
+        let mut raw = ptr::null_mut();
+        // SAFETY: The path is NUL-terminated and the output slot is writable.
+        let result = unsafe {
+            (api.open_v2)(
+                path.as_ptr(),
+                &mut raw,
+                flags | SQLITE_OPEN_NOMUTEX,
+                ptr::null(),
+            )
+        };
+        let raw = NonNull::new(raw)
+            .ok_or_else(|| "SQLCipher could not open the database".to_string())?;
+        // SQLite can return an owned handle even when open fails.
+        let database = Self { api, raw };
+        if result != 0 {
+            return Err(database.error());
+        }
+        Ok(database)
+    }
+
+    fn error(&self) -> String {
+        // SAFETY: SQLite returns a borrowed C string for this live connection.
+        // Copy it before issuing another call on that connection.
+        unsafe {
+            let pointer = (self.api.error_message)(self.raw.as_ptr());
+            if pointer.is_null() {
+                return "unknown SQLCipher error".to_string();
+            }
+            CStr::from_ptr(pointer).to_string_lossy().into_owned()
+        }
+    }
+
+    fn exec(&self, query: &str) -> Result<(), String> {
+        let query = CString::new(query).map_err(|_| "Invalid SQLCipher query".to_string())?;
+        self.exec_cstr(&query)
+    }
+
+    fn exec_cstr(&self, query: &CStr) -> Result<(), String> {
+        // SAFETY: This connection and the NUL-terminated query are live.
+        // A null context and no callback keep execution synchronous.
+        let result = unsafe {
+            (self.api.exec)(
+                self.raw.as_ptr(),
+                query.as_ptr(),
+                None,
+                ptr::null_mut(),
+                ptr::null_mut(),
+            )
+        };
+        if result == 0 {
+            Ok(())
+        } else {
+            Err(self.error())
+        }
+    }
 }
 
 impl Drop for Database<'_> {
     fn drop(&mut self) {
-        unsafe {
-            (self.api.close)(self.raw);
-        }
+        // SAFETY: All statements borrow this connection and finalize before it drops.
+        unsafe { (self.api.close)(self.raw.as_ptr()) };
     }
 }
 
-#[cfg(target_os = "linux")]
-fn sqlcipher_candidates(_history_path: &Path, portable_root: &Path) -> Vec<PathBuf> {
-    if !portable_root.is_absolute() {
-        return Vec::new();
+pub(crate) fn native_runtime_root(_portable_root: &Path) -> Result<PathBuf, String> {
+    #[cfg(target_os = "windows")]
+    {
+        let executable = std::env::current_exe()
+            .map_err(|error| format!("Could not locate the executable: {error}"))?;
+        let program_root = executable
+            .parent()
+            .ok_or_else(|| "The executable has no parent directory".to_string())?;
+        // A Tauri development build uses the runtime in the source distribution.
+        #[cfg(debug_assertions)]
+        if bundled_sqlcipher_path(program_root).is_none() {
+            return Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .map(Path::to_path_buf)
+                .ok_or_else(|| "The development runtime root is unavailable".to_string());
+        }
+        Ok(program_root.to_path_buf())
     }
-    let Ok(root) = portable_root.canonicalize() else {
-        return Vec::new();
-    };
-    let candidate = root
-        .join("runtime")
-        .join("qtox-import")
-        .join("libsqlcipher.so");
+    #[cfg(not(target_os = "windows"))]
+    {
+        Ok(_portable_root.to_path_buf())
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+fn bundled_sqlcipher_path(runtime_root: &Path) -> Option<PathBuf> {
+    if !runtime_root.is_absolute() {
+        return None;
+    }
+    #[cfg(target_os = "windows")]
+    let library = "libsqlcipher-0.dll";
+    #[cfg(target_os = "linux")]
+    let library = "libsqlcipher.so";
+    let root = runtime_root.canonicalize().ok()?;
+    let candidate = root.join("runtime").join("qtox-import").join(library);
     // Never load a library supplied beside an imported profile, via a symlink,
     // or through the process library search path.
     let regular = std::fs::symlink_metadata(&candidate)
         .map(|metadata| metadata.file_type().is_file())
         .unwrap_or(false);
     if regular && candidate.canonicalize().ok().as_ref() == Some(&candidate) {
-        vec![candidate]
+        Some(candidate)
     } else {
-        Vec::new()
+        None
     }
 }
 
-#[cfg(not(target_os = "linux"))]
-fn sqlcipher_candidates(history_path: &Path, portable_root: &Path) -> Vec<PathBuf> {
-    let mut candidates = Vec::new();
-    if let Some(parent) = history_path.parent() {
-        candidates.push(parent.join("libsqlcipher-0.dll"));
-    }
-    candidates.push(
-        portable_root
-            .join("runtime")
-            .join("qtox-import")
-            .join("libsqlcipher-0.dll"),
-    );
-    candidates
-        .into_iter()
-        .filter(|path| path.is_file())
-        .collect()
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
+fn bundled_sqlcipher_path(_runtime_root: &Path) -> Option<PathBuf> {
+    None
 }
 
-fn exec(api: &Api, database: Sqlite, query: &str) -> Result<(), String> {
-    let query = CString::new(query).map_err(|_| "Invalid SQLCipher query".to_string())?;
-    let result = unsafe {
-        (api.exec)(
-            database,
-            query.as_ptr(),
-            ptr::null(),
-            ptr::null_mut(),
-            ptr::null_mut(),
-        )
-    };
-    if result == 0 {
-        Ok(())
-    } else {
-        Err(api.error(database))
+/// Applies one cipher profile without retaining plaintext key material in Rust.
+fn set_cipher_key(
+    database: &Database<'_>,
+    key: &[u8; 32],
+    parameters: &str,
+) -> Result<(), String> {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    const PREFIX: &[u8] = b"PRAGMA key=\"x'";
+    const SUFFIX: &[u8] = b"'\"; ";
+    let mut query =
+        Vec::with_capacity(PREFIX.len() + key.len() * 2 + SUFFIX.len() + parameters.len() + 1);
+    query.extend_from_slice(PREFIX);
+    for &byte in key {
+        query.push(HEX[(byte >> 4) as usize]);
+        query.push(HEX[(byte & 0x0f) as usize]);
     }
+    query.extend_from_slice(SUFFIX);
+    query.extend_from_slice(parameters.as_bytes());
+    query.push(0);
+    let result = CStr::from_bytes_with_nul(&query)
+        .map_err(|_| "Invalid SQLCipher key query".to_string())
+        .and_then(|query| database.exec_cstr(query));
+    crate::wipe_secret_bytes(&mut query);
+    result
 }
 
 fn open_database<'a>(
     api: &'a Api,
     path: &Path,
-    key: Option<[u8; 32]>,
+    key: Option<&[u8; 32]>,
 ) -> Result<Database<'a>, String> {
     const SQLITE_OPEN_READONLY: c_int = 0x1;
-    const SQLITE_OPEN_NOMUTEX: c_int = 0x8000;
     let path = CString::new(path.to_string_lossy().as_bytes())
         .map_err(|_| "Invalid qTox history path".to_string())?;
     let parameter_sets = if key.is_some() {
@@ -290,44 +364,23 @@ fn open_database<'a>(
     };
     let mut last_error = String::new();
     for parameters in parameter_sets {
-        let mut raw = ptr::null_mut();
-        if unsafe {
-            (api.open_v2)(
-                path.as_ptr(),
-                &mut raw,
-                SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX,
-                ptr::null(),
-            )
-        } != 0
-            || raw.is_null()
-        {
-            last_error = if raw.is_null() {
-                "SQLCipher could not open the database".to_string()
-            } else {
-                api.error(raw)
-            };
-            if !raw.is_null() {
-                unsafe {
-                    (api.close)(raw);
-                }
+        let database = match Database::open(api, &path, SQLITE_OPEN_READONLY) {
+            Ok(database) => database,
+            Err(error) => {
+                last_error = error;
+                continue;
             }
-            continue;
-        }
-        let database = Database { api, raw };
+        };
         if let Some(key) = key {
-            let hex = key
-                .iter()
-                .map(|byte| format!("{byte:02x}"))
-                .collect::<String>();
-            if let Err(error) = exec(api, raw, &format!("PRAGMA key=\"x'{hex}'\"; {parameters}")) {
+            if let Err(error) = set_cipher_key(&database, key, parameters) {
                 last_error = error;
                 continue;
             }
         }
-        if exec(api, raw, "SELECT count(*) FROM sqlite_master;").is_ok() {
-            return Ok(database);
+        match database.exec("SELECT count(*) FROM sqlite_master;") {
+            Ok(()) => return Ok(database),
+            Err(error) => last_error = error,
         }
-        last_error = api.error(raw);
     }
     Err(if last_error.is_empty() {
         "The qTox history database could not be decrypted".to_string()
@@ -336,79 +389,124 @@ fn open_database<'a>(
     })
 }
 
-fn column_bytes(api: &Api, statement: Statement, column: c_int, text: bool) -> Vec<u8> {
-    const SQLITE_NULL: c_int = 5;
-    if unsafe { (api.column_type)(statement, column) } == SQLITE_NULL {
-        return Vec::new();
-    }
-    let length = unsafe { (api.column_bytes)(statement, column) }.max(0) as usize;
-    if length == 0 {
-        return Vec::new();
-    }
-    let pointer = if text {
-        unsafe { (api.column_text)(statement, column) as *const u8 }
-    } else {
-        unsafe { (api.column_blob)(statement, column) as *const u8 }
-    };
-    if pointer.is_null() {
-        Vec::new()
-    } else {
-        unsafe { std::slice::from_raw_parts(pointer, length) }.to_vec()
-    }
+/// A statement keeps its connection and module alive until finalization.
+struct Prepared<'a> {
+    database: &'a Database<'a>,
+    raw: NonNull<c_void>,
 }
 
-struct Prepared<'a> {
-    api: &'a Api,
-    raw: Statement,
+impl Prepared<'_> {
+    /// Borrows this statement for the lifetime of its current row.
+    fn next(&mut self) -> Result<Option<HistoryRow<'_>>, String> {
+        const SQLITE_ROW: c_int = 100;
+        const SQLITE_DONE: c_int = 101;
+        // SAFETY: The statement belongs to this live, thread-local connection.
+        match unsafe { (self.database.api.step)(self.raw.as_ptr()) } {
+            SQLITE_ROW => Ok(Some(HistoryRow {
+                api: self.database.api,
+                raw: self.raw,
+                // SAFETY: The successful step leaves the statement on a live row.
+                columns: unsafe { (self.database.api.column_count)(self.raw.as_ptr()) },
+            })),
+            SQLITE_DONE => Ok(None),
+            _ => Err(self.database.error()),
+        }
+    }
 }
 
 impl Drop for Prepared<'_> {
     fn drop(&mut self) {
-        unsafe { (self.api.finalize)(self.raw) };
+        // SAFETY: This statement was prepared on the live borrowed database.
+        unsafe { (self.database.api.finalize)(self.raw.as_ptr()) };
     }
 }
 
-fn prepare<'a>(api: &'a Api, database: Sqlite, query: &str) -> Result<Prepared<'a>, String> {
+struct HistoryRow<'a> {
+    api: &'a Api,
+    raw: NonNull<c_void>,
+    columns: c_int,
+}
+
+impl HistoryRow<'_> {
+    fn check_column(&self, column: c_int) {
+        assert!(
+            (0..self.columns).contains(&column),
+            "invalid qTox history query column"
+        );
+    }
+
+    fn is_null(&self, column: c_int) -> bool {
+        const SQLITE_NULL: c_int = 5;
+        self.check_column(column);
+        // SAFETY: This is an in-range column of the current row. Its
+        // original type is inspected before any conversion of this column.
+        unsafe { (self.api.column_type)(self.raw.as_ptr(), column) == SQLITE_NULL }
+    }
+
+    fn integer(&self, column: c_int) -> i64 {
+        self.check_column(column);
+        // SAFETY: This is an in-range column of the current row.
+        unsafe { (self.api.column_int64)(self.raw.as_ptr(), column) }
+    }
+
+    fn bytes(&self, column: c_int, text: bool) -> Vec<u8> {
+        self.check_column(column);
+        // SAFETY: The current row is live and the column is in range.
+        // Ask SQLite to convert before querying length, then copy while the
+        // returned buffer is still valid. A NULL pointer represents no data.
+        unsafe {
+            let pointer = if text {
+                (self.api.column_text)(self.raw.as_ptr(), column)
+            } else {
+                (self.api.column_blob)(self.raw.as_ptr(), column).cast()
+            };
+            if pointer.is_null() {
+                return Vec::new();
+            }
+            let length = (self.api.column_bytes)(self.raw.as_ptr(), column).max(0) as usize;
+            std::slice::from_raw_parts(pointer, length).to_vec()
+        }
+    }
+}
+
+fn prepare<'a>(database: &'a Database<'_>, query: &str) -> Result<Prepared<'a>, String> {
     let query = CString::new(query).map_err(|_| "Invalid qTox history query".to_string())?;
     let mut raw = ptr::null_mut();
-    if unsafe { (api.prepare_v2)(database, query.as_ptr(), -1, &mut raw, ptr::null_mut()) } != 0
-        || raw.is_null()
-    {
-        if !raw.is_null() {
-            unsafe { (api.finalize)(raw) };
-        }
-        return Err(format!(
-            "Could not read qTox history: {}",
-            api.error(database)
-        ));
+    // SAFETY: The connection is live, the SQL string is NUL-terminated, and
+    // the output slot belongs to this call. The unused tail pointer is null.
+    let result = unsafe {
+        (database.api.prepare_v2)(
+            database.raw.as_ptr(),
+            query.as_ptr(),
+            -1,
+            &mut raw,
+            ptr::null_mut(),
+        )
+    };
+    let statement = NonNull::new(raw).map(|raw| Prepared { database, raw });
+    match statement {
+        Some(statement) if result == 0 => Ok(statement),
+        _ => Err(format!("Could not read qTox history: {}", database.error())),
     }
-    Ok(Prepared { api, raw })
 }
 
-fn has_column(api: &Api, database: Sqlite, table: &str, column: &str) -> Result<bool, String> {
+fn has_column(database: &Database<'_>, table: &str, column: &str) -> Result<bool, String> {
     // Both names come from the fixed schema names below, never from the file.
-    let statement = prepare(api, database, &format!("PRAGMA table_info({table});"))?;
-    loop {
-        match unsafe { (api.step)(statement.raw) } {
-            100 => {
-                if column_bytes(api, statement.raw, 1, true) == column.as_bytes() {
-                    return Ok(true);
-                }
-            }
-            101 => return Ok(false),
-            _ => {
-                return Err(format!(
-                    "Could not inspect qTox history: {}",
-                    api.error(database)
-                ))
-            }
+    let mut statement = prepare(database, &format!("PRAGMA table_info({table});"))?;
+    while let Some(row) = statement
+        .next()
+        .map_err(|error| format!("Could not inspect qTox history: {error}"))?
+    {
+        if row.bytes(1, true) == column.as_bytes() {
+            return Ok(true);
         }
     }
+    Ok(false)
 }
 
-fn history_query(api: &Api, database: Sqlite) -> Result<String, String> {
-    let split = has_column(api, database, "history", "message_type")?;
-    let modern = has_column(api, database, "chats", "uuid")?;
+fn history_query(database: &Database<'_>) -> Result<String, String> {
+    let split = has_column(database, "history", "message_type")?;
+    let modern = has_column(database, "chats", "uuid")?;
     let (query, chat_key) = if split {
         let (chat_key, sender_key, chat_join, sender_join) = if modern {
             ("chats.uuid", "authors.public_key", "chats", "authors")
@@ -427,7 +525,7 @@ fn history_query(api: &Api, database: Sqlite) -> Result<String, String> {
             chat_key,
         )
     } else {
-        let files = has_column(api, database, "history", "file_id")?;
+        let files = has_column(database, "history", "file_id")?;
         let (file_columns, file_join) = if files {
             (
                 "file_transfers.file_name, file_transfers.file_path, file_transfers.file_size",
@@ -462,8 +560,8 @@ fn normalize_public_key(bytes: Vec<u8>) -> Result<Vec<u8>, String> {
     key.ok_or_else(|| "QTOX_HISTORY_PUBLIC_KEY_INVALID".to_string())
 }
 
-/// Collecting adapter for existing callers and small fixture tests. Production
-/// imports use the visitor so a decade of history does not become one Vec.
+/// Collects small fixtures. Production imports stream rows through the visitor.
+#[cfg(test)]
 pub fn read_qtox_history(
     history_path: &Path,
     portable_root: &Path,
@@ -491,58 +589,45 @@ pub(crate) fn visit_qtox_history(
     self_public_key: &[u8; 32],
     mut visit: impl FnMut(ImportedHistoryRow) -> Result<(), String>,
 ) -> Result<usize, String> {
-    let library = sqlcipher_candidates(history_path, portable_root)
-        .into_iter()
-        .next()
+    let library = bundled_sqlcipher_path(portable_root)
         .ok_or_else(|| "SQLCipher runtime was not found for qTox history import".to_string())?;
     let api = Api::load(&library)?;
-    let key = password
+    let mut key = password
         .filter(|value| !value.is_empty())
         .map(|password| profiles::derive_qtox_database_key(password, self_public_key))
         .transpose()?;
-    let database = open_database(&api, history_path, key)?;
-    let prepared = prepare(&api, database.raw, &history_query(&api, database.raw)?)?;
-    let statement = prepared.raw;
-    const SQLITE_ROW: c_int = 100;
-    const SQLITE_DONE: c_int = 101;
+    let database = open_database(&api, history_path, key.as_ref());
+    if let Some(key) = key.as_mut() {
+        crate::wipe_secret_bytes(key);
+    }
+    let database = database?;
+    let query = history_query(&database)?;
+    let mut statement = prepare(&database, &query)?;
     let mut count = 0;
-    loop {
-        match unsafe { (api.step)(statement) } {
-            SQLITE_ROW => {
-                if unsafe { (api.column_type)(statement, 8) } == 5 {
-                    return Err("QTOX_HISTORY_MESSAGE_MISSING".to_string());
-                }
-                visit(ImportedHistoryRow {
-                    source_id: unsafe { (api.column_int64)(statement, 0) },
-                    timestamp_ms: unsafe { (api.column_int64)(statement, 1) },
-                    chat_key: normalize_public_key(column_bytes(&api, statement, 2, false))?,
-                    sender_key: normalize_public_key(column_bytes(&api, statement, 3, false))?,
-                    text: String::from_utf8_lossy(&column_bytes(&api, statement, 4, true))
-                        .replace('\0', ""),
-                    file_name: {
-                        let value =
-                            String::from_utf8_lossy(&column_bytes(&api, statement, 5, true))
-                                .replace('\0', "");
-                        (!value.is_empty()).then_some(value)
-                    },
-                    file_path: {
-                        let value =
-                            String::from_utf8_lossy(&column_bytes(&api, statement, 6, true))
-                                .replace('\0', "");
-                        (!value.is_empty()).then_some(value)
-                    },
-                    file_size: unsafe { (api.column_int64)(statement, 7).max(0) as u64 },
-                })?;
-                count += 1;
-            }
-            SQLITE_DONE => break,
-            _ => {
-                return Err(format!(
-                    "Could not iterate qTox history: {}",
-                    api.error(database.raw)
-                ));
-            }
+    while let Some(row) = statement
+        .next()
+        .map_err(|error| format!("Could not iterate qTox history: {error}"))?
+    {
+        if row.is_null(8) {
+            return Err("QTOX_HISTORY_MESSAGE_MISSING".to_string());
         }
+        visit(ImportedHistoryRow {
+            source_id: row.integer(0),
+            timestamp_ms: row.integer(1),
+            chat_key: normalize_public_key(row.bytes(2, false))?,
+            sender_key: normalize_public_key(row.bytes(3, false))?,
+            text: String::from_utf8_lossy(&row.bytes(4, true)).replace('\0', ""),
+            file_name: {
+                let value = String::from_utf8_lossy(&row.bytes(5, true)).replace('\0', "");
+                (!value.is_empty()).then_some(value)
+            },
+            file_path: {
+                let value = String::from_utf8_lossy(&row.bytes(6, true)).replace('\0', "");
+                (!value.is_empty()).then_some(value)
+            },
+            file_size: row.integer(7).max(0) as u64,
+        })?;
+        count += 1;
     }
     Ok(count)
 }
@@ -571,37 +656,15 @@ pub fn write_disposable_qtox_database(
         .map_err(|_| "Invalid disposable qTox history path".to_string())?;
     const SQLITE_OPEN_READWRITE: c_int = 0x2;
     const SQLITE_OPEN_CREATE: c_int = 0x4;
-    const SQLITE_OPEN_NOMUTEX: c_int = 0x8000;
-    let mut raw = ptr::null_mut();
-    if unsafe {
-        (api.open_v2)(
-            path.as_ptr(),
-            &mut raw,
-            SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_NOMUTEX,
-            ptr::null(),
-        )
-    } != 0
-        || raw.is_null()
-    {
-        return Err(if raw.is_null() {
-            "SQLCipher could not create the disposable qTox database".to_string()
-        } else {
-            api.error(raw)
-        });
-    }
-    let database = Database { api: &api, raw };
-    let key = profiles::derive_qtox_database_key(password, self_public_key)?;
-    let key = key
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
-    exec(
-        &api,
-        database.raw,
-        &format!(
-            "PRAGMA key=\"x'{key}'\"; PRAGMA cipher_page_size=4096; PRAGMA kdf_iter=256000; PRAGMA cipher_hmac_algorithm=HMAC_SHA512; PRAGMA cipher_kdf_algorithm=PBKDF2_HMAC_SHA512;"
-        ),
-    )?;
+    let database = Database::open(&api, &path, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE)?;
+    let mut key = profiles::derive_qtox_database_key(password, self_public_key)?;
+    let keyed = set_cipher_key(
+        &database,
+        &key,
+        "PRAGMA cipher_page_size=4096; PRAGMA kdf_iter=256000; PRAGMA cipher_hmac_algorithm=HMAC_SHA512; PRAGMA cipher_kdf_algorithm=PBKDF2_HMAC_SHA512;",
+    );
+    crate::wipe_secret_bytes(&mut key);
+    keyed?;
     let friend = friend_public_key
         .iter()
         .map(|byte| format!("{byte:02X}"))
@@ -610,10 +673,7 @@ pub fn write_disposable_qtox_database(
         .iter()
         .map(|byte| format!("{byte:02X}"))
         .collect::<String>();
-    exec(
-        &api,
-        database.raw,
-        &format!(
+    database.exec(&format!(
             "CREATE TABLE authors(id INTEGER PRIMARY KEY, public_key BLOB NOT NULL UNIQUE);\
              CREATE TABLE chats(id INTEGER PRIMARY KEY, uuid BLOB NOT NULL UNIQUE);\
              CREATE TABLE aliases(id INTEGER PRIMARY KEY, owner INTEGER, display_name BLOB NOT NULL, UNIQUE(owner, display_name), FOREIGN KEY(owner) REFERENCES authors(id));\
@@ -630,8 +690,7 @@ pub fn write_disposable_qtox_database(
              INSERT INTO history VALUES(42, 'T', 1700000000000, 1);\
              INSERT INTO text_messages VALUES(42, 'T', 1, 'disposable qTox SQLCipher history');\
              PRAGMA user_version=11;"
-        ),
-    )?;
+    ))?;
     drop(database);
     Ok(())
 }
@@ -643,7 +702,7 @@ mod import_tests;
 #[cfg(target_os = "windows")]
 #[link(name = "kernel32")]
 unsafe extern "system" {
-    fn LoadLibraryExW(filename: *const u16, file: *mut c_void, flags: u32) -> Module;
-    fn GetProcAddress(module: Module, name: *const c_char) -> *mut c_void;
-    fn FreeLibrary(module: Module) -> i32;
+    fn LoadLibraryExW(filename: *const u16, file: *mut c_void, flags: u32) -> *mut c_void;
+    fn GetProcAddress(module: *mut c_void, name: *const c_char) -> *mut c_void;
+    fn FreeLibrary(module: *mut c_void) -> i32;
 }

@@ -162,13 +162,14 @@ assert.equal(compile.status, 0, `${compile.stdout}${compile.stderr}`);
 function loadSession(storage, downloads = [], browserIo = {}) {
   const modules = new Map();
   const browser = new EventTarget();
+  browser.location = { href: "https://fixture.invalid/" };
   browser.setTimeout = browserIo.windowSetTimeout ?? ((fn) => { fn(); return 0; });
   browser.clearTimeout = () => {};
   browser.clearInterval = () => {};
   browser.setInterval = browserIo.setInterval ?? (() => 0);
   const shared = {
     Blob, File, crypto, btoa, atob, TextEncoder, TextDecoder, Uint8Array, ArrayBuffer,
-    Response, Headers, Request, Event, CustomEvent, DOMException, URL,
+    Response, Headers, Request, Event, CustomEvent, DOMException, AbortController, AbortSignal, URL,
     setTimeout: browserIo.setTimeout ?? setTimeout, clearTimeout: browserIo.clearTimeout ?? clearTimeout,
     fetch: browserIo.fetch, indexedDB: browserIo.indexedDB,
     window: browser, navigator: { storage: browserIo.storage ?? { getDirectory: async () => storage.root } },
@@ -237,12 +238,35 @@ outgoingSession.fetchResponse = async (url, init) => {
   return new Response(JSON.stringify({ retryAfterMs: 0, transfer: outgoing }));
 };
 outgoingSession.reportTransferPumpError = (_messageId, error) => assert.fail(String(error));
-await outgoingSession.sendBrowserFile("profile", 1, new File([payload], "fixture.bin"));
+await outgoingSession.sendBrowserFile("profile", 1, new File([payload], "fixture.bin"), "A".repeat(64));
 await Promise.all([...outgoingSession.transferPumps.values()]);
 assert.equal(beginAttempts, 2, "a lost begin reply must not create a new operation or lose the staged source");
 assert.equal(uploadAttempts, 3, "Pending keeps the durable offset and a lost committed reply retries the same source range");
 assert.equal(durableWrites, 1, "a committed upload reply may be lost without requiring a second payload");
 assert.equal(outgoing.state, "queued", "the browser pump finishes on durable commit while the native peer is still unavailable");
+
+for (const [name, mime] of [["voice.wav", "audio/wav"], ["clip.mp4", "video/mp4"]]) {
+  const storage = memoryStorage();
+  const session = loadSession(storage);
+  let transfer;
+  session.request = async (url, init) => {
+    assert.equal(url, "/api/v1/transfers/outgoing");
+    transfer = {
+      ...outgoing, name, mime, operationId: JSON.parse(init.body).operationId,
+      state: "complete", downloadAvailable: false,
+    };
+    return transfer;
+  };
+  session.transferStatus = async () => transfer;
+  session.fetchResponse = async () => assert.fail("Playback should reuse the committed outgoing source");
+  session.reportTransferPumpError = (_messageId, error) => assert.fail(String(error));
+  await session.sendBrowserFile("profile", 1, new File([payload], name, { type: mime }), "A".repeat(64));
+  await Promise.all([...session.transferPumps.values()]);
+  const blob = await session.originalBlob("profile", transfer.messageId, transfer.id, undefined, "outgoing");
+  assert.deepEqual(new Uint8Array(await blob.arrayBuffer()), new Uint8Array(await payload.arrayBuffer()));
+  await assert.rejects(session.originalBlob("profile", transfer.messageId, transfer.id), /TRANSFER_WORKSPACE_BOUNDARY/u);
+  await assert.rejects(session.originalBlob("profile", "another-message", transfer.id, undefined, "outgoing"), /TRANSFER_WORKSPACE_BOUNDARY/u);
+}
 
 for (const code of ["WORKSPACE_LEASE_EXPIRED", "PROFILE_NOT_ACTIVE", "PROFILE_ID_INVALID",
   "TRANSFER_OPERATION_ID_INVALID", "TRANSFER_OPERATION_INVALID", "TRANSFER_HASH_INVALID", "TRANSFER_SIZE_INVALID"]) {
@@ -254,10 +278,44 @@ for (const code of ["WORKSPACE_LEASE_EXPIRED", "PROFILE_NOT_ACTIVE", "PROFILE_ID
     // A regression fails promptly instead of leaving this test in the retry loop.
     throw new Error(attempts === 1 ? code : "TRANSFER_CANCELLED");
   };
-  await assert.rejects(refused.sendBrowserFile("profile", 1, new File([payload], "fixture.bin")),
+  await assert.rejects(refused.sendBrowserFile("profile", 1, new File([payload], "fixture.bin"), "A".repeat(64)),
     new RegExp(code, "u"), `${code} must reach the caller so batch sending can release its busy state`);
   assert.equal(attempts, 1);
   assert.equal(refused.transferPumps.size, 0);
+}
+
+for (const code of ["CHAT_CONTACT_INCARNATION_CHANGED", "CHAT_CONTACT_IDENTITY_CHANGED", "TRANSFER_CONTACT_IDENTITY_CHANGED"]) {
+  const storage = memoryStorage();
+  const refused = loadSession(storage);
+  let attempts = 0;
+  refused.request = async (url, init) => {
+    assert.equal(url, "/api/v1/transfers/outgoing");
+    const id = JSON.parse(init.body).operationId;
+    assert([...storage.files.keys()].some(path => path.endsWith(`/${id}.payload`)), "Source is durable before the request");
+    attempts += 1;
+    throw new Error(attempts === 1 ? code : "TRANSFER_CANCELLED");
+  };
+  await assert.rejects(refused.sendBrowserFile("profile", 1, new File([payload], "retired.bin"), "A".repeat(64), 1),
+    new RegExp(code, "u"));
+  assert.equal(attempts, 1, "A retired contact must never retry");
+  assert.equal(storage.files.size, 0, "Remove the staged payload for the retired operation");
+  assert.equal(refused.transferPumps.size, 0);
+}
+
+{
+  const storage = memoryStorage();
+  const session = loadSession(storage);
+  const errors = [];
+  session.request = async (url, init) => {
+    assert.equal(url, "/api/v1/transfers/outgoing");
+    return { ...outgoing, operationId: JSON.parse(init.body).operationId, payloadCommitted: false, uploadedBytes: 0 };
+  };
+  session.transferStatus = async () => { throw new Error("TRANSFER_NOT_FOUND"); };
+  session.reportTransferPumpError = (_messageId, error) => errors.push(transferFailureCode(error));
+  await session.sendBrowserFile("profile", 1, new File([payload], "removed-queued.bin"), "A".repeat(64), 1);
+  await Promise.all([...session.transferPumps.values()]);
+  assert.deepEqual(errors, ["TRANSFER_NOT_FOUND"]);
+  assert.equal(storage.files.size, 0, "A deleted server queue entry releases its browser payload");
 }
 
 const downloads = [];
@@ -295,7 +353,7 @@ const configureIncoming = (session) => {
     assert.equal(init.method, "POST");
     assert.deepEqual(JSON.parse(init.body), { profileId: incoming.profileId, transferId: incoming.id,
       sizeBytes: payloadBytes.length, sha256: digest });
-    assert.deepEqual(copies, ["fixture.bin"], "the verified local copy precedes every completion poll");
+    assert.deepEqual(copies, [], "background receipt polling never opens a download");
     assert.deepEqual(local.files.get(key), payloadBytes);
     assert.ok(local.files.has(`${key}.consumed`));
     calls += 1;
@@ -308,7 +366,7 @@ const configureIncoming = (session) => {
   await Promise.all([...session.transferPumps.values()]);
   assert.equal(calls, 3, "two HTTP202 responses cannot be treated as confirmed cleanup");
   assert.deepEqual(delays, [100, 100], "pending uses the exact fixed retry delay");
-  assert.deepEqual(copies, ["fixture.bin"], "polling cannot duplicate the automatic browser download");
+  assert.deepEqual(copies, [], "background completion leaves the chat open");
 }
 
 for (const [label, status, answer] of [
@@ -343,7 +401,8 @@ for (const [label, status, answer] of [
   await Promise.all([...session.transferPumps.values()]);
   assert.equal(calls, 1, `${label}: malformed completion cannot be retried or accepted`);
   assert.deepEqual(errors, ["TRANSFER_COMPLETION_INVALID"], label);
-  assert.deepEqual(copies, ["fixture.bin"], `${label}: the local copy remains durable`);
+  assert.ok(local.files.has(`.kaigen-transfer-cache/workspace-fixture/${incoming.id}.payload.consumed`), `${label}: the local copy remains durable`);
+  assert.deepEqual(copies, [], label);
 }
 
 {
@@ -371,7 +430,7 @@ for (const [label, status, answer] of [
   await pump;
   assert.equal(calls, 1, "a stopped generation cannot issue another completion poll");
   assert.deepEqual(errors, ["TRANSFER_PUMP_STOPPED"]);
-  assert.deepEqual(copies, ["fixture.bin"], "generation stop does not duplicate the browser copy");
+  assert.deepEqual(copies, [], "generation stop does not open the background copy");
 }
 
 {
@@ -391,7 +450,7 @@ const incomingSession = loadSession(storage, downloads);
 configureIncoming(incomingSession);
 await incomingSession.startIncomingTransfer(incoming, 1);
 await Promise.all([...incomingSession.transferPumps.values()]);
-assert.deepEqual(downloads, ["fixture.bin"]);
+assert.deepEqual(downloads, [], "receiving a file never opens it automatically");
 assert.ok([...storage.files.keys()].some(key => key.endsWith(".consumed")), "the local receipt must survive document reload");
 assert.deepEqual(storage.files.get(`.kaigen-transfer-cache/workspace-fixture/${incoming.id}.payload`), payloadBytes,
   "the verified incoming binary remains locally available after server cleanup");
@@ -399,17 +458,17 @@ const reloaded = loadSession(storage, downloads);
 configureIncoming(reloaded);
 reloaded.fetchResponse = () => assert.fail("an already consumed automatic copy must not download again");
 assert.equal(await reloaded.recoverIncomingTransfer("profile", "message", incoming.id, 1, "automatic"), true);
-assert.deepEqual(downloads, ["fixture.bin"]);
+assert.deepEqual(downloads, []);
 reloaded.fetchResponse = async (_url, init) => {
   assert.equal(JSON.parse(init.body).position, 0, "explicit download can re-read the retained backend payload");
   return new Response(new Uint8Array([1, 2, 3, 4]), { headers: { "X-Kaigen-Transfer-Position": "0" } });
 };
 await reloaded.downloadTransfer("profile", "message", incoming.id, 1);
-assert.deepEqual(downloads, ["fixture.bin", "fixture.bin"]);
+assert.deepEqual(downloads, ["fixture.bin"]);
 reloaded.transferStatus = async () => ({ ...incoming, downloadAvailable: false });
 reloaded.fetchResponse = () => assert.fail("a released server payload must not be requested again");
 await reloaded.downloadTransfer("profile", "message", incoming.id, 1);
-assert.deepEqual(downloads, ["fixture.bin", "fixture.bin", "fixture.bin"], "an explicit download uses the verified local copy after server cleanup");
+assert.deepEqual(downloads, ["fixture.bin", "fixture.bin"], "an explicit download uses the verified local copy after server cleanup");
 
 {
   const storage = memoryStorage(), copies = [], errors = [];
@@ -422,7 +481,7 @@ assert.deepEqual(downloads, ["fixture.bin", "fixture.bin", "fixture.bin"], "an e
     assert.equal(command, "complete_web_incoming_transfer");
     assert.deepEqual(storage.files.get(key), payloadBytes, "the full durable local file precedes the server acknowledgement");
     assert.ok(storage.files.has(`${key}.consumed`), "the durable local receipt precedes the server acknowledgement");
-    assert.deepEqual(copies, ["fixture.bin"], "the browser receives the file before server cleanup can begin");
+    assert.deepEqual(copies, [], "the verified background copy needs no browser download");
     attempts += 1;
     first.transferGeneration += 1; // A closed document preserves OPFS, unlike explicit workspace lock/close.
     throw new TypeError("Failed to fetch");
@@ -455,7 +514,7 @@ assert.deepEqual(downloads, ["fixture.bin", "fixture.bin", "fixture.bin"], "an e
   assert.equal(confirmed, true, "background discovery retries the durable ACK even though the file was already consumed");
   await restored.backgroundTransfers.run();
   assert.equal(attempts, 3, "a released server copy leaves background discovery");
-  assert.deepEqual(copies, ["fixture.bin"], "lost replies, pending disk commit and reload do not duplicate automatic downloads");
+  assert.deepEqual(copies, [], "lost replies and reload never turn the background copy into a download");
 }
 
 {
@@ -485,8 +544,8 @@ assert.deepEqual(downloads, ["fixture.bin", "fixture.bin", "fixture.bin"], "an e
   await session.startIncomingTransfer(incoming, 1);
   await Promise.all([...session.transferPumps.values()]);
   await session.backgroundTransfers.run();
-  assert.deepEqual(copies, ["fixture.bin"]);
-  assert.equal(ranges, 1, "memory-only fallback does not repeatedly fetch an already downloaded file in this document");
+  assert.deepEqual(copies, []);
+  assert.equal(ranges, 1, "memory-only fallback does not repeatedly fetch an already verified file in this document");
 }
 
 for (const fault of ["corrupt-payload", "payload-write", "receipt-write"]) {
@@ -503,7 +562,7 @@ for (const fault of ["corrupt-payload", "payload-write", "receipt-write"]) {
   await session.startIncomingTransfer(incoming, 1);
   await Promise.all([...session.transferPumps.values()]);
   assert.deepEqual(errors, [fault === "corrupt-payload" ? "TRANSFER_HASH_MISMATCH" : "local disk failure"]);
-  assert.equal(copies.length, fault === "receipt-write" ? 1 : 0);
+  assert.equal(copies.length, 0);
   if (fault === "receipt-write") {
     assert.deepEqual(storage.files.get(key), payloadBytes, "the full local file survives a failed receipt write");
     failing = false;
@@ -523,7 +582,7 @@ for (const fault of ["corrupt-payload", "payload-write", "receipt-write"]) {
     await session.backgroundTransfers.run();
     await Promise.all([...session.transferPumps.values()]);
     assert.equal(confirmations, 1, "recovery from a receipt-write failure eventually acknowledges the durable copy");
-    assert.deepEqual(copies, ["fixture.bin"], "receipt retry must not repeat the earlier download handoff");
+    assert.deepEqual(copies, [], "receipt retry does not open a download");
   }
 }
 
@@ -602,7 +661,7 @@ function deferred() {
   assert.equal(session.transferPumps.size, 0, "manual acceptance does not allocate a browser slot before backend commit");
   await session.backgroundTransfers.run();
   await Promise.all([...session.transferPumps.values()]);
-  assert.deepEqual(copies, ["fixture.bin"], "a retained file in another unlocked profile remains discoverable");
+  assert.deepEqual(copies, [], "a background copy in another profile never opens a download");
 }
 
 for (const action of ["lockWorkspace", "closeWorkspace", "destroyWorkspace"]) {
@@ -631,7 +690,7 @@ for (const action of ["lockWorkspace", "closeWorkspace", "destroyWorkspace"]) {
   session.sessionLifecycle = "active";
   receiptReply.resolve();
   await pump;
-  assert.deepEqual(copies, ["fixture.bin"], `${action}: only the download before acknowledgement occurred; a late receipt cannot start another`);
+  assert.deepEqual(copies, [], `${action}: a late receipt cannot open a download`);
   assert.equal(storage.files.size, 0, `${action}: a late receipt cannot recreate OPFS payload/consumed data`);
   assert.deepEqual(commands, ["complete_web_incoming_transfer"], "browser shutdown does not issue peer transfer controls");
   assert.deepEqual(transferErrors, ["TRANSFER_PUMP_STOPPED"]);
@@ -694,7 +753,6 @@ for (const [action, endpoint] of [["lockWorkspace", "lock"], ["closeWorkspace", 
     if (++digests === 1) { headerEntered.resolve(); await headerReply.promise; }
     return "workspace-fixture";
   };
-  session.legacyWorkspaceDigest = async () => "legacy-fixture";
   const admitted = session.command("get_background_transfer_work");
   await headerEntered.promise;
   const closing = session.lockWorkspace();
@@ -732,7 +790,7 @@ for (const [action, endpoint] of [["lockWorkspace", "lock"], ["closeWorkspace", 
   assert.deepEqual(calls, ["admitted-headers", "admitted-body", "lock"]);
 }
 
-{
+for (const teardown of ["lockWorkspace", "leaveWorkspace"]) {
   const admittedEntered = deferred(), admittedReply = deferred();
   const fetchCalls = [], intervals = [], timerToken = { owned: "drain" };
   let expireDrain, timerCleared = false, reads = 0;
@@ -752,7 +810,7 @@ for (const [action, endpoint] of [["lockWorkspace", "lock"], ["closeWorkspace", 
   session.realtimeActive = true;
   const admitted = assert.rejects(session.command("get_background_transfer_work"), /STATE_UNAVAILABLE/u);
   await admittedEntered.promise;
-  const closing = assert.rejects(session.lockWorkspace(), /SESSION_DRAIN_TIMEOUT/u);
+  const closing = assert.rejects(session[teardown](), /SESSION_DRAIN_TIMEOUT/u);
   assert.equal(typeof expireDrain, "function");
   const queued = session.command("get_background_transfer_work");
   await Promise.resolve();
@@ -819,12 +877,43 @@ for (const realtimeWasActive of [false, true]) {
     const request = { result };
     queueMicrotask(() => request.onsuccess?.()); return request;
   };
-  const store = {
-    get: key => idbRequest(records.get(key)),
-    put: (value, key) => { records.set(key, value); return idbRequest(key); },
-    delete: key => { records.delete(key); return idbRequest(undefined); },
-  };
-  const indexedDB = { open: () => idbRequest({ transaction: () => ({ objectStore: () => store }), close() {} }) };
+  const indexedDB = { open: () => idbRequest({ transaction: () => {
+    const writes = [];
+    let aborted = false, finished = false, completionQueued = false;
+    const transaction = {
+      error: null,
+      abort() {
+        if (finished) throw new DOMException("Transaction finished", "InvalidStateError");
+        if (aborted) return;
+        aborted = true; writes.length = 0;
+        transaction.error = new DOMException("Transaction aborted", "AbortError");
+        queueMicrotask(() => transaction.onabort?.());
+      },
+      objectStore: () => ({
+        get: key => request(() => records.get(key)),
+        put: (value, key) => request(() => { writes.push(() => records.set(key, value)); return key; }),
+        delete: key => request(() => { writes.push(() => records.delete(key)); }),
+      }),
+    };
+    function request(operation) {
+      if (finished || aborted) throw new DOMException("Transaction inactive", "TransactionInactiveError");
+      const request = { result: undefined, error: null };
+      queueMicrotask(() => {
+        if (aborted) { request.error = transaction.error; request.onerror?.(); return; }
+        request.result = operation(); request.onsuccess?.();
+        if (!completionQueued) {
+          completionQueued = true;
+          queueMicrotask(() => {
+            if (aborted) return;
+            for (const write of writes) write();
+            writes.length = 0; finished = true; transaction.oncomplete?.();
+          });
+        }
+      });
+      return request;
+    }
+    return transaction;
+  }, close() {} }) };
   const deviceEntered = deferred(), deviceReply = deferred(), calls = [], intervals = [];
   const session = loadSession(memoryStorage(), [], { indexedDB,
     setInterval: (_callback, milliseconds) => { intervals.push(milliseconds); return intervals.length; },
@@ -854,5 +943,131 @@ for (const realtimeWasActive of [false, true]) {
   assert.deepEqual(intervals, [], "late session refresh must not restart background timers");
 }
 
-console.log("WEB_TRANSFER_PUMP_PASS pending_durable_offset=1 lost_begin_identity=1 lost_commit_reply=1 terminal_begin_refusals=7 browser_stops_at_backend_commit=1 positional_opfs_resume=1 verified_sha256=1 persistent_consume=1 explicit_redownload=1 single_download_owner=1 manual_accept_cross_profile=1 stale_receipt_teardown=3 session_teardown_success=3 admitted_header_drain=1 admitted_json_body_drain=1 drain_timeout_rollback=1 lock_failure_rollback=2 captured_closed_outcome=1 pending_device_refresh=1");
+{
+  const storage = memoryStorage(), entered = deferred(), reply = deferred(), calls = [];
+  const cachePath = ".kaigen-transfer-cache/workspace-fixture/preserved.payload";
+  storage.files.set(cachePath, new Uint8Array([1, 2, 3, 4]));
+  const session = loadSession(storage, [], {
+    indexedDB: { open() { assert.fail("Local navigation must not delete or replace device credentials"); } },
+    fetch: async (url) => {
+      calls.push(url);
+      assert.equal(url, "/api/v1/commands/save_local_state", "Navigation must never send a server lock/close or a queued message");
+      entered.resolve(); await reply.promise; return jsonReply({ saved: true });
+    },
+  });
+  session.workspace = { storageMode: "ram" }; session.csrfToken = "old-csrf";
+  const save = session.command("save_local_state", { state: { draft: "kept" } });
+  await entered.promise;
+  session.cancelWorkspaceOpening();
+  const leaving = session.leaveWorkspace();
+  const queued = assert.rejects(session.command("send_tox_message", { message: "must-not-send" }), /SESSION_NOT_ACTIVE/u);
+  await Promise.resolve();
+  assert.equal(session.sessionLifecycle, "tearing-down");
+  assert.equal(calls.length, 1, "The admitted save remains the sole request while draining");
+  reply.resolve();
+  const [saved] = await Promise.all([save, leaving]);
+  assert.equal(saved.saved, true);
+  assert.equal(session.getWorkspace(), null);
+  assert.equal(session.csrfToken, "");
+  assert.equal(session.sessionLifecycle, "closed");
+  assert.deepEqual(storage.files.get(cachePath), new Uint8Array([1, 2, 3, 4]));
+  session.sessionLifecycle = "active";
+  await queued;
+  assert.equal(calls.length, 1, "A queued old message cannot revive in a later active session");
+}
+
+{
+  const progress = [];
+  const session = loadSession(memoryStorage(), [], {
+    windowSetTimeout: () => assert.fail("Proof calculation must not wait for a background tab timer"),
+  });
+  const challenge = { challengeId: "fixture", salt: "kaigen-fixed-proof-timer-qa", difficulty: 12 };
+  const result = await session.solveChallenge(challenge, attempts => progress.push(attempts));
+  assert.equal(result.challengeId, challenge.challengeId);
+  assert.equal(result.nonce, 962, "Keep the first valid SHA-256 nonce");
+  assert.deepEqual(progress, [1, 129, 257, 385, 513, 641, 769, 897]);
+  await assert.rejects(session.solveChallenge(challenge, attempts => {
+    if (attempts === 129) throw new Error("DISPOSABLE_CHALLENGE_CANCELLED");
+  }), /DISPOSABLE_CHALLENGE_CANCELLED/u);
+}
+
+{
+  const response = deferred(), requests = [], progress = [];
+  let expire, cancelledTimer, challengeSignal;
+  const session = loadSession(memoryStorage(), [], {
+    setTimeout(callback, milliseconds) { assert.equal(milliseconds, 30_000); expire = callback; return 17; },
+    clearTimeout(timer) { cancelledTimer = timer; },
+  });
+  session.fetchResponse = (path, init) => {
+    requests.push([path, init.method]);
+    challengeSignal = init.signal;
+    return response.promise;
+  };
+  const rejected = assert.rejects(session.createWorkspace({ storageMode: "ram", accessPassword: "disposable-password", language: "en" },
+    value => progress.push(value.stage)), /INITIALIZER_CHALLENGE_TIMEOUT/u);
+  expire();
+  await rejected;
+  assert.equal(challengeSignal.aborted, true);
+  assert.equal(cancelledTimer, 17);
+  response.resolve(new Response(JSON.stringify({ challengeId: "late", salt: "fixture", difficulty: 0 }),
+    { headers: { "content-type": "application/json" } }));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(requests, [["/api/v1/initializer/challenge", "POST"]]);
+  assert.deepEqual(progress, ["challenge"]);
+  assert.equal(session.isWorkspaceCreationPending(), false);
+  assert.equal(session.getIdentifier(), "");
+}
+
+{
+  const challenge = deferred(), calls = [], progress = [];
+  const session = loadSession(memoryStorage());
+  session.initializerChallenge = () => challenge.promise;
+  session.solveChallenge = async () => ({ challengeId: "fixture", nonce: 0 });
+  session.request = async (...args) => { calls.push(args); return {}; };
+  const creation = assert.rejects(session.createWorkspace({ storageMode: "ram", accessPassword: "disposable-password", language: "en" }, value => progress.push(value.stage)), /SESSION_NOT_ACTIVE/u);
+  session.cancelWorkspaceOpening(); challenge.resolve({}); await creation;
+  assert.deepEqual(progress, ["challenge"], "Cancelled proof preparation cannot update progress or allocate a workspace");
+  assert.deepEqual(calls, []);
+  assert.equal(session.getIdentifier(), "");
+}
+
+{
+  const entered = deferred(), response = deferred();
+  const session = loadSession(memoryStorage());
+  session.initializerChallenge = async () => ({});
+  session.solveChallenge = async () => ({ challengeId: "fixture", nonce: 0 });
+  session.request = async (url) => { assert.equal(url, "/api/v1/workspaces"); entered.resolve(); return response.promise; };
+  const creation = session.createWorkspace({ storageMode: "ram", accessPassword: "disposable-password", language: "en" });
+  await entered.promise;
+  assert.equal(session.isWorkspaceCreationPending(), true);
+  assert.throws(() => session.cancelWorkspaceOpening(), /WORKSPACE_CONTROL_BUSY/u);
+  await assert.rejects(session.leaveWorkspace(), /WORKSPACE_CONTROL_BUSY/u);
+  response.resolve({ identifier: "d".repeat(48), workspace: { storageMode: "ram" } });
+  const created = await creation;
+  assert.equal(created.identifier, "d".repeat(48));
+  assert.equal(session.getIdentifier(), created.identifier, "A submitted allocation retains its returned recovery link");
+  assert.equal(session.isWorkspaceCreationPending(), true, "Barrier lasts until the caller records the created URL");
+  session.finishWorkspaceCreation();
+  assert.equal(session.isWorkspaceCreationPending(), false);
+}
+
+for (const cancellation of ["event", "url-before-event"]) {
+  const entered = deferred(), response = deferred();
+  let current = true;
+  const session = loadSession(memoryStorage(), [], { indexedDB: { open() { assert.fail("Stale password auth must not persist device credentials"); } } });
+  session.setIdentifier("a".repeat(48));
+  session.request = async (url) => { assert.equal(url, "/api/v1/auth/password"); entered.resolve(); return response.promise; };
+  const login = assert.rejects(session.login("disposable-password", () => current), /SESSION_NOT_ACTIVE/u);
+  await entered.promise;
+  if (cancellation === "event") session.cancelWorkspaceOpening(); else current = false;
+  response.resolve({ csrfToken: "late-csrf", deviceId: "late-device", workspaceSelector: "old-selector", workspace: { storageMode: "ram" } });
+  await login;
+  assert.equal(session.getWorkspace(), null);
+  assert.equal(session.csrfToken, "");
+  assert.equal(session.realtimeActive, false);
+}
+
+console.log("WEB_WORKSPACE_NAVIGATION_SESSION_PASS local_drain_preserves_save_credentials_cache=1 queued_message_never_revives=1 initializer_challenge_deadline=1 pre_post_creation_cancel=1 submitted_creation_barrier=1 late_password_auth=2");
+console.log("WEB_TRANSFER_PUMP_PASS pending_durable_offset=1 lost_begin_identity=1 lost_commit_reply=1 terminal_begin_refusals=7 browser_stops_at_backend_commit=1 positional_opfs_resume=1 verified_sha256=1 persistent_consume=1 explicit_redownload=1 single_download_owner=1 manual_accept_cross_profile=1 stale_receipt_teardown=3 session_teardown_success=3 admitted_header_drain=1 admitted_json_body_drain=1 drain_timeout_rollback=2 lock_failure_rollback=2 captured_closed_outcome=1 pending_device_refresh=1");
 console.log("WEB_INCOMING_COPY_RELEASE_PASS durable_payload_and_receipt_before_ack=1 released_server_local_redownload=1 lost_ack_reload_pending_retry_no_duplicate=1 preview_keeps_server_copy=1 memory_only_keeps_server_copy=1 memory_only_no_repeat=1 corruption_and_write_failures_no_ack=3 missing_local_copy_fails_promptly=1");
+console.log("WEB_OUTGOING_MEDIA_SOURCE_PASS cached_audio_and_video=2 direction_and_message_owner_checks=4");

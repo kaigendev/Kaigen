@@ -70,11 +70,14 @@ try {
   await editor.fill("first line"); await editor.press("Enter"); await page.keyboard.type("second line");
   assert.equal(await countSent(), 0, "Tablet Enter never sends");
   assert((await editor.innerText()).includes("\n"), "Enter inserted actual newline");
-  await editor.press("Shift+Enter"); await page.waitForFunction(() => window.appTabletFixture.sent.length === 1);
-  assert.equal(await page.evaluate(() => window.appTabletFixture.sent[0].text), "first line\nsecond line");
+  await editor.press("Shift+Enter");
+  assert.equal(await countSent(), 0, "A Shift-modified Return from the iPad keyboard still inserts a newline");
+  await page.keyboard.type("third line");
+  await editor.press("Control+Enter"); await page.waitForFunction(() => window.appTabletFixture.sent.length === 1);
+  assert.equal(await page.evaluate(() => window.appTabletFixture.sent[0].text), "first line\nsecond line\nthird line");
   await editor.fill("button send"); await page.locator("button.send").click();
   await page.waitForFunction(() => window.appTabletFixture.sent.length === 2);
-  report.cases.push({ name: "tablet default actual Enter/newline Shift-send/button", status: "PASS" });
+  report.cases.push({ name: "tablet default Enter/Shift-newline Ctrl-send/button", status: "PASS" });
   for (const saved of [true, false]) {
     await page.evaluate(() => sessionStorage.clear());
     await ready("/?saved=" + saved);

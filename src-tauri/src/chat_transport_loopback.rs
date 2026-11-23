@@ -88,24 +88,67 @@ unsafe extern "C" fn loopback_bind(
     socket: Socket,
     address: *const IpPort,
 ) -> i32 {
-    if address.is_null() || (*address).ip.family.value != 2 {
+    // SAFETY: Tox passes an aligned IpPort for the duration of this callback.
+    let Some(address) = (unsafe { address.as_ref() }) else {
+        return -1;
+    };
+    if address.ip.family.value != 2 {
         return -1;
     }
-    let base = tox_default_system();
-    if base.network.is_null() || (*base.network).functions.is_null() {
-        return -1;
-    }
-    let Some(bind) = (*(*base.network).functions).bind else {
+    // SAFETY: The pinned Tox implementation returns its static default
+    // network tables. Read their bind function without retaining the pointers.
+    let bind = unsafe {
+        tox_default_system()
+            .network
+            .as_ref()
+            .and_then(|network| network.functions.as_ref())
+            .and_then(|functions| functions.bind)
+    };
+    let Some(bind) = bind else {
         return -1;
     };
     let mut local = *address;
     local.ip.bytes = IpBytes { v6: [0; 2] };
     local.ip.bytes.v4 = [127, 0, 0, 1];
-    let result = bind(object, socket, &local);
+    // SAFETY: Forward the native object and socket with a live IpPort value.
+    let result = unsafe { bind(object, socket, &local) };
     if result == 0 {
         LOOPBACK_BINDS.fetch_add(1, Ordering::Relaxed);
     }
     result
+}
+
+/// # Safety
+/// The test iteration owns the Inbox supplied as native user data. This
+/// callback may borrow it only until the closure returns.
+unsafe fn with_native_inbox(user: *mut c_void, consume: impl FnOnce(&mut Inbox)) {
+    let user = user.cast::<Inbox>();
+    if user.is_null() || !user.is_aligned() {
+        return;
+    }
+    // SAFETY: The caller guarantees exclusive access during this invocation.
+    consume(unsafe { &mut *user });
+}
+
+/// # Safety
+/// Tox owns a readable payload of length len for this invocation, and user
+/// must satisfy with_native_inbox's contract.
+unsafe fn with_native_payload(
+    user: *mut c_void,
+    bytes: *const u8,
+    len: usize,
+    limit: usize,
+    consume: impl FnOnce(&mut Inbox, &[u8]),
+) {
+    if bytes.is_null() || len > limit {
+        return;
+    }
+    // SAFETY: Both borrows are valid for the closure and cannot escape it.
+    unsafe {
+        with_native_inbox(user, |inbox| {
+            consume(inbox, std::slice::from_raw_parts(bytes, len));
+        });
+    }
 }
 
 #[derive(Default)]
@@ -122,14 +165,13 @@ unsafe extern "C" fn packet_callback(
     len: usize,
     user: *mut c_void,
 ) {
-    if user.is_null() || bytes.is_null() || len > 1373 {
-        return;
-    }
-    let inbox = &mut *user.cast::<Inbox>();
-    if inbox.packets.len() < 128 {
-        inbox
-            .packets
-            .push((friend, std::slice::from_raw_parts(bytes, len).to_vec()));
+    // SAFETY: The pointer and payload come from this synchronous Tox callback.
+    unsafe {
+        with_native_payload(user, bytes, len, 1373, |inbox, bytes| {
+            if inbox.packets.len() < 128 {
+                inbox.packets.push((friend, bytes.to_vec()));
+            }
+        });
     }
 }
 
@@ -141,14 +183,18 @@ unsafe extern "C" fn message_callback(
     len: usize,
     user: *mut c_void,
 ) {
-    if user.is_null() || bytes.is_null() || kind != 0 || len > 1372 {
+    if kind != 0 {
         return;
     }
-    let inbox = &mut *user.cast::<Inbox>();
-    if inbox.messages.len() < 128 {
-        if let Ok(text) = std::str::from_utf8(std::slice::from_raw_parts(bytes, len)) {
-            inbox.messages.push((friend, text.to_owned()));
-        }
+    // SAFETY: The pointer and payload come from this synchronous Tox callback.
+    unsafe {
+        with_native_payload(user, bytes, len, 1372, |inbox, bytes| {
+            if inbox.messages.len() < 128 {
+                if let Ok(text) = std::str::from_utf8(bytes) {
+                    inbox.messages.push((friend, text.to_owned()));
+                }
+            }
+        });
     }
 }
 
@@ -160,17 +206,19 @@ unsafe extern "C" fn delivery_callback(
     receipt: u32,
     user: *mut c_void,
 ) {
-    if user.is_null() {
-        return;
-    }
-    let inbox = &mut *user.cast::<Inbox>();
-    if inbox.client_delivery.len() < 128 {
-        inbox.client_delivery.push((friend, receipt));
+    // SAFETY: The test iteration passes its own Inbox as callback data.
+    unsafe {
+        with_native_inbox(user, |inbox| {
+            if inbox.client_delivery.len() < 128 {
+                inbox.client_delivery.push((friend, receipt));
+            }
+        });
     }
 }
 
 struct Peer {
-    tox: *mut c_void,
+    // Drop the instance before its borrowed testing system and network tables.
+    tox: super::ToxHandle,
     inbox: Inbox,
     public_key: [u8; 32],
     _system: Box<ToxSystem>,
@@ -180,55 +228,73 @@ struct Peer {
 
 impl Peer {
     fn new() -> Self {
+        let mut error = 0;
+        let mut options = super::ToxOptions::new(&mut error)
+            .unwrap_or_else(|| panic!("loopback options: {error}"));
+        assert_eq!(error, 0);
+        options.apply_network(
+            &super::NetworkSettings {
+                ipv6_enabled: false,
+                udp_enabled: true,
+                local_discovery_enabled: false,
+            },
+            false,
+        );
+        // SAFETY: ToxOptions owns the live allocation.
+        unsafe { super::tox_options_set_experimental_disable_dns(options.as_ptr(), true) };
+        // SAFETY: The pinned native system and default table use the C layouts above.
+        let mut system = Box::new(unsafe { tox_default_system() });
+        let (base_object, mut network_functions) = unsafe {
+            let base = system.network.as_ref().expect("default network");
+            let functions = base.functions.as_ref().expect("default network functions");
+            (base.object, Box::new(*functions))
+        };
+        assert!(network_functions.bind.is_some());
+        network_functions.bind = Some(loopback_bind);
+        let network = Box::new(Network {
+            functions: &*network_functions,
+            object: base_object,
+        });
+        system.network = &*network;
+        let testing = ToxOptionsTesting {
+            operating_system: &*system,
+        };
+        let mut testing_error = 0;
+        let binds_before = LOOPBACK_BINDS.load(Ordering::Relaxed);
+        // SAFETY: Options and the exact C layout are valid. The native
+        // instance drops before the boxed system and network tables it borrows.
+        let instance = std::ptr::NonNull::new(unsafe {
+            tox_new_testing(options.as_ptr(), &mut error, &testing, &mut testing_error)
+        })
+        .unwrap_or_else(|| panic!("loopback tox_new: {error}"));
+        let tox = super::ToxHandle {
+            instance,
+            tor_proxy_port: 0,
+            profile_path: PathBuf::new(),
+            cipher: None,
+        };
+        assert_eq!(error, 0);
+        assert_eq!(testing_error, 0);
+        assert!(
+            LOOPBACK_BINDS.load(Ordering::Relaxed) > binds_before,
+            "Tox socket must bind through the loopback-only adapter"
+        );
+        let mut public_key = [0; 32];
+        // SAFETY: Tox owns a live instance and writes a 32-byte key. The
+        // callbacks receive only our own Inbox during synchronous iteration.
         unsafe {
-            let mut error = 0;
-            let options = super::tox_options_new(&mut error);
-            assert!(
-                !options.is_null() && error == 0,
-                "loopback options: {error}"
-            );
-            super::tox_options_set_ipv6_enabled(options, false);
-            super::tox_options_set_udp_enabled(options, true);
-            super::tox_options_set_local_discovery_enabled(options, false);
-            super::tox_options_set_experimental_disable_dns(options, true);
-            let mut system = Box::new(tox_default_system());
-            assert!(!system.network.is_null());
-            let base = &*system.network;
-            assert!(!base.functions.is_null());
-            let mut network_functions = Box::new(*base.functions);
-            assert!(network_functions.bind.is_some());
-            network_functions.bind = Some(loopback_bind);
-            let network = Box::new(Network {
-                functions: &*network_functions,
-                object: base.object,
-            });
-            system.network = &*network;
-            let testing = ToxOptionsTesting {
-                operating_system: &*system,
-            };
-            let mut testing_error = 0;
-            let binds_before = LOOPBACK_BINDS.load(Ordering::Relaxed);
-            let tox = tox_new_testing(options, &mut error, &testing, &mut testing_error);
-            super::tox_options_free(options);
-            assert!(!tox.is_null() && error == 0, "loopback tox_new: {error}");
-            assert_eq!(testing_error, 0);
-            assert!(
-                LOOPBACK_BINDS.load(Ordering::Relaxed) > binds_before,
-                "Tox socket must bind through the loopback-only adapter"
-            );
-            let mut public_key = [0; 32];
-            tox_self_get_public_key(tox, public_key.as_mut_ptr());
-            super::tox_callback_friend_lossless_packet(tox, Some(packet_callback));
-            super::tox_callback_friend_message(tox, Some(message_callback));
-            super::tox_callback_friend_read_receipt(tox, Some(delivery_callback));
-            Self {
-                tox,
-                inbox: Inbox::default(),
-                public_key,
-                _system: system,
-                _network: network,
-                _network_functions: network_functions,
-            }
+            tox_self_get_public_key(instance.as_ptr(), public_key.as_mut_ptr());
+            super::tox_callback_friend_lossless_packet(instance.as_ptr(), Some(packet_callback));
+            super::tox_callback_friend_message(instance.as_ptr(), Some(message_callback));
+            super::tox_callback_friend_read_receipt(instance.as_ptr(), Some(delivery_callback));
+        }
+        Self {
+            tox,
+            inbox: Inbox::default(),
+            public_key,
+            _system: system,
+            _network: network,
+            _network_functions: network_functions,
         }
     }
 
@@ -240,75 +306,59 @@ impl Peer {
     }
 
     fn connect(&self, peer: &Self) {
-        unsafe {
-            let mut error = 0;
-            assert_eq!(
-                super::tox_friend_add_norequest(self.tox, peer.public_key.as_ptr(), &mut error),
-                0
-            );
-            assert_eq!(error, 0);
-            let mut dht_key = [0; 32];
-            tox_self_get_dht_id(peer.tox, dht_key.as_mut_ptr());
-            let port = tox_self_get_udp_port(peer.tox, &mut error);
-            assert_eq!(error, 0);
-            assert_ne!(port, 0);
-            // No public bootstrap, TCP relay, multicast discovery, or DNS.
-            assert!(super::tox_bootstrap(
-                self.tox,
-                b"127.0.0.1\0".as_ptr().cast(),
-                port,
-                dht_key.as_ptr(),
-                &mut error
-            ));
-            assert_eq!(error, 0);
-        }
+        let mut error = 0;
+        let tox = self.tox.native();
+        assert_eq!(tox.friend_add_norequest(&peer.public_key, &mut error), 0);
+        assert_eq!(error, 0);
+        let (dht_key, port) = peer.dht_endpoint();
+        // No public bootstrap, TCP relay, multicast discovery, or DNS.
+        assert!(tox.bootstrap(c"127.0.0.1", port, &dht_key, &mut error));
+        assert_eq!(error, 0);
+    }
+
+    fn dht_endpoint(&self) -> ([u8; 32], u16) {
+        let mut key = [0; 32];
+        let mut error = 0;
+        // SAFETY: The handle is live and the key and error output have the required sizes.
+        let port = unsafe {
+            tox_self_get_dht_id(self.tox.instance.as_ptr(), key.as_mut_ptr());
+            tox_self_get_udp_port(self.tox.instance.as_ptr(), &mut error)
+        };
+        assert_eq!(error, 0);
+        assert_ne!(port, 0);
+        (key, port)
     }
 
     fn connected(&self) -> bool {
         let mut error = 0;
-        unsafe {
-            super::tox_friend_get_connection_status(self.tox, 0, &mut error) != 0 && error == 0
-        }
+        self.tox.native().friend_connection_status(0, &mut error) != 0 && error == 0
     }
 
     fn iterate(&mut self) {
+        // SAFETY: The fixture callbacks consume this uniquely borrowed Inbox
+        // only during this synchronous iteration.
         unsafe {
-            super::tox_iterate(self.tox, (&mut self.inbox as *mut Inbox).cast());
+            super::tox_iterate(self.tox.instance.as_ptr(), std::ptr::from_mut(&mut self.inbox).cast());
         }
     }
 
-    fn packet(&self, bytes: &[u8]) {
+    fn packet(&self, bytes: &[u8]) -> bool {
         let mut error = 0;
-        assert!(
-            unsafe {
-                super::tox_friend_send_lossless_packet(
-                    self.tox,
-                    0,
-                    bytes.as_ptr(),
-                    bytes.len(),
-                    &mut error,
-                )
-            },
-            "lossless packet: {error}"
-        );
-        assert_eq!(error, 0);
+        let accepted = self.tox.native().send_lossless_packet(0, bytes, &mut error);
+        // SENDQ means the packet was not admitted. Pump both peers before
+        // retrying it; every other error remains an immediate test failure.
+        assert!(accepted || error == 7, "lossless packet: {error}");
+        if accepted {
+            assert_eq!(error, 0);
+        }
+        accepted
     }
 
     fn message(&self, text: &str) -> u32 {
         let mut error = 0;
-        let receipt = unsafe {
-            super::tox_friend_send_message(self.tox, 0, 0, text.as_ptr(), text.len(), &mut error)
-        };
+        let receipt = self.tox.native().send_message(0, 0, text.as_bytes(), &mut error);
         assert_eq!(error, 0, "normal message queue");
         receipt
-    }
-}
-
-impl Drop for Peer {
-    fn drop(&mut self) {
-        unsafe {
-            super::tox_kill(self.tox);
-        }
     }
 }
 
@@ -327,10 +377,21 @@ fn pump_until(a: &mut Peer, b: &mut Peer, label: &str, ready: impl Fn(&Peer, &Pe
 
 fn transmit_packet(from: &mut Peer, to: &mut Peer, bytes: &[u8]) -> Vec<u8> {
     assert!(to.inbox.packets.is_empty());
-    from.packet(bytes);
-    pump_until(from, to, "custom packet callback", |_, peer| {
-        !peer.inbox.packets.is_empty()
-    });
+    // Admission and callback delivery share the existing 20-second budget.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut admitted = false;
+    while !admitted || to.inbox.packets.is_empty() {
+        assert!(
+            Instant::now() < deadline,
+            "local transport deadline: custom packet callback"
+        );
+        if !admitted {
+            admitted = from.packet(bytes);
+        }
+        from.iterate();
+        to.iterate();
+        thread::sleep(Duration::from_millis(5));
+    }
     let (friend, received) = to.inbox.packets.remove(0);
     assert_eq!(friend, 0);
     assert_eq!(received, bytes);
@@ -376,11 +437,14 @@ impl Drop for Disposable {
     }
 }
 
+// Synthetic 32-byte contact identity shared by the managed-history fixtures.
+const MANAGED_FRIEND_KEY: &str = "AABBAABBAABBAABBAABBAABBAABBAABBAABBAABBAABBAABBAABBAABBAABBAABB";
+
 fn managed_message(id: &str, mine: bool, operation_id: Option<&str>) -> crate::ToxMessage {
     serde_json::from_value(serde_json::json!({
         "id": id,
         "friend_number": 7,
-        "friend_public_key": "AABB",
+        "friend_public_key": MANAGED_FRIEND_KEY,
         "text": "Synthetic durable message",
         "mine": mine,
         "timestamp": 100,
@@ -415,7 +479,7 @@ fn managed_reaction_commit_survives_without_a_shutdown_checkpoint() {
     };
     assert_eq!(
         engine
-            .apply_incoming_reaction(7, "AABB", &incoming, 101)
+            .apply_incoming_reaction(7, MANAGED_FRIEND_KEY, &incoming, 101)
             .unwrap(),
         ReactionAckStatus::Applied
     );
@@ -424,9 +488,9 @@ fn managed_reaction_commit_survives_without_a_shutdown_checkpoint() {
         true,
         &resident,
         7,
-        "AABB",
+        MANAGED_FRIEND_KEY,
         &id,
-        engine.reaction_view(7, "AABB", &id).unwrap(),
+        engine.reaction_view(7, MANAGED_FRIEND_KEY, &id).unwrap(),
     )
     .unwrap();
     crate::commit_chat_transaction(&history_path).unwrap();
@@ -446,18 +510,18 @@ fn managed_reaction_commit_survives_without_a_shutdown_checkpoint() {
     history::open_and_register(&history_path, Vec::new()).unwrap();
     assert_eq!(
         engine
-            .apply_incoming_reaction(7, "AABB", &incoming, 102)
+            .apply_incoming_reaction(7, MANAGED_FRIEND_KEY, &incoming, 102)
             .unwrap(),
         ReactionAckStatus::Duplicate
     );
-    let restored = history::find_message_registered(&history_path, 7, "AABB", &id)
+    let restored = history::find_message_registered(&history_path, 7, MANAGED_FRIEND_KEY, &id)
         .unwrap()
         .unwrap();
     let reactions = restored.reactions.unwrap();
     assert_eq!(reactions.peer, incoming.reactions);
     assert_eq!(reactions.peer_revision, 1);
     assert_eq!(
-        engine.reaction_view(7, "AABB", &id).unwrap().peer,
+        engine.reaction_view(7, MANAGED_FRIEND_KEY, &id).unwrap().peer,
         reactions.peer
     );
     history::unregister(&history_path);
@@ -484,7 +548,7 @@ fn managed_send_commit_preserves_operation_history_and_retry_queue_together() {
     engine
         .reserve_message_operation(
             7,
-            "AABB",
+            MANAGED_FRIEND_KEY,
             operation_id,
             &fingerprint,
             &id,
@@ -497,7 +561,7 @@ fn managed_send_commit_preserves_operation_history_and_retry_queue_together() {
     let pending = Arc::new(Mutex::new(vec![crate::PendingToxMessage {
         id: id.clone(),
         friend_number: 7,
-        friend_public_key: "AABB".to_string(),
+        friend_public_key: MANAGED_FRIEND_KEY.to_string(),
         text: row.text.clone(),
         timestamp: 100,
         next_offset: 0,
@@ -518,12 +582,12 @@ fn managed_send_commit_preserves_operation_history_and_retry_queue_together() {
     let engine = ChatProtocolEngine::new(&data).unwrap();
     history::open_and_register(&history_path, Vec::new()).unwrap();
     let operation = engine
-        .message_operation(7, "AABB", operation_id, &fingerprint)
+        .message_operation(7, MANAGED_FRIEND_KEY, operation_id, &fingerprint)
         .unwrap()
         .unwrap();
     assert_eq!(operation.message_id, id);
     assert_eq!(operation.delivery, "pending");
-    let restored = history::find_message_registered(&history_path, 7, "AABB", &id)
+    let restored = history::find_message_registered(&history_path, 7, MANAGED_FRIEND_KEY, &id)
         .unwrap()
         .unwrap();
     assert_eq!(restored.operation_id.as_deref(), Some(operation_id));
@@ -585,7 +649,7 @@ fn managed_large_history_reopens_with_bounded_windows_and_full_search() {
     let reopen_ms = reopen_started.elapsed().as_millis();
     let target_id = format!("{:032x}", 1_000);
     let window =
-        history::window_registered(&history_path, 7, "AABB", Some(0), None, Some(&target_id))
+        history::window_registered(&history_path, 7, MANAGED_FRIEND_KEY, Some(0), None, Some(&target_id))
             .unwrap();
     assert_eq!(window.total, 100_000);
     assert_eq!(window.target_index, Some(1_000));
@@ -594,7 +658,7 @@ fn managed_large_history_reopens_with_bounded_windows_and_full_search() {
     assert!(serde_json::to_vec(&window.messages).unwrap().len() < 2 * 1024 * 1024);
     let search_started = Instant::now();
     let matches =
-        history::search_registered(&history_path, 7, "AABB", "Needle", None, 100).unwrap();
+        history::search_registered(&history_path, 7, MANAGED_FRIEND_KEY, "Needle", None, 100).unwrap();
     let search_ms = search_started.elapsed().as_millis();
     assert!(matches.next_cursor.is_none());
     assert_eq!(

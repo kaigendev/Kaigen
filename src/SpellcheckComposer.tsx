@@ -1,5 +1,7 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import { platformCapabilities } from "@kaigen/platform";
+import { browserUsesControlEnter } from "./platform/browser-input";
 import { ComposerReplyPreview } from "./ChatMessageEnhancements";
 import {
   CHAT_FORMAT_KINDS,
@@ -59,6 +61,7 @@ export type MessageComposerProps = {
   onCancelReply?: () => void;
   onSend: (text: string, formatting?: readonly ChatFormattingSpan[], reply?: ChatQuote | null) => Promise<boolean>;
   onStageFiles: (files: Iterable<File>) => void;
+  onCaptureFileSelection?: () => (files: Iterable<File>) => void;
   onPasteFiles?: (files: Iterable<File>) => void;
   onPickFile?: () => void;
   fileActionsEnabled: boolean;
@@ -159,6 +162,7 @@ function MessageComposer({
   onCancelReply,
   onSend,
   onStageFiles,
+  onCaptureFileSelection,
   onPasteFiles,
   onPickFile,
   fileActionsEnabled,
@@ -173,6 +177,7 @@ function MessageComposer({
   const editorRef = useRef<HTMLDivElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const fileSelectionRef = useRef<((files: Iterable<File>) => void) | null>(null);
   const workerRef = useRef<Worker | null>(null);
   const workerReadyRef = useRef(false);
   const configIdRef = useRef(0);
@@ -553,8 +558,22 @@ function MessageComposer({
   return <footer className="composer" onClick={() => setMenu(null)}>
     {reply && <ComposerReplyPreview quote={reply} onCancel={onCancelReply} />}
     <div className="compose-row">
-      <button className="attach" disabled={!fileActionsEnabled} onClick={() => onPickFile ? onPickFile() : fileInputRef.current?.click()} title={t("Прикрепить файл")} aria-label={t("Прикрепить файл")}><span className="paperclip-icon" aria-hidden="true" /></button>
-      <input ref={fileInputRef} className="file-picker" type="file" multiple disabled={!fileActionsEnabled} onChange={(event) => { if (event.target.files) onStageFiles(event.target.files); event.currentTarget.value = ""; }} />
+      <button className="attach" disabled={!fileActionsEnabled} onClick={() => {
+        if (onPickFile) { onPickFile(); return; }
+        const stage = onCaptureFileSelection?.() ?? onStageFiles;
+        const owner = ownerKey;
+        const chat = chatId;
+        fileSelectionRef.current = (files) => {
+          if (mountedRef.current && activeOwnerRef.current === owner && activeChatRef.current === chat) stage(files);
+        };
+        fileInputRef.current?.click();
+      }} title={t("Прикрепить файл")} aria-label={t("Прикрепить файл")}><span className="paperclip-icon" aria-hidden="true" /></button>
+      <input ref={fileInputRef} className="file-picker" type="file" multiple disabled={!fileActionsEnabled} onChange={(event) => {
+        const stage = fileSelectionRef.current;
+        fileSelectionRef.current = null;
+        if (event.target.files) stage?.(event.target.files);
+        event.currentTarget.value = "";
+      }} />
       <div className="spellcheck-editor">
         <div
           key={JSON.stringify([ownerKey, chatId])}
@@ -565,6 +584,7 @@ function MessageComposer({
           translate="no"
           role="textbox"
           aria-multiline="true"
+          enterKeyHint={sendOnEnter ? "send" : "enter"}
           aria-label={t("Сообщение…")}
           data-placeholder={t("Сообщение…")}
           data-empty={value.length === 0}
@@ -628,9 +648,10 @@ function MessageComposer({
             const sendWithCurrentKey = shouldSubmitComposerKey({
               key: event.key,
               shiftKey: event.shiftKey,
+              ctrlKey: event.ctrlKey,
               isComposing: composingRef.current || event.nativeEvent.isComposing,
               keyCode: event.keyCode,
-            }, sendOnEnter);
+            }, sendOnEnter, browserUsesControlEnter(platformCapabilities.nativeFilesystem));
             if (sendWithCurrentKey) {
               event.preventDefault();
               void submit();

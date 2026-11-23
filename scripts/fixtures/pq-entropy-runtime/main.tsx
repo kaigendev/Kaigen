@@ -14,7 +14,6 @@ declare global {
     __PQ_ENTROPY_VISIBLE_AT__?: number;
     __PQ_ENTROPY_UNMOUNT__?: () => void;
     __PQ_CONTROL_COMMANDS__?: string[];
-    __PQ_CONTROL_LEGACY__?: boolean[];
   }
 }
 
@@ -36,9 +35,7 @@ function Fixture() {
     state: query.get("state") ?? "error",
     auto_pending: decision !== "none",
     identity_waiting: query.get("identityWaiting") === "true",
-    protocol_version: Number(query.get("protocolVersion") ?? "2"),
     manual_waiting_for_capability: query.get("manualWaiting") === "true",
-    legacy_available: query.get("legacyAvailable") === "true",
     error: decision === "peer" ? "PQ_PEER_CANCELLED_MESSAGES_WAIT_FOR_MANUAL_PQ"
       : decision === "local" ? "PQ_NEGOTIATION_CANCELLED_MESSAGES_WAIT_FOR_MANUAL_PQ" : null,
   };
@@ -46,7 +43,6 @@ function Fixture() {
   const scrollRef = useRef<HTMLDivElement>(null);
   useLayoutEffect(() => {
     window.__PQ_CONTROL_COMMANDS__ = [];
-    window.__PQ_CONTROL_LEGACY__ = [];
     if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     const resize = new ResizeObserver(() => {
       if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
@@ -80,7 +76,7 @@ function Fixture() {
           <span className="avatar blue">К</span>
           <span className="header-copy"><strong>Контакт</strong><small>защищённый чат E2EE</small></span>
           {control && <div className="header-actions"><span className="more-actions"><div className="contact-menu" data-pq-control>
-            <PqSessionControl status={controlStatus} onCommand={(command, allowLegacy) => { window.__PQ_CONTROL_COMMANDS__!.push(command); window.__PQ_CONTROL_LEGACY__!.push(allowLegacy === true); }} />
+            <PqSessionControl status={controlStatus} onCommand={(command) => { window.__PQ_CONTROL_COMMANDS__!.push(command); }} />
           </div></span></div>}
         </header>
         <div className="message-scroll" ref={scrollRef}>

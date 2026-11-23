@@ -1,5 +1,3 @@
-export const WEB_API_VERSION = "v1" as const;
-
 export type BuildIdentityResponse = {
   status: "ok";
   buildId: string;
@@ -44,6 +42,12 @@ export type CreateWorkspaceResponse = {
 };
 
 export type SessionResponse = {
+  notificationHandoff?: {
+    routingHint: string;
+    eventToken: string;
+    profileId: string;
+    target: string;
+  } | null;
   csrfToken: string;
   deviceId: string;
   workspaceSelector?: string;

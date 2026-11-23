@@ -55,9 +55,14 @@ export function transferFailureCode(error: unknown) {
   return String(error).replace(/^Error:\s*/u, "").trim();
 }
 
+export function isRetiredContactTransferFailure(code: string) {
+  return code === "CHAT_CONTACT_INCARNATION_CHANGED" || code === "CHAT_CONTACT_IDENTITY_CHANGED"
+    || code === "TRANSFER_CONTACT_IDENTITY_CHANGED";
+}
+
 export function isRetryableTransferFailure(error: unknown) {
   const code = transferFailureCode(error);
-  if (NON_RETRYABLE_TRANSFER_FAILURES.has(code)) return false;
+  if (NON_RETRYABLE_TRANSFER_FAILURES.has(code) || isRetiredContactTransferFailure(code)) return false;
   if (RETRYABLE_TRANSFER_FAILURES.has(code)) return true;
   if (/^(?:HTTP|TRANSFER_HTTP)_(?:408|425|429|5\d\d)$/u.test(code)) return true;
   if (/failed to fetch|networkerror|network request failed|load failed/iu.test(code)) return true;

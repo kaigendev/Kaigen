@@ -30,22 +30,6 @@ const contactSentinel = "Контакт/Настройки";
 const messageSentinel = "Настройки/Контакт: сообщение";
 const pathSentinel = "C:\\Настройки\\Контакт\\Файл.txt";
 
-const profileEventEn = localization.formatProfileEventNotice(profileSentinel, 22, "en");
-equal(profileEventEn.title, `${profileSentinel}: new event`, "profile-event title localizes only the system text");
-equal(profileEventEn.body, "22 new messages or requests", "profile-event count is localized before native notification delivery");
-equal(localization.formatProfileEventNotice(profileSentinel, 21, "ru").body, "21 новое сообщение или запрос", "profile-event Russian singular handles 21");
-
-const requestNotice = localization.formatChatRequestNotice(profileSentinel, messageSentinel, "en");
-equal(requestNotice.title, `${profileSentinel}: new chat request`, "chat-request title is localized before native notification delivery");
-equal(requestNotice.body, messageSentinel, "chat-request body remains byte-for-byte user text");
-
-const messageNotice = localization.formatChatMessageNotice(profileSentinel, contactSentinel, messageSentinel, "en");
-equal(messageNotice.title, `${profileSentinel}: ${contactSentinel}`, "message notice preserves profile and contact names");
-equal(messageNotice.body, messageSentinel, "message notice preserves remote message text");
-equal(localization.formatChatMessageNotice(profileSentinel, "", messageSentinel, "en").title, `${profileSentinel}: new message`, "message notice localizes an empty contact fallback");
-equal(localization.formatChatMessageNotice(profileSentinel, contactSentinel, "", "en").body, "Attachment", "message notice localizes an empty content fallback");
-equal(localization.formatChatMessageNotice(profileSentinel, contactSentinel, pathSentinel, "en").body, pathSentinel, "message notice preserves file and path text");
-
 const unreadCases = [
   [1, "1 новое непрочитанное сообщение", "1 new unread message"],
   [2, "2 новых непрочитанных сообщения", "2 new unread messages"],
@@ -145,6 +129,7 @@ const stableErrors = [
   ["PROFILE_PASSWORD_REQUIRED", "Требуется пароль профиля.", "The profile password is required."],
   ["QTOX_PROFILE_ALREADY_IMPORTED", "Этот профиль qTox уже импортирован.", "This qTox profile has already been imported."],
   ["QTOX_PROFILE_NOT_FOUND", "Профиль qTox не найден.", "The qTox profile was not found."],
+  ["TOX_PROFILE_IDENTITY_ALREADY_LOADED", "Профиль с этим Tox ID уже загружен. Отключите исходный профиль и повторите действие.", "A profile with this Tox ID is already loaded. Disable the original profile and try again."],
   ["UNSUPPORTED_LANGUAGE", "Выбранный язык не поддерживается.", "The selected language is not supported."],
   ["FILE_RECEIVE_DENIED", "Приём файлов запрещён настройками.", "File reception is disabled in settings."],
   ["CHAT_REACTION_OWN_MESSAGE", "Реакции доступны только для входящих сообщений.", "Reactions are available only for incoming messages."],
@@ -470,6 +455,6 @@ equal(changingLabels.at(-1).rawText, "Settings", "removing a pending sibling bet
 equal(removedLabel.rawText, "Настройки", "a detached menu subtree is never translated after removal");
 interruptedBridge.stop();
 
-const expectedAssertions = skipQtox ? 264 : 271;
+const expectedAssertions = skipQtox ? 256 : 263;
 assert.equal(assertions, expectedAssertions, "update the declared assertion count when localization coverage changes");
 console.log(`localization rules: ${assertions} assertions passed`);

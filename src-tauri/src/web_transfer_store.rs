@@ -23,11 +23,26 @@ pub struct StoreSpec {
     pub profile_id: String,
     pub message_id: String,
     pub friend_public_key: String,
+    #[serde(default)]
+    pub contact_incarnation: u64,
     pub direction: StoreDirection,
     pub name: String,
     pub mime: String,
     pub size_bytes: u64,
     pub expected_sha256: Option<[u8; 32]>,
+}
+
+impl StoreSpec {
+    /// The durable retirement fence remains bound after payload metadata is erased.
+    pub fn same_identity(&self, other: &Self) -> bool {
+        self.object_id == other.object_id
+            && self.operation_id == other.operation_id
+            && self.profile_id == other.profile_id
+            && self.message_id == other.message_id
+            && self.friend_public_key.eq_ignore_ascii_case(&other.friend_public_key)
+            && self.contact_incarnation == other.contact_incarnation
+            && self.direction == other.direction
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -45,9 +60,8 @@ pub struct StoreObjectStatus {
     pub durable_bytes: u64,
     pub phase: StorePhase,
     pub committed_sha256: Option<[u8; 32]>,
-    /// Absent only in legacy objects. New outgoing objects remain false until
-    /// the native peer's final acknowledgement has crossed the durable index
-    /// boundary; payload commitment alone does not prove delivery.
+    /// Outgoing objects record false until the native peer's final acknowledgement
+    /// is written to the durable index. Incoming objects omit this field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub native_delivery_confirmed: Option<bool>,
     /// A browser has durably retained and verified the complete incoming file.
@@ -55,12 +69,24 @@ pub struct StoreObjectStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub browser_download_confirmed: Option<bool>,
     /// The successful endpoint receipt survives deletion of the server payload.
-    /// False is omitted so older manifests retain their quota accounting.
+    /// Omission means the payload is still reserved in the transfer quota.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub payload_released: bool,
 }
 
 impl StoreObjectStatus {
+    /// A cancelled pending contact keeps only replay-prevention identities.
+    pub fn is_identity_tombstone(&self) -> bool {
+        self.phase == StorePhase::Removed
+            && self.spec.name.is_empty()
+            && self.spec.mime.is_empty()
+            && self.spec.size_bytes == 0
+            && self.spec.expected_sha256.is_none()
+            && self.durable_bytes == 0
+            && self.committed_sha256.is_none()
+            && !self.payload_released
+    }
+
     pub fn delivery_confirmed(&self) -> bool {
         self.phase == StorePhase::Committed
             && match self.spec.direction {
@@ -128,6 +154,11 @@ pub enum StoreOperation {
     Remove {
         object_id: String,
     },
+    /// Removes payload and its descriptive metadata, retaining only the
+    /// object/profile/recipient/operation identities needed to reject replays.
+    Purge {
+        spec: StoreSpec,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -163,7 +194,34 @@ impl StoreError {
     }
 }
 
+/// Immutable for one store lifetime. Endpoint receipts are not deletion rights
+/// in a store that retains source bytes for other connected mirrors.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum StoreRetention {
+    #[default]
+    EndpointReceipt,
+    UntilRemoval,
+}
+
+impl StoreRetention {
+    pub fn payload_available(self, status: &StoreObjectStatus, verified: bool) -> bool {
+        match self {
+            Self::EndpointReceipt => status.payload_available(),
+            Self::UntilRemoval => {
+                verified && status.phase == StorePhase::Committed && !status.payload_released
+            }
+        }
+    }
+}
+
 pub trait WebTransferStore: Send + Sync {
+    fn retention(&self) -> StoreRetention {
+        StoreRetention::EndpointReceipt
+    }
+    /// Published memory only; retained mode also requires physical verification.
+    fn payload_available(&self, status: &StoreObjectStatus) -> bool {
+        status.payload_available()
+    }
     /// False until recovery has published the complete operation-id index.
     fn is_ready(&self) -> bool;
     /// Replaying the same operation is idempotent, including while pending.
@@ -171,6 +229,14 @@ pub trait WebTransferStore: Send + Sync {
     fn try_submit(&self, operation: StoreOperation) -> Result<StoreTicket, StoreError>;
     /// Non-destructive result lookup; repeated HTTP replies may read it again.
     fn try_result(&self, ticket: StoreTicket) -> Option<Result<StoreReply, StoreError>>;
-    /// Workspace-wide, published memory only. Core resolves/filter profiles.
-    fn snapshot(&self) -> Vec<StoreObjectStatus>;
+    /// Workspace-wide published memory. Cleanup must distinguish contention
+    /// from an empty store before deciding that there is nothing to remove.
+    fn try_snapshot(&self) -> Result<Vec<StoreObjectStatus>, StoreError>;
+    fn snapshot(&self) -> Vec<StoreObjectStatus> {
+        self.try_snapshot().unwrap_or_default()
+    }
+    /// Captured identities whose admitted purge has not finished physical cleanup.
+    fn pending_purges(&self) -> Result<Vec<StoreSpec>, StoreError> {
+        Ok(Vec::new())
+    }
 }

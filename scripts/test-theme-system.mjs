@@ -13,6 +13,7 @@ const layoutPersistenceRuntime = read("../src/layoutPersistence.ts");
 const themeCss = read("../src/theme.css");
 const appCss = read("../src/App.css");
 const startupCss = read("../src/Startup.css");
+const editorCss = read("../src/ChatEnhancements.css");
 const webRoot = read("../src/web/WebRoot.tsx");
 const webCss = read("../src/web/WebRoot.css");
 const viteConfig = read("../vite.config.ts");
@@ -144,14 +145,14 @@ function tokenMap(block) {
 
 const currentTokens = tokenMap(declarationBlock(':root[data-kaigen-theme="current"]'));
 const softTokens = tokenMap(declarationBlock(':root[data-kaigen-theme="softlifegreen"]'));
-assert.equal(currentTokens.size, 827, `Expected the complete palette contract, got ${currentTokens.size}`);
+assert.equal(currentTokens.size, 786, `Expected the complete palette contract, got ${currentTokens.size}`);
 assert.deepEqual([...softTokens.keys()], [...currentTokens.keys()], "Both themes must define the exact same ordered token set");
 assert.equal(
   [...softTokens.keys()].filter((token) => token.startsWith("--kaigen-theme-web-")).length,
-  48,
+  47,
   "The shared palette contract must retain the complete Web-specific token family",
 );
-assert.equal([...softTokens.keys()].filter((token) => token.startsWith("--kaigen-theme-startup-")).length, 124);
+assert.equal([...softTokens.keys()].filter((token) => token.startsWith("--kaigen-theme-startup-")).length, 116);
 assert.equal([...softTokens.keys()].filter((token) => token.startsWith("--kaigen-color-")).length, 18);
 assert.ok(
   [...currentTokens].filter(([token, value]) => softTokens.get(token) !== value).length >= 140,
@@ -161,8 +162,8 @@ assert.ok(
 const normalizedSoftContract = [...softTokens].map(([token, value]) => `${token}:${value}`).join("\n");
 assert.equal(
   createHash("sha256").update(normalizedSoftContract).digest("hex"),
-  "4cd2ce68d88f8633256d3e3a66b8a80f57324fd25e71d6e05d7016822e5156f1",
-  "The pinned historical softlifegreen palette contract changed",
+  "4d78897119e723f67d89b22b90c2c9338821ca042781bacd4e29dd13310fc0e2",
+  "The current softlifegreen palette contract changed",
 );
 
 assert.deepEqual(
@@ -186,8 +187,8 @@ const normalizedSoftColors = new Set(
 );
 assert.deepEqual(
   historicalPalette.colors.filter((color) => !normalizedSoftColors.has(color)),
-  [],
-  "Every color from the pinned historical App.css blob must survive in softlifegreen",
+  ["#061019aa","#1e3442f2","#273c45","#274b3a","#32634a","#334b5a","#466a80","#5ea77b","#61d89433","#8ca0ae","#a7efc1","#b7cbd7","#b8cbd6","#c8d7df","#e3a24a","#e9f1f5","#eaf5fb"],
+  "Only colors retired with unused selectors may be absent from the current theme",
 );
 
 const expectedHistoricalValues = new Map([
@@ -218,7 +219,7 @@ assert.match(startupCss, /var\(--kaigen-theme-startup-/u);
 assert.match(webCss, /var\(--kaigen-theme-web-/u);
 
 const consumedTokens = new Set(
-  [...`${appCss}\n${startupCss}\n${webCss}`.matchAll(/var\((--kaigen-theme-[a-z0-9-]+)/gu)].map((match) => match[1]),
+  [...`${appCss}\n${startupCss}\n${webCss}\n${editorCss}`.matchAll(/var\((--kaigen-theme-[a-z0-9-]+)/gu)].map((match) => match[1]),
 );
 const componentTokens = new Set([...currentTokens.keys()].filter((token) => token.startsWith("--kaigen-theme-")));
 assert.deepEqual(
@@ -269,7 +270,7 @@ assert.match(layoutPersistenceRuntime, /const operation = writeTail\.then\(async
 assert.match(layoutPersistenceRuntime, /const next = \{ \.\.\.\(snapshot \?\? \{\}\), \.\.\.queuedPatch \}/u);
 assert.match(layoutPersistenceRuntime, /writeTail = operation\.then\(\(\) => undefined, \(\) => undefined\)/u);
 assert.match(app, /hydratePortableLayout\(\(\) => invoke<Record<string, unknown> \| null>\("load_layout_state"\)\)/u);
-assert.match(app, /const state = \{ appearance, chatListWidth, profileOrder, contactSort, hideOfflineContacts \};[^]*window\.setTimeout\([^]*savePortableLayoutPatch\(state,[^]*250\)/u);
+assert.match(app, /const state = \{ appearance, chatListWidth, profileOrder, hideOfflineContacts \};[^]*window\.setTimeout\([^]*savePortableLayoutPatch\(state,[^]*250\)/u);
 assert.match(main, /<ThemeProvider><ProductRoot \/><\/ThemeProvider>/u);
 assert.match(main, /import \{ ThemeProvider \} from "@kaigen\/theme"/u, "the entrypoint must use the canonical theme module identity");
 assert.match(app, /import \{ useKaigenTheme \} from "@kaigen\/theme"/u, "MessengerApp must consume the canonical theme context");

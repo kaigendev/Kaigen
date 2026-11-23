@@ -46,17 +46,18 @@ assert.match(installerSource, /CapabilityBoundingSet=CAP_IPC_LOCK/);
 assert.match(installerSource, /proxy_set_header Upgrade/);
 const proxiedLocations = [...installerSource.matchAll(/^    location [^\n]+ \{\r?\n[^]*?^    \}/gmu)]
   .map((match) => match[0]).filter((block) => block.includes('proxy_pass'));
-assert.equal(proxiedLocations.length, 3, 'install manifest, API and WebSocket routes proxy to the backend');
+assert.equal(proxiedLocations.length, 4, 'install manifest, workspace-scoped API, API and WebSocket routes proxy to the backend');
 assert.ok(proxiedLocations.some((block) => block.includes('location ~ "^/api/v1/install-manifest/')));
+assert.ok(proxiedLocations.some((block) => block.startsWith('    location ~ "^/(?:space/|w/)?[A-Za-z0-9_-]{40,80}/api(?:/|$)" {')));
 assert.ok(proxiedLocations.some((block) => block.startsWith('    location /api/ {')));
 assert.ok(proxiedLocations.some((block) => block.startsWith('    location /ws {')));
 for (const block of proxiedLocations) {
   assert.equal([...block.matchAll(/proxy_set_header X-Real-IP \\\$remote_addr;/gu)].length, 1,
     'every backend proxy location binds X-Real-IP to the trusted Nginx remote address');
 }
-assert.equal([...installerSource.matchAll(/proxy_set_header X-Real-IP \\\$remote_addr;/gu)].length, 3);
+assert.equal([...installerSource.matchAll(/proxy_set_header X-Real-IP \\\$remote_addr;/gu)].length, 4);
 assert.match(installerSource, /systemctl enable --now "kaigen-webd@\$slot\.service"/u);
-assert.match(installerSource, /systemctl disable --now "kaigen-webd@\$old_slot\.service"/u);
+assert.match(installerSource, /systemctl disable "kaigen-webd@\$old_slot\.service"/u);
 assert.doesNotMatch(installerSource, /systemctl restart "kaigen-webd@\$slot\.service"/u);
 const activateReleaseSource = installerSource.match(/^activate_release\(\) \{[\s\S]*?^\}/mu)?.[0] ?? '';
 const activationOrder = [
@@ -67,7 +68,13 @@ const activationOrder = [
 ].map((needle) => activateReleaseSource.indexOf(needle));
 assert.ok(activationOrder.every((position) => position >= 0), 'activation contains prepare, explicit start, health, and route commit phases');
 assert.deepEqual([...activationOrder].sort((left, right) => left - right), activationOrder, 'inactive explicit release starts and passes health checks before route commit');
-assert.ok(activateReleaseSource.indexOf('commit_release_routes ') < activateReleaseSource.indexOf('drain_deadline'), 'route pointer, upstream, and state commit before old-slot drain');
+const handoffSource = installerSource.match(/^stop_backend_for_handoff\(\) \{[\s\S]*?^\}/mu)?.[0] ?? '';
+assert.ok(activateReleaseSource.indexOf('stop_backend_for_handoff "$old_slot"') >= 0
+  && activateReleaseSource.indexOf('stop_backend_for_handoff "$old_slot"') < activateReleaseSource.indexOf('start_candidate_backend ')
+  && handoffSource.includes('systemctl stop "kaigen-webd@$slot.service"')
+  && handoffSource.includes('backend_is_quiescent "$slot" true || fail')
+  && activateReleaseSource.indexOf('commit_release_routes ') < activateReleaseSource.indexOf('systemctl disable "kaigen-webd@$old_slot.service"'),
+  'old backend must stop with verified clean storage handoff before successor start, then route commit precedes boot-entry disable');
 assert.match(installerSource, /readonly ROUTE_SNAPSHOTS_DIR="\$ETC_DIR\/installer-route-snapshots"/u);
 assert.match(installerSource, /chown root:root -- "\$DATA_DIR"/u);
 assert.doesNotMatch(installerSource, /chown -R [^\n]*\$DATA_DIR/u);
@@ -81,7 +88,7 @@ assert.match(installerSource, /add_header Cross-Origin-Opener-Policy "same-origi
 assert.match(installerSource, /add_header X-Content-Type-Options "nosniff" always;/u);
 assert.match(installerSource, /http2 on;/);
 assert.doesNotMatch(installerSource, /listen .*http2/);
-assert.match(installerSource, /drain_deadline/);
+assert.match(installerSource, /Previous backend has no verified clean exit; refusing storage handoff\./u);
 assert.match(installerSource, /ROLLBACK_PASS/);
 assert.match(installerSource, /\/healthz/);
 assert.match(installerSource, /\/readyz/);
@@ -244,7 +251,7 @@ try {
   assert.match(personalNginx, /Cross-Origin-Resource-Policy "same-origin" always;/u);
   assert.match(personalNginx, /location = \/api\/v1\/build-identity/u);
   assert.match(personalNginx, /UPGRADE_REQUIRED/u);
-  assert.equal((personalNginx.match(/proxy_set_header X-Real-IP \$remote_addr;/gu) ?? []).length, 3);
+  assert.equal((personalNginx.match(/proxy_set_header X-Real-IP \$remote_addr;/gu) ?? []).length, 4);
   assert.match(personalSlot, /LD_LIBRARY_PATH=\/opt\/kaigen-webd\/releases\/installer-test-r1\/lib\/Kaigen/);
   assert.doesNotMatch(personalSlot, /QUOTA|MAX_INSTANCES/);
   assert.equal(existsSync(path.join(personalRoot, 'etc', 'systemd', 'system', 'kaigen-webd@.service.d', 'limits.conf')), false);
@@ -367,6 +374,55 @@ try {
   }
   await assertRouteCompatibility(legacyRoot, 'installer-test-legacy', 'legacy-v0');
 
+  const certbotRoot = await createRoot('certbot-webroot');
+  const lineage = '/etc/letsencrypt/live/kaigen.test-0001';
+  const certbotEnv = {
+    ...installEnvironment(certbotRoot, 'service'),
+    KAIGEN_INSTALL_TLS_CERT: `${lineage}/fullchain.pem`,
+    KAIGEN_INSTALL_TLS_KEY: `${lineage}/privkey.pem`,
+  };
+  const certbotDir = path.join(certbotRoot, 'etc', 'letsencrypt');
+  const liveDir = path.join(certbotDir, 'live', 'kaigen.test-0001');
+  await mkdir(liveDir, { recursive: true });
+  await mkdir(path.join(certbotDir, 'renewal'));
+  await writeFile(path.join(liveDir, 'fullchain.pem'), 'test-certificate\n');
+  await writeFile(path.join(liveDir, 'privkey.pem'), 'test-key\n');
+  const certbotSite = path.join(certbotRoot, 'etc', 'nginx', 'sites-available', 'kaigen-web');
+  const renewal = path.join(certbotDir, 'renewal', 'kaigen.test-0001.conf');
+  const renewalConfig = `fullchain = ${certbotEnv.KAIGEN_INSTALL_TLS_CERT}
+privkey = ${certbotEnv.KAIGEN_INSTALL_TLS_KEY}
+[renewalparams]
+authenticator = webroot
+webroot_path = /var/lib/letsencrypt,
+`;
+  assert.match(runBash([
+    posixPath(installer), 'install', '--bundle', posixPath(firstBundle), '--non-interactive',
+  ], certbotEnv), /INSTALL_PASS mode=service/u);
+  const siteBeforeRenewal = await readFile(certbotSite, 'utf8');
+  assert.match(siteBeforeRenewal, /^    return 301 https:\/\/\$host\$request_uri;\n\}/mu);
+  assert.doesNotMatch(siteBeforeRenewal, /\.well-known\/acme-challenge/u);
+  await writeFile(renewal, renewalConfig);
+  const updateCertbotFixture = [posixPath(installer), 'update', '--bundle', posixPath(secondBundle), '--non-interactive'];
+  assert.match(runBash(updateCertbotFixture, certbotEnv), /UPDATE_PASS release=installer-test-r2 slot=b/u);
+  const updatedSite = await readFile(certbotSite, 'utf8');
+  const [httpSite, httpsSite] = updatedSite.split('\n\nserver {');
+  assert.match(httpSite, /location \^~ \/\.well-known\/acme-challenge\/ \{\n        root \/var\/lib\/letsencrypt;/u);
+  assert.match(httpSite, /try_files \$uri =404;/u);
+  assert.match(httpSite, /location \/ \{\n        return 301 https:\/\/\$host\$request_uri;/u);
+  assert.doesNotMatch(httpsSite, /\.well-known\/acme-challenge/u);
+
+  const certbotSnapshot = path.join(certbotRoot, 'etc', 'kaigen-webd', 'installer-route-snapshots', 'installer-test-r1');
+  const snapshotHashes = await readFile(path.join(certbotSnapshot, 'snapshot.sha256'), 'utf8');
+  const mappedRenewalConfig = `${renewalConfig}[[webroot_map]]\nkaigen.test = /srv/kaigen-acme\n`;
+  await writeFile(renewal, mappedRenewalConfig);
+  assert.match(runBash([posixPath(installer), 'rollback', '--non-interactive'], certbotEnv), /ROLLBACK_PASS release=installer-test-r1 slot=a/u);
+  assert.equal(await readFile(certbotSite, 'utf8'), updatedSite.replace('root /var/lib/letsencrypt;', 'root /srv/kaigen-acme;'));
+  assert.match(runBash(updateCertbotFixture, certbotEnv), /UPDATE_PASS release=installer-test-r2 slot=b/u);
+  assert.equal(await readFile(certbotSite, 'utf8'), updatedSite.replace('root /var/lib/letsencrypt;', 'root /srv/kaigen-acme;'));
+  assert.equal(await readFile(path.join(certbotSnapshot, 'nginx-site'), 'utf8'), siteBeforeRenewal);
+  assert.equal(await readFile(path.join(certbotSnapshot, 'snapshot.sha256'), 'utf8'), snapshotHashes);
+  assert.equal(await readFile(renewal, 'utf8'), mappedRenewalConfig);
+
   if (process.platform !== 'win32') {
     const unsafeModeRoot = await createRoot('unsafe-state-mode-root');
     const unsafeModeEnv = installEnvironment(unsafeModeRoot, 'personal');
@@ -420,7 +476,7 @@ try {
     posixPath(installer), 'update', '--bundle', posixPath(secondBundle), '--non-interactive',
   ], routeBindingEnv), /Installer state does not match the active upstream port/u);
 
-  process.stdout.write(`WEB_INSTALLER_TEST_PASS modes=2 update=true rollback=true legacyMigration=true atomicRouteState=true hostileState=true hostileSymlink=${symlinkCoverage} routeBinding=true failureOrder=true safeUninstall=true\n`);
+  process.stdout.write(`WEB_INSTALLER_TEST_PASS modes=2 update=true rollback=true legacyMigration=true atomicRouteState=true hostileState=true hostileSymlink=${symlinkCoverage} routeBinding=true failureOrder=true safeUninstall=true certbotWebroot=true\n`);
 } finally {
   await rm(temp, { recursive: true, force: true });
 }

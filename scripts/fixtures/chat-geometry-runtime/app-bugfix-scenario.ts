@@ -196,7 +196,41 @@ export async function runActualAppBugfixScenario() {
     check(!document.querySelector(".chat-return-anchor"), "ordinary end navigation must not recreate the reading-position return marker");
 
     const incoming = geometryAppendUnreadMessage(1, Array.from({ length: 45 }, (_, index) => `incoming line ${index}`).join("\n"));
-    await waitFor(() => row(incoming) && document.querySelector(".jump-latest.has-new") ? true : undefined, "long unread arrival");
+    try {
+      await waitFor(() => row(incoming) && document.querySelector(".jump-latest.has-new") ? true : undefined, "long unread arrival");
+    } catch (error) {
+      let evidence: Record<string, unknown>;
+      try {
+        const incomingRow = row(incoming), container = scroller();
+        const state = unreadVisibilityEvidence(1), snapshot = geometrySnapshotEvidence(1);
+        const bounds = (element: HTMLElement | null) => {
+          if (!element) return null;
+          const box = element.getBoundingClientRect();
+          return { top: box.top, bottom: box.bottom, height: box.height, width: box.width };
+        };
+        const selected = [...document.querySelectorAll<HTMLButtonElement>(".chat-item.selected")];
+        evidence = {
+          incomingId: incoming, incomingRowPresent: !!incomingRow,
+          unreadCount: state.unreadCount, incomingStillUnseen: state.unseenMessageIds.includes(incoming),
+          ackCount: state.acknowledgements.length,
+          incomingAcknowledged: state.acknowledgements.some((call) => call.messageIds.includes(incoming)),
+          ackOwnersMatchFixture: state.acknowledgements.every((call) => call.profileId === "qa-profile-a"
+            && call.friendNumber === 1 && call.expectedPublicKey === "B".repeat(64)),
+          selectedCount: selected.length, selectedCarol: selected.some((item) => item.textContent?.includes("QA Carol")),
+          visibility: document.visibilityState, focused: document.hasFocus(),
+          scroll: container ? { top: container.scrollTop, height: container.scrollHeight, clientHeight: container.clientHeight,
+            distance: container.scrollHeight - container.scrollTop - container.clientHeight } : null,
+          viewportBounds: bounds(container), incomingBounds: bounds(incomingRow),
+          unreadJumpPresent: !!document.querySelector(".jump-latest.has-new"), ordinaryJumpPresent: !!document.querySelector(".jump-latest:not(.has-new)"),
+          snapshot: snapshot ? { revision: snapshot.revision, total: snapshot.total, windowStart: snapshot.windowStart,
+            latestMatchesIncoming: snapshot.latestMessageId === incoming, lastMatchesIncoming: snapshot.lastMessageId === incoming,
+            returnedMessages: snapshot.returnedMessages } : null,
+        };
+      } catch (diagnosticError) {
+        evidence = { diagnosticError: diagnosticError instanceof Error ? diagnosticError.name : "unknown" };
+      }
+      throw new Error(String(error) + "\nLONG_UNREAD_FIXTURE_FAILURE " + JSON.stringify(evidence), { cause: error });
+    }
     input(field(), "draft line\n".repeat(7));
     await frame(); await frame();
     const jump = document.querySelector<HTMLElement>(".jump-latest.has-new")!.getBoundingClientRect();

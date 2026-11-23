@@ -6,8 +6,9 @@
 //! system CSPRNG remains the complete entropy source in every case.
 
 use sha2::{Digest, Sha256};
-use std::sync::atomic::{compiler_fence, Ordering};
 use std::sync::OnceLock;
+
+pub(super) use crate::wipe_secret_bytes as wipe;
 
 const X25519_BYTES: usize = 32;
 const MLKEM_KEYPAIR_COINS_BYTES: usize = 64;
@@ -15,18 +16,6 @@ const OPTIONAL_NOISE_DIGEST_BYTES: usize = 32;
 const MAX_DRBG_BYTES_PER_REQUEST: usize = 1 << 16;
 const MAX_DRBG_RESEED_INTERVAL: u64 = 1 << 48;
 const IDENTITY_PERSONALIZATION: &[u8] = b"Kaigen PQ identity ML-KEM-768 v2\0";
-
-/// Best-effort erasure for short-lived secret buffers.
-///
-/// Volatile stores plus the compiler fence keep the writes observable to the
-/// optimizer. Callers must still avoid cloning secret material unnecessarily.
-#[inline(never)]
-pub(super) fn wipe(bytes: &mut [u8]) {
-    for byte in bytes {
-        unsafe { std::ptr::write_volatile(byte, 0) };
-    }
-    compiler_fence(Ordering::SeqCst);
-}
 
 pub(super) fn hmac_sha256(key: &[u8], data: &[u8]) -> [u8; 32] {
     let mut key_block = [0_u8; 64];
@@ -161,6 +150,7 @@ impl Drop for HmacDrbg {
 
 fn sodium_ready() -> Result<(), String> {
     static SODIUM_INIT_RESULT: OnceLock<i32> = OnceLock::new();
+    // SAFETY: sodium_init has no pointer arguments and permits repeated calls.
     let result = *SODIUM_INIT_RESULT.get_or_init(|| unsafe { sodium_init() });
     if result < 0 {
         Err("libsodium initialization failed".to_string())
@@ -180,6 +170,7 @@ pub(super) fn x25519_keypair() -> Result<([u8; X25519_BYTES], [u8; X25519_BYTES]
         ));
     }
     let mut public = [0_u8; X25519_BYTES];
+    // SAFETY: The two separate arrays have the fixed X25519 input/output sizes.
     let result = unsafe { crypto_scalarmult_curve25519_base(public.as_mut_ptr(), secret.as_ptr()) };
     if result != 0 {
         wipe(&mut secret);
@@ -198,6 +189,8 @@ pub(super) fn x25519(
 ) -> Result<[u8; X25519_BYTES], String> {
     sodium_ready()?;
     let mut shared = [0_u8; X25519_BYTES];
+    // SAFETY: Both borrowed inputs and the separate output are fixed-size
+    // X25519 arrays and remain live for the synchronous native call.
     let result = unsafe {
         crypto_scalarmult_curve25519(shared.as_mut_ptr(), secret.as_ptr(), public.as_ptr())
     };
@@ -257,6 +250,8 @@ pub(super) fn identity_keypair(extra_noise: &[u8]) -> Result<(Vec<u8>, Vec<u8>),
 
     let mut public_key = vec![0_u8; super::MLKEM_PUBLIC_KEY_BYTES];
     let mut secret_key = vec![0_u8; super::MLKEM_SECRET_KEY_BYTES];
+    // SAFETY: The deterministic ML-KEM-768 call borrows fixed-size coins and
+    // writes to two separate outputs of the exact native sizes.
     let result = unsafe {
         PQCP_MLKEM_NATIVE_MLKEM768_keypair_derand(
             public_key.as_mut_ptr(),

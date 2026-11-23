@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+set -e
+
+unset GST_PLUGIN_SYSTEM_PATH GST_PLUGIN_SYSTEM_PATH_1_0
+if [[ -v KAIGEN_APPIMAGE_GST_SYSTEM_PATH ]]; then
+  export GST_PLUGIN_SYSTEM_PATH_1_0="$KAIGEN_APPIMAGE_GST_SYSTEM_PATH"
+fi
+unset KAIGEN_APPIMAGE_GST_SYSTEM_PATH
+
+exec "$(dirname "$0")/Kaigen" "$@"

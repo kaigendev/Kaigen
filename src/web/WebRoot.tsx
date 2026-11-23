@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { flushSync } from "react-dom";
 import type { CSSProperties, PointerEvent as ReactPointerEvent } from "react";
 import { useCompactLayout } from "../compactLayout";
@@ -6,11 +6,13 @@ import RootApp from "../RootApp";
 import { formatUserFacingError } from "../localization";
 import { webSession } from "./session";
 import { canonicalWorkspaceUrl, forgetWorkspaceLaunch, needsWorkspaceManifestReload, rememberWorkspaceLaunch } from "./workspaceLaunch";
+import { WorkspaceNavigation, workspaceIdentifierFromUrl } from "./workspaceNavigation";
 import type { WorkspaceCreationProgress } from "./session";
 import type { StorageMode, WorkspaceView } from "./contracts";
 import { dismissContextMenus, registerContextMenuDismissal } from "../contextMenuCoordinator";
-import BrowserFeatures from "./BrowserFeatures";
 import "./WebRoot.css";
+
+const BrowserFeatures = lazy(() => import("./BrowserFeatures"));
 
 type Language = "ru" | "en";
 type Stage = "loading" | "initializer" | "auth" | "ready" | "occupied" | "upgrade" | "error";
@@ -39,7 +41,7 @@ const copy = {
     openExisting: "Открыть пространство",
     invalidWorkspaceLink: "Введите действительный ключ пространства или полную ссылку этого приложения.",
     loginTitle: "Открыть пространство Kaigen",
-    loginNote: "Введите отдельный пароль доступа к пространству. Пароль не сохраняется в браузере.",
+    loginNote: "Введите отдельный пароль доступа к пространству. Пароль не сохраняется в браузере. Вход по паролю завершит сеансы этого пространства в других браузерах и веб-приложениях.",
     sessionUnavailable: "Сеанс завершён. Введите пароль пространства снова.",
     login: "Открыть",
     loggingIn: "Проверка…",
@@ -52,6 +54,7 @@ const copy = {
     creationRuntimeLimit: "На сервере недостаточно ресурсов для запуска нового пространства. Попробуйте позже.",
     creationRecoveryWait: "Сервер восстанавливает доступность создания пространств. Попробуйте немного позже.",
     creationUnavailable: "Не удалось создать пространство. Попробуйте снова; если ошибка повторяется, обратитесь к администратору сервиса.",
+    initializerChallengeTimeout: "Сервер не ответил на запрос подготовки. Попробуйте снова.",
     creationMaintenance: "Сервис временно недоступен из-за обслуживания сервера. Попробуйте позже.",
     missingLink: "Ссылка пространства отсутствует или повреждена.",
     occupiedTitle: "Приложение уже открыто в другой вкладке",
@@ -91,6 +94,7 @@ const copy = {
     changingLink: "Меняем ссылку доступа…",
     linkChanged: "Ссылка доступа изменена. Вы уже на новой ссылке.",
     workspaceChangeFailed: "Не удалось применить изменение. Попробуйте снова.",
+    workspaceControlBusy: "Дождитесь завершения текущего действия, затем откройте ссылку снова.",
     linkChangeUnconfirmed: "Не удалось подтвердить смену ссылки. Повторите действие для завершения перехода.",
     dismissNotice: "Закрыть уведомление",
     destroyWorkspace: "Уничтожить пространство",
@@ -127,7 +131,7 @@ const copy = {
     openExisting: "Open workspace",
     invalidWorkspaceLink: "Enter a valid workspace key or a full link for this app.",
     loginTitle: "Open Kaigen workspace",
-    loginNote: "Enter the separate workspace access password. The browser does not store it.",
+    loginNote: "Enter the separate workspace access password. The browser does not store it. Signing in with the password will end this workspace’s sessions in other browsers and web apps.",
     sessionUnavailable: "Your session has ended. Enter the workspace password again.",
     login: "Open",
     loggingIn: "Verifying…",
@@ -140,6 +144,7 @@ const copy = {
     creationRuntimeLimit: "The server does not have enough resources to start a new workspace. Try again later.",
     creationRecoveryWait: "The server is restoring workspace creation availability. Try again shortly.",
     creationUnavailable: "Could not create the workspace. Try again; if the error persists, contact the service administrator.",
+    initializerChallengeTimeout: "The server did not respond during setup. Try again.",
     creationMaintenance: "The service is temporarily unavailable during server maintenance. Try again later.",
     missingLink: "The workspace link is missing or invalid.",
     occupiedTitle: "The app is already open in another tab",
@@ -179,6 +184,7 @@ const copy = {
     changingLink: "Changing the access link…",
     linkChanged: "Access link changed. You are already at the new link.",
     workspaceChangeFailed: "Could not apply the change. Try again.",
+    workspaceControlBusy: "Wait for the current action to finish, then open the link again.",
     linkChangeUnconfirmed: "Could not confirm the link change. Repeat the action to finish the transition.",
     dismissNotice: "Dismiss notification",
     destroyWorkspace: "Destroy workspace",
@@ -196,9 +202,7 @@ const copy = {
 } as const;
 
 function identifierFromFragment() {
-  const fragment = location.hash.slice(1);
-  const candidate = new URLSearchParams(fragment).get("k") ?? fragment;
-  return /^[A-Za-z0-9_-]{40,80}$/u.test(candidate) ? candidate : "";
+  return workspaceIdentifierFromUrl(location.href);
 }
 
 function formatDuration(milliseconds: number) {
@@ -217,12 +221,16 @@ export default function WebRoot() {
   const [serviceHeight, setServiceHeight] = useState<number | null>(null);
   const [serviceDragging, setServiceDragging] = useState(false);
   const [stage, setStage] = useState<Stage>(() => location.hash ? "loading" : "initializer");
+  useEffect(() => {
+    if (stage !== "ready") document.title = "Kaigen";
+  }, [stage]);
   const [buildReady, setBuildReady] = useState(false);
   const [storageMode, setStorageMode] = useState<StorageMode>("ram");
   const [accessPassword, setAccessPassword] = useState("");
   const [accessPasswordConfirm, setAccessPasswordConfirm] = useState("");
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
+  const [navigating, setNavigating] = useState(false);
   const [retentionBusy, setRetentionBusy] = useState(false);
   const [pendingRetentionChange, setPendingRetentionChange] = useState<RetentionChange | null>(null);
   const [creationProgress, setCreationProgress] = useState<WorkspaceCreationProgress | { stage: "opening" } | null>(null);
@@ -240,6 +248,7 @@ export default function WebRoot() {
     CREATION_RUNTIME_LIMIT: t.creationRuntimeLimit,
     CREATION_RECOVERY_WAIT: t.creationRecoveryWait,
     CREATION_UNAVAILABLE: t.creationUnavailable,
+    INITIALIZER_CHALLENGE_TIMEOUT: t.initializerChallengeTimeout,
     MAINTENANCE: t.creationMaintenance,
     SESSION_UNAVAILABLE: t.sessionUnavailable,
     SESSION_NOT_ACTIVE: t.sessionUnavailable,
@@ -253,6 +262,7 @@ export default function WebRoot() {
     PASSWORD_TOO_SHORT: t.passwordInvalid,
     PASSWORD_TOO_LONG: t.passwordInvalid,
     WORKSPACE_CHANGE_FAILED: t.workspaceChangeFailed,
+    WORKSPACE_CONTROL_BUSY: t.workspaceControlBusy,
   };
   const errorCode = error.replace(/^Error:\s*/u, "");
   const displayError = Object.prototype.hasOwnProperty.call(creationErrorMessages, errorCode)
@@ -271,13 +281,79 @@ export default function WebRoot() {
   const [currentWorkspacePassword, setCurrentWorkspacePassword] = useState("");
   const [newWorkspacePassword, setNewWorkspacePassword] = useState("");
   const [confirmWorkspacePassword, setConfirmWorkspacePassword] = useState("");
-  const [workspaceNotice, setWorkspaceNotice] = useState<"password" | "link" | "link-pending" | "link-error" | null>(null);
+  const [workspaceNotice, setWorkspaceNotice] = useState<"password" | "link" | "link-pending" | "link-error" | "navigation-error" | null>(null);
   const workspaceModalOpen = destroyOpen || passwordChangeOpen;
   const [gateViewport, setGateViewport] = useState<{ height: number; width: number; offsetTop: number; offsetLeft: number } | null>(null);
   const [composerKeyboardTight, setComposerKeyboardTight] = useState(false);
   const menuRef = useRef<HTMLDivElement | null>(null);
   const beforeWorkspaceLockRef = useRef<(() => Promise<void>) | null>(null);
   const workspaceLockPendingRef = useRef(false);
+  const stageRef = useRef(stage);
+  stageRef.current = stage;
+  const navigation = useRef<WorkspaceNavigation | null>(null);
+  const navigationBodyInert = useRef(false);
+  if (!navigation.current) navigation.current = new WorkspaceNavigation({
+    url: location.href,
+    readUrl: () => location.href,
+    admit: () => {
+      if (workspaceLockPendingRef.current || workspaceChangePendingRef.current
+        || webSession.isWorkspaceCreationPending()) throw new Error("WORKSPACE_CONTROL_BUSY");
+    },
+    start: () => {
+      webSession.cancelWorkspaceOpening();
+      navigationBodyInert.current = document.body.inert;
+      // App context menus and media controls can be portals outside this main.
+      document.body.inert = true;
+      // Keep RootApp mounted until its registered drafts/nickname save finishes.
+      flushSync(() => setNavigating(true));
+    },
+    prepare: async () => {
+      if (workspaceLockPendingRef.current || workspaceChangePendingRef.current) throw new Error("WORKSPACE_CONTROL_BUSY");
+      const prepare = beforeWorkspaceLockRef.current;
+      await prepare?.();
+      if (beforeWorkspaceLockRef.current !== prepare) throw new Error("PROFILE_NICKNAME_OWNER_CHANGED");
+    },
+    leave: () => webSession.leaveWorkspace(),
+    commit: (url) => {
+      // Retire consumers before releasing the teardown fence. Reload consumes
+      // the latest browser-selected workspace, including rapid Back/Forward.
+      serviceHistoryToken.current = null;
+      flushSync(() => { setWorkspace(null); setStage("loading"); });
+      history.replaceState(history.state, "", url);
+      location.reload();
+    },
+    rollback: (url, value, started) => {
+      // A control operation can have advanced its confirmed selector before
+      // the browser delivers hashchange. Keep that operation's actual owner.
+      const identifier = webSession.getIdentifier();
+      const restoreUrl = !started && identifier ? canonicalWorkspaceUrl(identifier) : url;
+      let restored = false;
+      try {
+        history.replaceState(history.state, "", restoreUrl);
+        navigation.current!.adopt(restoreUrl);
+        restored = true;
+      } catch { /* Never leave the old app usable under a different address. */ }
+      if (started) document.body.inert = navigationBodyInert.current;
+      flushSync(() => {
+        setNavigating(false);
+        setError(String(value));
+        setWorkspaceNotice("navigation-error");
+        if (!restored) {
+          setWorkspace(null); setStage("error"); setBusy(false); setCreationProgress(null);
+          return;
+        }
+        else if (!started) return;
+        if (!workspaceLockPendingRef.current && !workspaceChangePendingRef.current) setBusy(false);
+        setCreationProgress(null);
+        // A cancelled bootstrap has no remaining continuation to finish it.
+        if (stageRef.current === "loading") setStage("error");
+        else if (stageRef.current === "ready" && !webSession.getWorkspace()) {
+          setWorkspace(null);
+          setStage("auth");
+        }
+      });
+    },
+  });
   const registerBeforeWorkspaceLock = useCallback((handler: () => Promise<void>) => {
     beforeWorkspaceLockRef.current = handler;
     return () => {
@@ -555,7 +631,18 @@ export default function WebRoot() {
       || !focused.matches("input, textarea, select, button")) return;
     const surface = gate.getBoundingClientRect();
     const control = focused.getBoundingClientRect();
-    if (control.bottom > surface.bottom - 16) gate.scrollTop += control.bottom - surface.bottom + 16;
+    let bottom = control.bottom;
+    const submit = focused.matches("input, textarea, select")
+      ? focused.closest("form")?.querySelector<HTMLElement>("button.web-primary:not([type=\"button\"])")
+      : null;
+    if (submit?.getClientRects().length) {
+      const action = submit.getBoundingClientRect();
+      // Keep the input and its action together when both fit above the keyboard.
+      if (action.bottom >= control.bottom && action.bottom - control.top <= surface.height - 32) {
+        bottom = action.bottom;
+      }
+    }
+    if (bottom > surface.bottom - 16) gate.scrollTop += bottom - surface.bottom + 16;
     else if (control.top < surface.top + 16) gate.scrollTop -= surface.top + 16 - control.top;
   }, []);
 
@@ -634,6 +721,7 @@ export default function WebRoot() {
     }
   }, [stage]);
   useEffect(() => webSession.onSessionUnavailable((reload) => {
+    if (navigation.current!.pending) return;
     if (sessionReloadStarted.current) return;
     sessionReloadStarted.current = true;
     // A terminal auth transition must reload this page, not navigate history.back().
@@ -653,6 +741,7 @@ export default function WebRoot() {
     if (reload) window.location.reload();
   }), [closeServicePanel, clearWorkspacePasswords]);
   useEffect(() => webSession.onUpgradeRequired(() => {
+    if (navigation.current!.pending) return;
     setWorkspace(null);
     setMenuOpen(false);
     closeServicePanel();
@@ -697,11 +786,16 @@ export default function WebRoot() {
   }, []);
 
   const openWorkspace = async () => {
+    const current = navigation.current!.capture();
+    if (!current()) return;
+    const identifier = identifierFromFragment();
     setBuildReady(false);
     try {
       await webSession.verifyBuildIdentity();
+      if (!current()) return;
       setBuildReady(true);
     } catch (value) {
+      if (!current()) return;
       const code = String(value);
       if (code.includes("UPGRADE_REQUIRED")) setStage("upgrade");
       else {
@@ -710,7 +804,6 @@ export default function WebRoot() {
       }
       return;
     }
-    const identifier = identifierFromFragment();
     if (!identifier) {
       setStage(location.hash ? "error" : "initializer");
       if (location.hash) setError("WORKSPACE_LINK_MISSING");
@@ -719,20 +812,25 @@ export default function WebRoot() {
     webSession.setIdentifier(identifier);
     try {
       const lookup = await webSession.lookupWorkspace();
+      if (!current()) return;
       if (!lookup.exists) {
         setError("WORKSPACE_LINK_MISSING");
         setStage("error");
         return;
       }
       if (!lookup.pendingAccessLink) rememberWorkspaceLaunch(identifier);
-      if (await webSession.requiresPassword()) {
+      const requiresPassword = await webSession.requiresPassword();
+      if (!current()) return;
+      if (requiresPassword) {
         setError("SESSION_UNAVAILABLE");
         setStage("auth");
         return;
       }
       const restored = await webSession.restoreDeviceSession();
+      if (!current()) return;
       setStage(restored ? "ready" : "auth");
     } catch (value) {
+      if (!current()) return;
       const code = String(value);
       if (code.includes("UI_LEASE_OCCUPIED")) setStage("occupied");
       else if (code.includes("DEVICE_") || code.includes("AUTH_")) setStage("auth");
@@ -744,13 +842,30 @@ export default function WebRoot() {
   };
 
   useEffect(() => {
+    const navigate = () => { void navigation.current!.navigate(location.href); };
+    const restore = (event: PageTransitionEvent) => {
+      // History can restore the retired document from BFCache, including its
+      // closed session and inert body. Bootstrap the browser's current URL;
+      // never revive that old session or interrupt a still-draining document.
+      if (event.persisted && navigation.current!.retired) location.reload();
+    };
+    window.addEventListener("hashchange", navigate);
+    window.addEventListener("popstate", navigate);
+    window.addEventListener("pageshow", restore);
     void openWorkspace();
-    // The initial fragment is intentionally consumed only once. A different
-    // workspace must be opened through normal navigation, not injected state.
+    return () => {
+      window.removeEventListener("hashchange", navigate);
+      window.removeEventListener("popstate", navigate);
+      window.removeEventListener("pageshow", restore);
+    };
+    // This document owns one workspace. Same-document navigation retires it
+    // after pending local writes, then the new document owns its bootstrap.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const createWorkspace = async () => {
+    const current = navigation.current!.capture();
+    if (!current()) return;
     if (busy || !buildReady) return;
     if (!accessPassword || accessPassword !== accessPasswordConfirm) {
       setError("WORKSPACE_PASSWORD_MISMATCH");
@@ -762,17 +877,25 @@ export default function WebRoot() {
     let workspaceCreated = false;
     const reloadForManifest = needsWorkspaceManifestReload();
     try {
-      const created = await webSession.createWorkspace({ storageMode, accessPassword, language }, setCreationProgress);
+      const created = await webSession.createWorkspace({ storageMode, accessPassword, language }, setCreationProgress, current);
+      // The response can win the race against delivery of hashchange. Run the
+      // same allocation barrier before deciding whether this result is stale.
+      if (!current() && webSession.isWorkspaceCreationPending()) void navigation.current!.navigate(location.href);
+      if (!current()) return;
       workspaceCreated = true;
       history.replaceState(history.state, "", `${location.pathname}${location.search}#k=${created.identifier}`);
+      navigation.current!.adopt(location.href);
       rememberWorkspaceLaunch(created.identifier);
+      webSession.finishWorkspaceCreation();
       setCreationProgress({ stage: "opening" });
-      await webSession.login(accessPassword);
+      await webSession.login(accessPassword, current);
+      if (!current()) return;
       setAccessPassword("");
       setAccessPasswordConfirm("");
       // The replacement document owns startup when the manifest needs a reload.
       if (!reloadForManifest) setStage("ready");
     } catch (value) {
+      if (!current()) return;
       setError(String(value));
       // A created workspace must remain reachable even if its first login
       // fails. Retrying creation would allocate another workspace.
@@ -782,11 +905,14 @@ export default function WebRoot() {
         setStage("auth");
       }
     } finally {
-      setCreationProgress(null);
-      setBusy(false);
+      webSession.finishWorkspaceCreation();
+      if (current()) {
+        setCreationProgress(null);
+        setBusy(false);
+      }
       // A fresh WebKit document lets installation read the newly created URL,
       // even when its share sheet had already cached the previous manifest.
-      if (workspaceCreated && reloadForManifest) location.reload();
+      if (current() && workspaceCreated && reloadForManifest) location.reload();
     }
   };
 
@@ -815,15 +941,19 @@ export default function WebRoot() {
   };
 
   const login = async () => {
+    const current = navigation.current!.capture();
+    if (!current()) return;
     if (!password) return;
     setBusy(true);
     setError("");
     try {
-      await webSession.login(password);
+      await webSession.login(password, current);
+      if (!current()) return;
       sessionReloadStarted.current = false;
       setPassword("");
       setStage("ready");
     } catch (value) {
+      if (!current()) return;
       const code = String(value);
       if (code.includes("UI_LEASE_OCCUPIED")) setStage("occupied");
       else if (code.includes("WORKSPACE_NOT_FOUND")) {
@@ -831,7 +961,7 @@ export default function WebRoot() {
         setStage("error");
       } else setError(code);
     } finally {
-      setBusy(false);
+      if (current()) setBusy(false);
     }
   };
 
@@ -894,6 +1024,7 @@ export default function WebRoot() {
       setWorkspaceNotice("link-error");
     } finally {
       workspaceChangePendingRef.current = false;
+      navigation.current!.adopt(canonicalWorkspaceUrl(webSession.getIdentifier()));
       setBusy(false);
     }
   };
@@ -905,8 +1036,11 @@ export default function WebRoot() {
     try {
       await webSession.destroyWorkspace();
       forgetWorkspaceLaunch(identifier);
+      // Deletion is terminal: closing the panel must not Back into the old URL.
+      serviceHistoryToken.current = null;
       history.replaceState(history.state, "", `${location.pathname}${location.search}`);
       flushSync(() => {
+        closeServicePanel();
         setWorkspace(null);
         setPassword("");
         setAccessPassword("");
@@ -915,6 +1049,7 @@ export default function WebRoot() {
         setDestroyOpen(false);
         setStage("initializer");
       });
+      navigation.current!.adopt(location.href);
     } catch (value) {
       setError(String(value));
     } finally {
@@ -962,14 +1097,20 @@ export default function WebRoot() {
   };
 
   if (stage === "upgrade") {
-    return <main ref={gateRef} className="web-gate" style={gateViewportStyle} onFocusCapture={() => window.requestAnimationFrame(revealGateFocus)}>
+    return <main ref={gateRef} className="web-gate" inert={navigating} aria-busy={navigating} style={gateViewportStyle} onFocusCapture={() => window.requestAnimationFrame(revealGateFocus)}>
       <header className="web-gate-top"><div className="web-brand"><b>KAIGEN</b><span>WEB</span></div><nav><button className={language === "ru" ? "active" : ""} onClick={() => setLanguage("ru")}>ru</button><button className={language === "en" ? "active" : ""} onClick={() => setLanguage("en")}>en</button></nav></header>
       <section className="web-gate-card"><h1>{t.upgradeTitle}</h1><p>{t.upgradeNote}</p><button className="web-primary" onClick={() => location.reload()}>{t.reload}</button></section>
     </main>;
   }
 
   if (stage !== "ready") {
-    return <main ref={gateRef} className="web-gate" style={gateViewportStyle} onFocusCapture={() => window.requestAnimationFrame(revealGateFocus)}>
+    const existingWorkspaceForm = <form className="web-existing-workspace" onSubmit={(event) => { event.preventDefault(); openExistingWorkspace(); }}>
+      <h2>{t.existingTitle}</h2><p>{t.existingNote}</p>
+      <label>{t.workspaceLink}<input type="text" inputMode="text" autoCapitalize="none" autoComplete="off" spellCheck={false} disabled={busy} value={workspaceLink} onChange={(event) => { setWorkspaceLink(event.target.value); setWorkspaceLinkError(false); }} aria-invalid={workspaceLinkError} aria-describedby={workspaceLinkError ? "web-workspace-link-error" : undefined} /></label>
+      {workspaceLinkError && <p id="web-workspace-link-error" className="web-error" role="alert">{t.invalidWorkspaceLink}</p>}
+      <button className="web-primary" disabled={busy || !workspaceLink.trim()}>{t.openExisting}</button>
+    </form>;
+    return <main ref={gateRef} className="web-gate" inert={navigating} aria-busy={navigating} style={gateViewportStyle} onFocusCapture={() => window.requestAnimationFrame(revealGateFocus)}>
       <header className="web-gate-top"><div className="web-brand"><b>KAIGEN</b><span>WEB</span></div><nav><button className={language === "ru" ? "active" : ""} onClick={() => setLanguage("ru")}>ru</button><button className={language === "en" ? "active" : ""} onClick={() => setLanguage("en")}>en</button></nav></header>
       <section className="web-gate-card">
         {stage === "loading" && <div className="web-loader" aria-label="Loading" />}
@@ -988,15 +1129,13 @@ export default function WebRoot() {
           <button className="web-primary" disabled={busy || !buildReady || !accessPassword || !accessPasswordConfirm}>{busy ? <>{t.creating.replace(/…$/u, "")}<span className="web-running-dots" aria-hidden="true"><span>.</span><span>.</span><span>.</span></span></> : t.create}</button>
           {creationProgress && <div className="web-creation-progress" role="status" aria-live="polite" aria-atomic="true"><span>{creationProgress.stage === "challenge" ? t.creationChallenge : creationProgress.stage === "proof" ? t.creationProof : creationProgress.stage === "creating" ? t.creationServer : t.creationOpening}</span><progress aria-label={t.creating} /></div>}
         </form>
-        <form className="web-existing-workspace" onSubmit={(event) => { event.preventDefault(); openExistingWorkspace(); }}>
-          <h2>{t.existingTitle}</h2><p>{t.existingNote}</p>
-          <label>{t.workspaceLink}<input type="text" inputMode="text" autoCapitalize="none" autoComplete="off" spellCheck={false} disabled={busy} value={workspaceLink} onChange={(event) => { setWorkspaceLink(event.target.value); setWorkspaceLinkError(false); }} aria-invalid={workspaceLinkError} aria-describedby={workspaceLinkError ? "web-workspace-link-error" : undefined} /></label>
-          {workspaceLinkError && <p id="web-workspace-link-error" className="web-error" role="alert">{t.invalidWorkspaceLink}</p>}
-          <button className="web-primary" disabled={busy || !workspaceLink.trim()}>{t.openExisting}</button>
-        </form></>}
+        {existingWorkspaceForm}</>}
         {stage === "auth" && <form onSubmit={(event) => { event.preventDefault(); void login(); }}><h1>{t.loginTitle}</h1><p>{t.loginNote}</p><label>{t.accessPassword}<input autoFocus={!compact} type="password" autoComplete="current-password" value={password} onChange={(event) => setPassword(event.target.value)} /></label>{error && <p className="web-error">{displayError}</p>}<button className="web-primary" disabled={busy || !password}>{busy ? t.loggingIn : t.login}</button></form>}
         {stage === "occupied" && <div><h1>{t.occupiedTitle}</h1><p>{t.occupiedNote}</p><button className="web-primary" onClick={() => { setStage("loading"); void openWorkspace(); }}>{t.retry}</button></div>}
-        {stage === "error" && <div><h1>{t.fatal}</h1><p className="web-error">{displayError || t.missingLink}</p><button className="web-primary" onClick={() => { setError(""); setStage(location.hash ? "loading" : "initializer"); void openWorkspace(); }}>{t.retry}</button></div>}
+        {stage === "error" && <>
+          <div><h1>{t.fatal}</h1><p className="web-error">{displayError || t.missingLink}</p><button className="web-primary" onClick={() => { setError(""); setStage(location.hash ? "loading" : "initializer"); void openWorkspace(); }}>{t.retry}</button></div>
+          {error === "WORKSPACE_LINK_MISSING" && existingWorkspaceForm}
+        </>}
       </section>
     </main>;
   }
@@ -1022,7 +1161,7 @@ export default function WebRoot() {
     "--web-service-height": serviceHeight == null ? "var(--web-service-max-height)" : `${serviceHeight}px`,
   } as CSSProperties;
 
-  return <main className={`web-shell${compact ? " web-shell-compact" : ""}${compact && composerKeyboardTight ? " web-composer-keyboard-tight" : ""}${menuOpen ? " web-service-menu-open" : ""}${serviceOpen ? " web-service-panel-open" : ""}${serviceDragging ? " web-service-dragging" : ""}`} style={shellStyle}>
+  return <main className={`web-shell${compact ? " web-shell-compact" : ""}${compact && composerKeyboardTight ? " web-composer-keyboard-tight" : ""}${menuOpen ? " web-service-menu-open" : ""}${serviceOpen ? " web-service-panel-open" : ""}${serviceDragging ? " web-service-dragging" : ""}`} inert={navigating} aria-busy={navigating} style={shellStyle}>
     <div className="web-service-region">
       {compact && (serviceOpen || serviceDragging) && <div className="web-service-backdrop" style={overlayViewportStyle} onPointerDown={closeServicePanel} aria-hidden="true" />}
       <div className="web-service-frame" ref={serviceFrameRef}>
@@ -1047,7 +1186,7 @@ export default function WebRoot() {
       {workspace?.quotaBytes != null && (workspace.usedBytes ?? 0) >= workspace.quotaBytes && <div className="web-maintenance">{t.quotaFull}</div>}
       {workspace?.maintenance && <div className="web-maintenance">{t.maintenance}</div>}
       {error && !workspaceModalOpen && <p className="web-service-error web-error" role="alert">{displayError}</p>}
-      <BrowserFeatures language={language} />
+      <Suspense fallback={null}><BrowserFeatures language={language} /></Suspense>
       <div className="web-menu" ref={menuRef}>{!compact && <button type="button" aria-haspopup="menu" aria-expanded={menuOpen} disabled={busy} onClick={toggleMenu}>{t.menu} ▾</button>}{(compact || menuOpen) && <nav role={compact ? undefined : "menu"} aria-label={t.menu}>
         <button type="button" role={compact ? undefined : "menuitem"} disabled={busy} onClick={() => { setMenuOpen(false); closeServicePanel(); setError(""); setWorkspaceNotice(null); clearWorkspacePasswords(); setPasswordChangeOpen(true); }}>{t.changePassword}</button>
         <button type="button" role={compact ? undefined : "menuitem"} disabled={busy || retentionBusy || pendingRetentionChange !== null} onClick={() => void changeWorkspaceLink()}>{t.changeLink}</button>
@@ -1069,8 +1208,8 @@ export default function WebRoot() {
     <section className="web-app-window" inert={busy || workspaceModalOpen || (compact && (serviceOpen || serviceDragging))}>
       <div className="web-app-surface"><RootApp onLanguageChange={setLanguage} registerBeforeWorkspaceLock={registerBeforeWorkspaceLock} /></div>
     </section>
-    {workspaceNotice && !workspaceModalOpen && <div className="web-workspace-notice" role={workspaceNotice === "link-error" ? "alert" : "status"}>
-      <p>{workspaceNotice === "password" ? t.passwordChanged : workspaceNotice === "link" ? t.linkChanged : workspaceNotice === "link-pending" ? t.changingLink : t.linkChangeUnconfirmed}</p>
+    {workspaceNotice && !workspaceModalOpen && <div className="web-workspace-notice" role={workspaceNotice === "link-error" || workspaceNotice === "navigation-error" ? "alert" : "status"}>
+      <p>{workspaceNotice === "navigation-error" ? displayError : workspaceNotice === "password" ? t.passwordChanged : workspaceNotice === "link" ? t.linkChanged : workspaceNotice === "link-pending" ? t.changingLink : t.linkChangeUnconfirmed}</p>
       {workspaceNotice !== "link-pending" && <button type="button" aria-label={t.dismissNotice} onClick={() => setWorkspaceNotice(null)}>×</button>}
     </div>}
     {passwordChangeOpen && <div className="web-modal-backdrop" style={overlayViewportStyle} onPointerDown={(event) => { if (event.target === event.currentTarget && !busy) cancelPasswordChange(); }}>

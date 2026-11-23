@@ -1,3 +1,4 @@
+#[cfg(target_os = "windows")]
 use tauri::Manager;
 
 #[cfg(any(target_os = "windows", test))]
@@ -8,10 +9,8 @@ mod startup_focus;
 use startup_focus::{FocusRequest, FocusWindow, StartupFocusRepair};
 
 #[cfg(target_os = "windows")]
-#[link(name = "user32")]
-unsafe extern "system" {
-    fn GetForegroundWindow() -> *mut std::ffi::c_void;
-}
+#[path = "webview_recovery_native.rs"]
+mod native;
 
 #[cfg(target_os = "windows")]
 use std::{
@@ -236,124 +235,20 @@ fn install_process_failure_handler(
     window: &tauri::WebviewWindow,
     state: Arc<WebviewRecoveryState>,
 ) -> Result<(), String> {
-    use webview2_com::{
-        Microsoft::Web::WebView2::Win32::COREWEBVIEW2_PROCESS_FAILED_KIND,
-        ProcessFailedEventHandler,
-    };
-
     let app = window.app_handle().clone();
-    window
-        .with_webview(move |platform_webview| {
-            let controller = platform_webview.controller();
-            let Ok(core_webview) = (unsafe { controller.CoreWebView2() }) else {
-                return;
-            };
-            let callback_app = app.clone();
-            let callback_state = state.clone();
-            let handler = ProcessFailedEventHandler::create(Box::new(move |_, args| {
-                let Some(args) = args else {
-                    return Ok(());
-                };
-                let mut kind = COREWEBVIEW2_PROCESS_FAILED_KIND::default();
-                unsafe { args.ProcessFailedKind(&mut kind)? };
-                let action = recovery_action_for_process_failure(kind.0);
-                record_recovery_event(&format!("process-failed kind={} action={action:?}", kind.0));
-                if action != RecoveryAction::Ignore {
-                    request_recovery(&callback_app, callback_state.clone(), action);
-                }
-                Ok(())
-            }));
-            let mut token = 0_i64;
-            let _ = unsafe { core_webview.add_ProcessFailed(&handler, &mut token) };
-        })
-        .map_err(|error| format!("Could not attach the WebView2 failure handler: {error}"))
+    native::on_process_failure(window, move |kind| {
+        let action = recovery_action_for_process_failure(kind);
+        record_recovery_event(&format!("process-failed kind={kind} action={action:?}"));
+        if action != RecoveryAction::Ignore {
+            request_recovery(&app, state.clone(), action);
+        }
+    })
+    .map_err(|error| format!("Could not attach the WebView2 failure handler: {error}"))
 }
 
 #[cfg(target_os = "windows")]
 fn install_editable_context_menu_filter(window: &tauri::WebviewWindow) -> Result<(), String> {
-    use webview2_com::{
-        ContextMenuRequestedEventHandler,
-        Microsoft::Web::WebView2::Win32::{
-            ICoreWebView2_11, COREWEBVIEW2_CONTEXT_MENU_ITEM_KIND,
-            COREWEBVIEW2_CONTEXT_MENU_ITEM_KIND_SEPARATOR,
-            COREWEBVIEW2_CONTEXT_MENU_ITEM_KIND_SUBMENU,
-        },
-    };
-    use windows_core::{Interface, BOOL, PWSTR};
-
-    window
-        .with_webview(move |platform_webview| {
-            let controller = platform_webview.controller();
-            let Ok(core_webview) = (unsafe { controller.CoreWebView2() }) else {
-                return;
-            };
-            let Ok(core_webview): Result<ICoreWebView2_11, _> = core_webview.cast() else {
-                return;
-            };
-            let handler = ContextMenuRequestedEventHandler::create(Box::new(move |_, args| {
-                let Some(args) = args else {
-                    return Ok(());
-                };
-                let target = unsafe { args.ContextMenuTarget()? };
-                let mut editable = BOOL::default();
-                unsafe { target.IsEditable(&mut editable)? };
-                if !editable.as_bool() {
-                    return Ok(());
-                }
-
-                let items = unsafe { args.MenuItems()? };
-                let mut count = 0_u32;
-                unsafe { items.Count(&mut count)? };
-                for index in (0..count).rev() {
-                    let item = unsafe { items.GetValueAtIndex(index)? };
-                    let mut kind = COREWEBVIEW2_CONTEXT_MENU_ITEM_KIND::default();
-                    unsafe { item.Kind(&mut kind)? };
-                    let mut raw_name = PWSTR::null();
-                    unsafe { item.Name(&mut raw_name)? };
-                    let name = webview2_com::take_pwstr(raw_name);
-                    let remove = kind == COREWEBVIEW2_CONTEXT_MENU_ITEM_KIND_SUBMENU
-                        || matches!(
-                            name.as_str(),
-                            "emoji"
-                                | "moreTools"
-                                | "send"
-                                | "sendTabToSelf"
-                                | "sendToDevices"
-                                | "share"
-                                | "shareLink"
-                        );
-                    if remove {
-                        unsafe { items.RemoveValueAtIndex(index)? };
-                    }
-                }
-
-                // Removing optional Edge groups can leave leading, duplicate or
-                // trailing separators. Collapse those without touching native
-                // editing commands such as Cut, Copy, Paste and Select all.
-                unsafe { items.Count(&mut count)? };
-                let mut index = 0_u32;
-                let mut previous_was_separator = true;
-                while index < count {
-                    let item = unsafe { items.GetValueAtIndex(index)? };
-                    let mut kind = COREWEBVIEW2_CONTEXT_MENU_ITEM_KIND::default();
-                    unsafe { item.Kind(&mut kind)? };
-                    let is_separator = kind == COREWEBVIEW2_CONTEXT_MENU_ITEM_KIND_SEPARATOR;
-                    if is_separator && previous_was_separator {
-                        unsafe { items.RemoveValueAtIndex(index)? };
-                        count -= 1;
-                        continue;
-                    }
-                    previous_was_separator = is_separator;
-                    index += 1;
-                }
-                if count > 0 && previous_was_separator {
-                    unsafe { items.RemoveValueAtIndex(count - 1)? };
-                }
-                Ok(())
-            }));
-            let mut token = 0_i64;
-            let _ = unsafe { core_webview.add_ContextMenuRequested(&handler, &mut token) };
-        })
+    native::filter_editable_context_menu(window)
         .map_err(|error| format!("Could not attach the WebView2 context-menu filter: {error}"))
 }
 
@@ -569,6 +464,8 @@ pub(crate) fn setup(app: &tauri::App) -> Result<(), String> {
         }
         start_watchdog(app.handle().clone(), state)?;
     }
+    #[cfg(not(target_os = "windows"))]
+    let _ = app;
     Ok(())
 }
 
@@ -592,7 +489,7 @@ fn focus_window(
         minimized: current.is_minimized().unwrap_or(true),
         stopped: state.stopped.load(Ordering::Acquire),
         recovering: state.recovery_in_progress.load(Ordering::Acquire),
-        foreground: unsafe { GetForegroundWindow() as usize == id },
+        foreground: native::foreground_window_id() == id,
     })
 }
 
@@ -629,12 +526,7 @@ fn apply_startup_focus(
             }
             // Observe the actual controller result, not merely a dispatcher
             // acknowledgment. This does not select or restore a keyboard layout.
-            let succeeded = unsafe {
-                platform_webview.controller().MoveFocus(
-                    webview2_com::Microsoft::Web::WebView2::Win32::COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC,
-                )
-            }
-            .is_ok();
+            let succeeded = native::focus(&platform_webview);
             finish_startup_focus(&callback_state, request, succeeded);
             record_recovery_event(if succeeded {
                 "startup-focus-restored"

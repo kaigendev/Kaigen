@@ -14,8 +14,9 @@ cleanup() {
 trap cleanup EXIT
 
 appdir="$test_root/AppDir"
-mkdir -p "$appdir/apprun-hooks"
+mkdir -p "$appdir/apprun-hooks" "$appdir/usr/bin"
 install -m 0755 "$template" "$appdir/AppRun"
+install -m 0755 "$project_root/packaging/kaigen-appimage-entry.sh" "$appdir/usr/bin/kaigen-appimage-entry"
 
 cat > "$appdir/apprun-hooks/linuxdeploy-plugin-gtk.sh" <<'EOF'
 #!/usr/bin/env bash
@@ -29,6 +30,14 @@ EOF
 
 cat > "$appdir/AppRun.wrapped" <<'EOF'
 #!/usr/bin/env bash
+export GST_PLUGIN_SYSTEM_PATH="$APPDIR/usr/lib/gstreamer:"
+export GST_PLUGIN_SYSTEM_PATH_1_0="$APPDIR/usr/lib/gstreamer-1.0:"
+exec "$(dirname "$0")/usr/bin/kaigen-appimage-entry" "$@"
+EOF
+chmod 0755 "$appdir/AppRun.wrapped"
+
+cat > "$appdir/usr/bin/Kaigen" <<'EOF'
+#!/usr/bin/env bash
 set -euo pipefail
 if [[ ${KAIGEN_APPRUN_TEST_MODE-} == signal ]]; then
   printf '%s\n' "$$" > "$KAIGEN_APPRUN_TEST_PID"
@@ -40,6 +49,9 @@ fi
   printf 'GDK_VALUE=%s\n' "${GDK_BACKEND-}"
   printf 'WEBKIT_SET=%s\n' "${WEBKIT_DISABLE_DMABUF_RENDERER+x}"
   printf 'WEBKIT_VALUE=%s\n' "${WEBKIT_DISABLE_DMABUF_RENDERER-}"
+  printf 'GST_SYSTEM_SET=%s\n' "${GST_PLUGIN_SYSTEM_PATH_1_0+x}"
+  printf 'GST_SYSTEM_VALUE=%s\n' "${GST_PLUGIN_SYSTEM_PATH_1_0-}"
+  printf 'GST_SAVED_SET=%s\n' "${KAIGEN_APPIMAGE_GST_SYSTEM_PATH+x}"
   printf 'ARG_COUNT=%s\n' "$#"
   argument_index=0
   for argument in "$@"; do
@@ -49,7 +61,7 @@ fi
 } > "$KAIGEN_APPRUN_TEST_OUTPUT"
 exit "${KAIGEN_APPRUN_TEST_EXIT:-0}"
 EOF
-chmod 0755 "$appdir/AppRun.wrapped"
+chmod 0755 "$appdir/usr/bin/Kaigen"
 
 assert_line() {
   local output="$1"
@@ -115,6 +127,35 @@ run_case explicit-empty-gdk wayland wayland-0 set '' unset '' '' 1
 run_case explicit-gdk-zero wayland wayland-0 set 0 unset '' 0 1
 run_case explicit-webkit-zero wayland wayland-0 unset '' set 0 wayland 0
 run_case explicit-empty-webkit wayland wayland-0 unset '' set '' wayland ''
+
+gst_data="$test_root/gst-data"
+mkdir -p "$gst_data/gstreamer-1.0/plugins"
+gst_output="$test_root/gst-system.txt"
+gst_command=(env -i "PATH=$PATH" "XDG_DATA_HOME=$gst_data" "KAIGEN_APPRUN_TEST_OUTPUT=$gst_output")
+"${gst_command[@]}" "$appdir/AppRun"
+assert_line "$gst_output" 'GST_SYSTEM_SET=x'
+assert_line "$gst_output" 'GST_SAVED_SET='
+gst_path_line="$(grep '^GST_SYSTEM_VALUE=' "$gst_output")"
+if [[ $gst_path_line != "GST_SYSTEM_VALUE=$gst_data/gstreamer-1.0/plugins"* ]]; then
+  echo 'AppRun did not retain the default GStreamer data directory' >&2
+  exit 1
+fi
+gst_multiarch='/usr/lib/x86_64-linux-gnu/gstreamer-1.0'
+if [[ -d $gst_multiarch && ":${gst_path_line#GST_SYSTEM_VALUE=}:" != *":$gst_multiarch:"* ]]; then
+  echo 'AppRun did not retain the Debian system GStreamer directory' >&2
+  exit 1
+fi
+
+"${gst_command[@]}" GST_PLUGIN_SYSTEM_PATH=/legacy GST_PLUGIN_SYSTEM_PATH_1_0=/explicit "$appdir/AppRun"
+assert_line "$gst_output" 'GST_SYSTEM_VALUE=/explicit'
+"${gst_command[@]}" GST_PLUGIN_SYSTEM_PATH_1_0= "$appdir/AppRun"
+assert_line "$gst_output" 'GST_SYSTEM_SET=x'
+assert_line "$gst_output" 'GST_SYSTEM_VALUE='
+"${gst_command[@]}" GST_PLUGIN_SYSTEM_PATH=/legacy "$appdir/AppRun"
+assert_line "$gst_output" 'GST_SYSTEM_VALUE=/legacy'
+mkdir -p "$appdir/usr/lib/gstreamer-1.0"
+"${gst_command[@]}" "$appdir/AppRun"
+assert_line "$gst_output" "GST_SYSTEM_VALUE=$appdir/usr/lib/gstreamer-1.0"
 
 exit_output="$test_root/exit-status.txt"
 set +e

@@ -1,39 +1,12 @@
 use super::*;
-use std::{collections::HashSet, sync::OnceLock};
+use std::collections::HashSet;
 
 const CAPABILITY_REQUEST: &[u8] = &[PACKET_ID, b'T', b'P', b'Q', 2, 0];
-const MAX_V2_TRANSPORT_BYTES: usize = 8 * 1024 * 1024;
-const MAX_V2_TRANSPORT_PACKETS: usize = 16_384;
-const MAX_DEFERRED_LEGACY_NEGOTIATION_PACKETS: usize = 32;
-const MAX_DEFERRED_LEGACY_NEGOTIATION_BYTES: usize = 256 * 1024;
+const MAX_TRANSPORT_BYTES: usize = 8 * 1024 * 1024;
+const MAX_TRANSPORT_PACKETS: usize = 16_384;
 
-#[derive(Clone)]
-struct LegacyCapability {
-    packet: Vec<u8>,
-    public_key: Vec<u8>,
-    fingerprint: String,
-    changed: bool,
-}
-
-#[derive(Default)]
-struct LegacyBridge {
-    /// Numeric Tox slots are runtime routes only. Capability ownership follows
-    /// the stable Tox public key so a slot remap cannot transfer PQ identity.
-    routes: HashMap<u32, String>,
-    capabilities: HashMap<String, LegacyCapability>,
-    validated_capabilities: HashSet<String>,
-    deferred_negotiation: HashMap<String, VecDeque<Vec<u8>>>,
-    // Explicit local legacy consent is deliberately not persisted. A durable
-    // manual request alone means wait for v2, never permission to downgrade.
-    manual_requests: HashSet<String>,
-}
-
-/// Version dispatch keeps the old manual wire protocol compatible while v2
-/// owns all new automatic sessions and durable per-message ratchets.
+/// Connects the durable PQ engine to the transient Tox packet queue.
 pub struct PqEngine {
-    data_dir: PathBuf,
-    legacy: OnceLock<LegacyEngine>,
-    legacy_bridge: Mutex<LegacyBridge>,
     v2: v2::Engine,
     outbox: Mutex<VecDeque<(u32, Vec<u8>)>>,
     #[cfg(feature = "pq-fault-tests")]
@@ -42,19 +15,12 @@ pub struct PqEngine {
 
 impl PqEngine {
     pub fn new(data_dir: &Path) -> Result<Self, String> {
-        let engine = Self {
-            data_dir: data_dir.into(),
-            legacy: OnceLock::new(),
-            legacy_bridge: Mutex::new(LegacyBridge::default()),
+        Ok(Self {
             v2: v2::Engine::new(data_dir)?,
             outbox: Mutex::new(VecDeque::new()),
             #[cfg(feature = "pq-fault-tests")]
             fault: super::fault::FaultInjector::from_env()?,
-        };
-        if engine.v2.has_identity() {
-            let _ = engine.legacy.set(LegacyEngine::new(data_dir)?);
-        }
-        Ok(engine)
+        })
     }
 
     pub fn bind_contact(
@@ -64,14 +30,7 @@ impl PqEngine {
         owner: &str,
         existing: bool,
     ) -> Result<(), String> {
-        self.v2.bind(friend, key, owner, existing)?;
-        let stable_key = key.to_ascii_uppercase();
-        self.legacy_bridge
-            .lock()
-            .map_err(|_| "PQ_LEGACY_BRIDGE_LOCKED")?
-            .routes
-            .insert(friend, stable_key);
-        self.import_legacy_trust(friend)
+        self.v2.bind(friend, key, owner, existing)
     }
 
     pub fn contact_bound(&self, friend: u32, key: &str) -> bool {
@@ -83,107 +42,7 @@ impl PqEngine {
         contacts: &[(u32, String, bool)],
         owner: &str,
     ) -> Result<(), String> {
-        self.v2.bind_contacts(contacts, owner)?;
-        {
-            let mut bridge = self
-                .legacy_bridge
-                .lock()
-                .map_err(|_| "PQ_LEGACY_BRIDGE_LOCKED")?;
-            for (friend, key, _) in contacts {
-                bridge.routes.insert(*friend, key.to_ascii_uppercase());
-            }
-        }
-        for (friend, _, _) in contacts {
-            self.import_legacy_trust(*friend)?;
-        }
-        Ok(())
-    }
-
-    fn import_legacy_trust(&self, friend: u32) -> Result<(), String> {
-        let Some(legacy) = self.legacy.get() else {
-            return Ok(());
-        };
-        let trusted = legacy
-            .inner
-            .lock()
-            .ok()
-            .and_then(|inner| inner.trust.fingerprints.get(&friend).cloned());
-        if let Some(trusted) = trusted {
-            self.v2.import_trust(friend, trusted)?;
-        }
-        Ok(())
-    }
-
-    fn legacy_owns(&self, friend: u32) -> bool {
-        let Some(legacy) = self.legacy.get() else {
-            return false;
-        };
-        if legacy.holds_plaintext_messages(friend) {
-            return true;
-        }
-        matches!(
-            legacy.status(friend).state.as_str(),
-            "offered"
-                | "incoming_offer"
-                | "accepting"
-                | "active"
-                | "closing"
-                | "closing_commit"
-                | "closing_ack"
-                | "closing_final"
-        )
-    }
-
-    fn stable_key(&self, friend: u32) -> Result<String, String> {
-        self.legacy_bridge
-            .lock()
-            .map_err(|_| "PQ_LEGACY_BRIDGE_LOCKED")?
-            .routes
-            .get(&friend)
-            .cloned()
-            .ok_or_else(|| "PQ_CONTACT_NOT_BOUND".to_string())
-    }
-
-    fn v2_owns_negotiation(&self, friend: u32) -> bool {
-        !self.legacy_owns(friend)
-            && (self.v2.requires_v2(friend)
-                || self.v2.owns(friend) && !self.legacy_request_pending(friend))
-    }
-
-    fn legacy_request_pending(&self, friend: u32) -> bool {
-        self.legacy_bridge.lock().is_ok_and(|bridge| {
-            bridge
-                .routes
-                .get(&friend)
-                .is_some_and(|key| bridge.manual_requests.contains(key))
-        })
-    }
-
-    fn cached_legacy_status(&self, friend: u32) -> Option<PqStatus> {
-        let capability = {
-            let bridge = self.legacy_bridge.lock().ok()?;
-            bridge
-                .routes
-                .get(&friend)
-                .filter(|key| bridge.validated_capabilities.contains(*key))
-                .and_then(|key| bridge.capabilities.get(key))
-                .cloned()?
-        };
-        let mut status = self.v2.status(friend);
-        status.protocol_version = VERSION;
-        status.supported = true;
-        status.manual_waiting_for_capability = false;
-        status.state = if status.identity_waiting || self.legacy_request_pending(friend) {
-            "accepting".to_string()
-        } else {
-            "available".to_string()
-        };
-        status.peer_fingerprint = Some(capability.fingerprint.clone());
-        status.fingerprint_changed = capability.changed;
-        if capability.changed {
-            status.error = Some("PQ-ключ контакта изменился; проверьте отпечаток".to_string());
-        }
-        Some(status)
+        self.v2.bind_contacts(contacts, owner)
     }
 
     #[cfg(test)]
@@ -202,12 +61,7 @@ impl PqEngine {
         peer_online: bool,
         observed_revision: Option<u64>,
     ) -> Result<bool, String> {
-        if self.legacy_owns(friend) {
-            Ok(true)
-        } else {
-            self.v2
-                .first_send(friend, local_online, peer_online, observed_revision)
-        }
+        self.v2.first_send(friend, local_online, peer_online, observed_revision)
     }
 
     pub fn observe_contact_readiness(
@@ -224,7 +78,6 @@ impl PqEngine {
             if let Ok(mut outbox) = self.outbox.lock() {
                 outbox.retain(|(owner, packet)| {
                     *owner != friend
-                        || !v2::is_packet(packet)
                         || local_ready && v2::is_readiness_packet(packet)
                 });
             }
@@ -245,7 +98,8 @@ impl PqEngine {
     }
 
     fn packet_ready(&self, friend: u32, packet: &[u8]) -> bool {
-        self.v2.ready(friend) || self.v2.local_ready(friend) && v2::is_readiness_packet(packet)
+        v2::is_packet(packet)
+            && (self.v2.ready(friend) || self.v2.local_ready(friend) && v2::is_readiness_packet(packet))
     }
 
     pub fn superseded(&self, friend: u32) -> Vec<(u64, String)> {
@@ -258,25 +112,16 @@ impl PqEngine {
 
     pub fn connection_changed(&self, friend: u32, online: bool) -> Result<(), String> {
         let result = self.v2.connection_changed(friend, online);
-        if let Ok(mut bridge) = self.legacy_bridge.lock() {
-            if let Some(key) = bridge.routes.get(&friend).cloned() {
-                bridge.validated_capabilities.remove(&key);
-                bridge.deferred_negotiation.remove(&key);
-            }
-        }
-        // A v2 transport packet belongs to the capability-validation interval
-        // in which it was queued. Durable DATA, handshake, ACK, and close state
-        // remains in v2 and is regenerated by drive; legacy v1 is independent.
+        // A packet from a previous validation interval cannot be sent after
+        // reconnecting. The journal regenerates durable records.
         if let Ok(mut outbox) = self.outbox.lock() {
-            outbox.retain(|(owner, packet)| *owner != friend || !v2::is_packet(packet));
+            outbox.retain(|(owner, _)| *owner != friend);
         }
         result
     }
 
     pub fn skip_auto(&self, friend: u32) -> Result<(), String> {
-        self.v2.skip_auto(friend)?;
-        self.clear_pending_legacy_request(friend);
-        Ok(())
+        self.v2.skip_auto(friend)
     }
 
     pub fn auto_skip_pending(&self, friend: u32) -> bool {
@@ -287,36 +132,28 @@ impl PqEngine {
         self.v2.finish_auto_skip(friend)
     }
 
-    pub fn is_v2(&self, friend: u32) -> bool {
-        !self.legacy_owns(friend) && self.v2.owns(friend)
+    pub fn owns_session(&self, friend: u32) -> bool {
+        self.v2.owns(friend)
     }
 
     pub fn capability_packet(&self) -> Vec<u8> {
         CAPABILITY_REQUEST.to_vec()
     }
 
-    /// V2 ciphertext is already durable and controls are replayable, so a full
-    /// transient transport queue can apply backpressure without losing messages.
-    /// Legacy v1 retains its existing queue semantics. Exact deduplication avoids
-    /// accumulating a second copy on every retry while the Tox queue is blocked.
+    /// Bounds the transient outbox. The journal regenerates durable packets,
+    /// and deduplication keeps retries from accumulating under backpressure.
     pub fn queue(&self, friend: u32, packets: impl IntoIterator<Item = Vec<u8>>) {
         let mut expanded_packets = Vec::new();
         for bytes in packets {
             let expanded = if bytes == CAPABILITY_REQUEST {
-                let mut packets = self.v2.discovery(friend);
-                if self.v2.ready(friend) {
-                    if let Some(legacy) = self.legacy.get() {
-                        packets.push(legacy.capability_packet());
-                    }
-                }
-                packets
+                self.v2.discovery(friend)
             } else {
                 vec![bytes]
             };
             expanded_packets.extend(
                 expanded
                     .into_iter()
-                    .filter(|packet| !v2::is_packet(packet) || self.packet_ready(friend, packet)),
+                    .filter(|packet| self.packet_ready(friend, packet)),
             );
         }
         #[cfg(feature = "pq-fault-tests")]
@@ -336,7 +173,7 @@ impl PqEngine {
         };
         #[cfg(feature = "pq-fault-tests")]
         if filtered.blocked {
-            outbox.retain(|(owner, packet)| *owner != friend || !v2::is_packet(packet));
+            outbox.retain(|(owner, _)| *owner != friend);
         }
         let mut known = outbox.iter().cloned().collect::<HashSet<_>>();
         let mut queued_bytes: usize = outbox.iter().map(|(_, bytes)| bytes.len()).sum();
@@ -345,12 +182,12 @@ impl PqEngine {
                 continue;
             }
             let discovery = v2::packet_id(&packet).is_some_and(|id| discovery_ids.contains(&id));
-            if v2::is_packet(&packet) && discovery {
+            if discovery {
                 // Capability probes and their ACKs are runtime-only. Admit the
                 // complete incoming discovery record by yielding older durable
                 // v2 transport packets, which drive regenerates from its journal.
-                while queued_bytes.saturating_add(packet.len()) > MAX_V2_TRANSPORT_BYTES
-                    || outbox.len() >= MAX_V2_TRANSPORT_PACKETS
+                while queued_bytes.saturating_add(packet.len()) > MAX_TRANSPORT_BYTES
+                    || outbox.len() >= MAX_TRANSPORT_PACKETS
                 {
                     let protected_ids = outbox
                         .iter()
@@ -360,13 +197,12 @@ impl PqEngine {
                     let index = outbox
                         .iter()
                         .rposition(|(_, queued)| {
-                            v2::is_packet(queued)
-                                && v2::packet_id(queued)
+                            v2::packet_id(queued)
                                     .is_none_or(|id| !protected_ids.contains(&id))
                         })
                         .or_else(|| {
                             outbox.iter().rposition(|(_, queued)| {
-                                v2::is_packet(queued) && v2::packet_id(queued) != incoming_id
+                                v2::packet_id(queued) != incoming_id
                             })
                         });
                     let Some(index) = index else {
@@ -377,9 +213,8 @@ impl PqEngine {
                     known.remove(&(owner, removed));
                 }
             }
-            if v2::is_packet(&packet)
-                && (queued_bytes.saturating_add(packet.len()) > MAX_V2_TRANSPORT_BYTES
-                    || outbox.len() >= MAX_V2_TRANSPORT_PACKETS)
+            if queued_bytes.saturating_add(packet.len()) > MAX_TRANSPORT_BYTES
+                || outbox.len() >= MAX_TRANSPORT_PACKETS
             {
                 // The protocol journal is not changed. DATA retries include
                 // missing fragments; duplicate DATA also regenerates its ACK.
@@ -393,53 +228,24 @@ impl PqEngine {
     }
 
     pub fn take_outbox(&self) -> VecDeque<(u32, Vec<u8>)> {
-        #[cfg(feature = "pq-fault-tests")]
-        let blocked = self.fault.blocked_friend();
         let mut output = self
             .outbox
             .lock()
             .map(|mut outbox| std::mem::take(&mut *outbox))
             .unwrap_or_default();
         #[cfg(feature = "pq-fault-tests")]
-        if let Some(friend) = blocked {
-            output.retain(|(owner, packet)| *owner != friend || !v2::is_packet(packet));
+        if let Some(blocked) = self.fault.blocked_friend() {
+            output.retain(|(owner, _)| *owner != blocked);
         }
-        if let Some(legacy) = self.legacy.get() {
-            output.extend(legacy.take_outbox());
-        }
-        let mut sendable = VecDeque::new();
-        let mut deferred = VecDeque::new();
-        for (friend, packet) in output {
-            if !self.packet_ready(friend, &packet) {
-                // v1 has no durable retry journal. Keep exact queued packets
-                // fenced until current readiness and capability are restored.
-                if !v2::is_packet(&packet) {
-                    deferred.push_back((friend, packet));
-                }
-                continue;
-            }
-            if is_legacy_negotiation_packet(&packet) && !self.legacy_capability_validated(friend) {
-                deferred.push_back((friend, packet));
-            } else {
-                sendable.push_back((friend, packet));
-            }
-        }
-        if !deferred.is_empty() {
-            if let Ok(mut outbox) = self.outbox.lock() {
-                deferred.append(&mut outbox);
-                *outbox = deferred;
-            }
-        }
-        sendable
+        output.retain(|(friend, packet)| self.packet_ready(*friend, packet));
+        output
     }
 
     pub fn requeue_front(&self, mut packets: VecDeque<(u32, Vec<u8>)>) {
-        packets.retain(|(friend, packet)| {
-            !v2::is_packet(packet) || self.packet_ready(*friend, packet)
-        });
+        packets.retain(|(friend, packet)| self.packet_ready(*friend, packet));
         #[cfg(feature = "pq-fault-tests")]
         if let Some(friend) = self.fault.blocked_friend() {
-            packets.retain(|(owner, packet)| *owner != friend || !v2::is_packet(packet));
+            packets.retain(|(owner, _)| *owner != friend);
         }
         if let Ok(mut outbox) = self.outbox.lock() {
             packets.append(&mut outbox);
@@ -447,30 +253,8 @@ impl PqEngine {
         }
     }
 
-    pub fn reconcile_friend_numbers(
-        &self,
-        resolved: &HashMap<u32, u32>,
-        previous: &HashMap<u32, String>,
-    ) {
+    pub fn reconcile_friend_numbers(&self, resolved: &HashMap<u32, u32>) {
         self.v2.remap(resolved);
-        if let Some(legacy) = self.legacy.get() {
-            legacy.reconcile_friend_numbers(resolved, previous);
-        }
-        if let Ok(mut bridge) = self.legacy_bridge.lock() {
-            bridge.routes = std::mem::take(&mut bridge.routes)
-                .into_iter()
-                .filter_map(|(old, key)| resolved.get(&old).map(|new| (*new, key)))
-                .collect();
-            let bound = bridge.routes.values().cloned().collect::<HashSet<_>>();
-            bridge.capabilities.retain(|key, _| bound.contains(key));
-            bridge
-                .validated_capabilities
-                .retain(|key| bound.contains(key));
-            bridge
-                .deferred_negotiation
-                .retain(|key, _| bound.contains(key));
-            bridge.manual_requests.retain(|key| bound.contains(key));
-        }
         if let Ok(mut outbox) = self.outbox.lock() {
             *outbox = std::mem::take(&mut *outbox)
                 .into_iter()
@@ -479,26 +263,9 @@ impl PqEngine {
         }
     }
 
-    pub fn remove_friend(&self, friend: u32, key: Option<&str>) -> Result<(), String> {
+    pub fn remove_friend(&self, friend: u32) -> Result<(), String> {
         self.v2.detach(friend)?;
-        if let Ok(mut bridge) = self.legacy_bridge.lock() {
-            let stable = bridge
-                .routes
-                .remove(&friend)
-                .or_else(|| key.map(str::to_ascii_uppercase));
-            if let Some(stable) = stable {
-                if !bridge.routes.values().any(|value| value == &stable) {
-                    bridge.capabilities.remove(&stable);
-                    bridge.validated_capabilities.remove(&stable);
-                    bridge.deferred_negotiation.remove(&stable);
-                    bridge.manual_requests.remove(&stable);
-                }
-            }
-        }
         self.v2.unbind(friend);
-        if let Some(legacy) = self.legacy.get() {
-            legacy.remove_friend(friend, key)?;
-        }
         if let Ok(mut outbox) = self.outbox.lock() {
             outbox.retain(|(owner, _)| *owner != friend);
         }
@@ -507,39 +274,8 @@ impl PqEngine {
 
     pub fn status(&self, friend: u32) -> PqStatus {
         #[cfg(feature = "pq-fault-tests")]
-        self.fault
-            .observe(friend, self.v2.fault_snapshot(friend).ok());
-        let mut status = self.transport_status(friend);
-        status.legacy_available = self.v2.ready(friend)
-            && !self.v2.requires_v2(friend)
-            && !self.v2.auto_skip_pending(friend)
-            && !self.legacy_owns(friend)
-            && self.legacy_capability_validated(friend);
-        status
-    }
-
-    fn transport_status(&self, friend: u32) -> PqStatus {
-        if self.legacy_owns(friend) {
-            return self.legacy.get().expect("legacy present").status(friend);
-        }
-        if self.legacy_request_pending(friend) && !self.v2.requires_v2(friend) {
-            if let Some(status) = self.cached_legacy_status(friend) {
-                return status;
-            }
-        }
-        // v2 pending/active state takes precedence over a passive v1
-        // capability, including the first-message capability wait.
-        if self.v2.owns(friend) {
-            return self.v2.status(friend);
-        }
-        if let Some(legacy) = self.legacy.get() {
-            let status = legacy.status(friend);
-            if self.legacy_capability_validated(friend) && status.supported {
-                return status;
-            }
-        }
-        self.cached_legacy_status(friend)
-            .unwrap_or_else(|| self.v2.status(friend))
+        self.fault.observe(friend, self.v2.fault_snapshot(friend).ok());
+        self.v2.status(friend)
     }
 
     pub fn active_history_role(&self, friend: u32) -> Option<(&'static str, bool)> {
@@ -567,210 +303,46 @@ impl PqEngine {
     }
 
     pub fn complete_identity(&self, noise: &[u8]) -> Result<(), String> {
-        self.v2.complete_identity(noise)?;
-        self.initialize_legacy_after_identity()
-    }
-
-    fn initialize_legacy_after_identity(&self) -> Result<(), String> {
-        if !self.v2.has_identity() || self.legacy.get().is_some() {
-            return Ok(());
-        }
-        let created = LegacyEngine::new(&self.data_dir)?;
-        if self.legacy.set(created).is_err() {
-            // A concurrent caller installed the same identity-backed engine.
-            return Ok(());
-        }
-        let legacy = self.legacy.get().ok_or("PQ_LEGACY_IDENTITY_NOT_CREATED")?;
-        let cached = {
-            let bridge = self
-                .legacy_bridge
-                .lock()
-                .map_err(|_| "PQ_LEGACY_BRIDGE_LOCKED")?;
-            bridge
-                .routes
-                .iter()
-                .filter_map(|(friend, key)| {
-                    bridge.validated_capabilities.contains(key).then(|| {
-                        bridge
-                            .capabilities
-                            .get(key)
-                            .map(|capability| (*friend, capability.packet.clone()))
-                    })?
-                })
-                .collect::<Vec<_>>()
-        };
-        for (friend, packet) in cached {
-            let result = legacy.handle_packet(friend, &packet)?;
-            self.queue(friend, result.outgoing);
-            self.import_legacy_trust(friend)?;
-            let request = self.start_pending_legacy_request(friend)?;
-            self.queue(friend, request);
-        }
-        Ok(())
-    }
-
-    fn start_pending_legacy_request(&self, friend: u32) -> Result<Vec<Vec<u8>>, String> {
-        if !self.v2.ready(friend) {
-            return Ok(Vec::new());
-        }
-        if self.v2.requires_v2(friend) {
-            self.clear_pending_legacy_request(friend);
-            return Ok(Vec::new());
-        }
-        if !self.legacy_request_pending(friend) {
-            return Ok(Vec::new());
-        }
-        if !self.legacy_capability_validated(friend) {
-            return Ok(Vec::new());
-        }
-        let legacy = self.legacy.get().ok_or("PQ_LEGACY_IDENTITY_NOT_CREATED")?;
-        let status = legacy.status(friend);
-        if !status.supported || !matches!(status.state.as_str(), "available" | "error") {
-            return Ok(Vec::new());
-        }
-        let packets = legacy.request(friend)?;
-        self.import_legacy_trust(friend)?;
-        self.v2.finish_legacy_request(friend)?;
-        self.clear_pending_legacy_request(friend);
-        Ok(packets)
-    }
-
-    fn clear_pending_legacy_request(&self, friend: u32) {
-        let Ok(key) = self.stable_key(friend) else {
-            return;
-        };
-        if let Ok(mut bridge) = self.legacy_bridge.lock() {
-            bridge.manual_requests.remove(&key);
-        }
+        self.v2.complete_identity(noise)
     }
 
     pub fn queues_encrypted_messages(&self, friend: u32) -> bool {
-        if self.is_v2(friend) {
-            self.v2.encrypts(friend)
-        } else {
-            self.legacy
-                .get()
-                .is_some_and(|legacy| legacy.queues_encrypted_messages(friend))
-        }
+        self.v2.encrypts(friend)
     }
 
     pub fn holds_plaintext_messages(&self, friend: u32) -> bool {
-        self.v2.holds_plaintext(friend) || self.legacy_owns(friend)
-    }
-
-    pub fn shutdown_friends(&self) -> Vec<u32> {
-        self.legacy
-            .get()
-            .map(LegacyEngine::shutdown_friends)
-            .unwrap_or_default()
-    }
-
-    pub fn drive_shutdown(&self, friend: u32, drained: bool) -> (Vec<Vec<u8>>, bool) {
-        self.legacy
-            .get()
-            .map(|legacy| legacy.drive_shutdown(friend, drained))
-            .unwrap_or_default()
+        self.v2.holds_plaintext(friend)
     }
 
     pub fn drive(&self, friend: u32, online: bool, external_drained: bool) -> Result<(), String> {
-        if self.legacy_owns(friend) {
-            self.queue(friend, self.v2.drive_discovery(friend, online)?);
-            return Ok(());
-        }
-        let packets = self.v2.drive(friend, online, external_drained);
-        // v2 may create the identity itself after its bounded OS-only entropy
-        // fallback. Initialize legacy compatibility on that path as well.
-        self.initialize_legacy_after_identity()?;
-        let packets = packets?;
-        self.queue(friend, packets);
-        if online && self.legacy.get().is_some() {
-            self.queue(friend, self.start_pending_legacy_request(friend)?);
-        }
+        self.queue(friend, self.v2.drive(friend, online, external_drained)?);
         Ok(())
     }
 
     pub fn request(&self, friend: u32) -> Result<Vec<Vec<u8>>, String> {
         self.require_ready(friend)?;
-        if self.legacy_owns(friend) {
-            return Err("PQ_SESSION_WAIT".into());
-        }
-        let packets = self.v2.request(friend)?;
-        self.clear_pending_legacy_request(friend);
-        // A missing or delayed v2 marker is not proof of a legacy-only peer.
-        // Keep the explicit request durable; drive retries capability discovery.
-        Ok(packets)
-    }
-
-    pub fn request_legacy(&self, friend: u32) -> Result<Vec<Vec<u8>>, String> {
-        self.require_ready(friend)?;
-        if self.v2.requires_v2(friend) {
-            return Err("PQ_LEGACY_DOWNGRADE_FORBIDDEN".into());
-        }
-        if !self.legacy_capability_validated(friend) {
-            return Err("PQ_LEGACY_CAPABILITY_REQUIRED".into());
-        }
-        if self.legacy_owns(friend) {
-            return self.legacy.get().ok_or("PQ_UNAVAILABLE")?.request(friend);
-        }
-        self.v2.request_identity_only(friend)?;
-        let key = self.stable_key(friend)?;
-        self.legacy_bridge
-            .lock()
-            .map_err(|_| "PQ_LEGACY_BRIDGE_LOCKED")?
-            .manual_requests
-            .insert(key);
-        self.queue(friend, [self.capability_packet()]);
-        if self.legacy.get().is_none() {
-            return Ok(Vec::new());
-        }
-        self.start_pending_legacy_request(friend)
+        self.v2.request(friend)
     }
 
     pub fn accept(&self, friend: u32) -> Result<Vec<Vec<u8>>, String> {
         self.require_ready(friend)?;
-        if self.is_v2(friend) {
-            self.v2.accept(friend)
-        } else {
-            self.legacy.get().ok_or("PQ_UNAVAILABLE")?.accept(friend)
-        }
+        self.v2.accept(friend)
     }
 
     pub fn withdraw(&self, friend: u32) -> Result<Vec<Vec<u8>>, String> {
-        if self.is_v2(friend) {
-            let packets = self.v2.cancel(friend)?;
-            self.clear_pending_legacy_request(friend);
-            Ok(packets)
-        } else {
-            self.legacy.get().ok_or("PQ_UNAVAILABLE")?.withdraw(friend)
-        }
+        self.v2.cancel(friend)
     }
 
     pub fn reject(&self, friend: u32) -> Result<Vec<Vec<u8>>, String> {
-        if self.is_v2(friend) {
-            let packets = self.v2.cancel(friend)?;
-            self.clear_pending_legacy_request(friend);
-            Ok(packets)
-        } else {
-            self.legacy.get().ok_or("PQ_UNAVAILABLE")?.reject(friend)
-        }
+        self.v2.cancel(friend)
     }
 
     pub fn request_shutdown(&self, friend: u32) -> Result<Vec<Vec<u8>>, String> {
-        if self.is_v2(friend) {
-            self.v2.shutdown(friend)
-        } else {
-            // A legacy peer cannot prove readiness without beginning a close.
-            // Preserve its encryption and queued records until it can do so.
-            Err("PQ_SHUTDOWN_PEER_NOT_READY".into())
-        }
+        self.v2.shutdown(friend)
     }
 
     pub fn cancel_shutdown(&self, friend: u32) -> Result<Vec<Vec<u8>>, String> {
-        if self.is_v2(friend) {
-            self.v2.cancel_shutdown(friend)
-        } else {
-            Err("PQ_SHUTDOWN_NOT_CANCELLABLE".into())
-        }
+        self.v2.cancel_shutdown(friend)
     }
 
     pub fn encrypt(&self, friend: u32, text: &str) -> Result<EncryptedMessage, String> {
@@ -784,14 +356,7 @@ impl PqEngine {
         operation: &str,
         text: &str,
     ) -> Result<EncryptedMessage, String> {
-        if self.is_v2(friend) {
-            self.v2.encrypt(friend, operation, text)
-        } else {
-            self.legacy
-                .get()
-                .ok_or("PQ_UNAVAILABLE")?
-                .encrypt(friend, text)
-        }
+        self.v2.encrypt(friend, operation, text)
     }
 
     #[cfg(test)]
@@ -799,192 +364,25 @@ impl PqEngine {
         self.handle_packet_observed(friend, bytes, true)
     }
 
+    /// Ignores obsolete packets and packets delivered across a local suspend.
+    /// The durable sender can retry a current packet after reconnection.
     pub fn handle_packet_observed(
         &self,
         friend: u32,
         bytes: &[u8],
         local_online: bool,
     ) -> Result<PacketResult, String> {
-        if v2::is_packet(bytes) {
-            if !local_online {
-                // Every v2 record is journaled by its sender and retried. Drop
-                // packets delivered by an iteration that crossed a local
-                // suspend boundary so neither a capability nor a fragment can
-                // validate or mutate the next connection interval.
-                return Ok(empty_packet_result());
+        if !local_online || !v2::is_packet(bytes) {
+            return Ok(empty_packet_result());
+        }
+        let generation = self.v2.reset_generation(friend);
+        let result = self.v2.handle(friend, bytes);
+        if self.v2.reset_generation(friend) != generation {
+            if let Ok(mut outbox) = self.outbox.lock() {
+                outbox.retain(|(owner, _)| *owner != friend);
             }
-            let generation = self.v2.reset_generation(friend);
-            let result = if self.legacy_owns(friend) {
-                self.v2.handle_discovery(friend, bytes)
-            } else {
-                self.v2.handle(friend, bytes)
-            };
-            if self.v2.reset_generation(friend) != generation {
-                if let Ok(mut outbox) = self.outbox.lock() {
-                    outbox.retain(|(owner, _)| *owner != friend);
-                }
-            }
-            return result;
         }
-        if !local_online || !self.v2.ready(friend) {
-            return Ok(empty_packet_result());
-        }
-        let capability = parse_legacy_capability(bytes)?;
-        if capability.is_none() && self.v2_owns_negotiation(friend) {
-            // Delayed v1 controls cannot take dispatch away from a durable v2
-            // request, handshake or active epoch. Keep its queue and keys live.
-            return Ok(empty_packet_result());
-        }
-        if !local_online && (capability.is_some() || is_legacy_negotiation_packet(bytes)) {
-            return Ok(empty_packet_result());
-        }
-        if capability.is_none()
-            && is_legacy_negotiation_packet(bytes)
-            && !self.legacy_capability_validated(friend)
-        {
-            self.defer_legacy_negotiation(friend, bytes)?;
-            return Ok(empty_packet_result());
-        }
-        if let Some(legacy) = self.legacy.get() {
-            let mut result = legacy.handle_packet(friend, bytes)?;
-            self.latch_legacy_session_event(friend, &result)?;
-            if let Some(capability) = capability {
-                let changed = self.remember_legacy_capability(friend, capability)?;
-                if !changed {
-                    let deferred = self.take_deferred_legacy_negotiation(friend)?;
-                    for deferred in deferred
-                        .into_iter()
-                        .filter(|_| !self.v2_owns_negotiation(friend))
-                    {
-                        let replayed = legacy.handle_packet(friend, &deferred)?;
-                        self.latch_legacy_session_event(friend, &replayed)?;
-                        merge_legacy_negotiation_result(&mut result, replayed)?;
-                    }
-                }
-                result
-                    .outgoing
-                    .extend(self.start_pending_legacy_request(friend)?);
-            }
-            return Ok(result);
-        }
-        let Some(capability) = capability else {
-            return Err("PQ_LEGACY_IDENTITY_NOT_CREATED".to_string());
-        };
-        self.remember_legacy_capability(friend, capability)?;
-        Ok(empty_packet_result())
-    }
-
-    fn latch_legacy_session_event(&self, friend: u32, result: &PacketResult) -> Result<(), String> {
-        if matches!(
-            result.session_event,
-            Some(PqSessionEvent::Active)
-                | Some(PqSessionEvent::CloseRequested)
-                | Some(PqSessionEvent::Closed)
-        ) {
-            self.v2.latch_manual_only(friend)?;
-        }
-        Ok(())
-    }
-
-    fn defer_legacy_negotiation(&self, friend: u32, bytes: &[u8]) -> Result<(), String> {
-        let mut bridge = self
-            .legacy_bridge
-            .lock()
-            .map_err(|_| "PQ_LEGACY_BRIDGE_LOCKED")?;
-        let key = bridge
-            .routes
-            .get(&friend)
-            .cloned()
-            .ok_or("PQ_CONTACT_NOT_BOUND")?;
-        let deferred = bridge.deferred_negotiation.entry(key).or_default();
-        if deferred.iter().any(|packet| packet == bytes) {
-            return Ok(());
-        }
-        let bytes_after = deferred
-            .iter()
-            .try_fold(bytes.len(), |total, packet| total.checked_add(packet.len()))
-            .ok_or("PQ_LEGACY_NEGOTIATION_BACKPRESSURE")?;
-        if deferred.len() >= MAX_DEFERRED_LEGACY_NEGOTIATION_PACKETS
-            || bytes_after > MAX_DEFERRED_LEGACY_NEGOTIATION_BYTES
-        {
-            return Err("PQ_LEGACY_NEGOTIATION_BACKPRESSURE".to_string());
-        }
-        deferred.push_back(bytes.to_vec());
-        Ok(())
-    }
-
-    fn take_deferred_legacy_negotiation(&self, friend: u32) -> Result<VecDeque<Vec<u8>>, String> {
-        let mut bridge = self
-            .legacy_bridge
-            .lock()
-            .map_err(|_| "PQ_LEGACY_BRIDGE_LOCKED")?;
-        let key = bridge
-            .routes
-            .get(&friend)
-            .cloned()
-            .ok_or("PQ_CONTACT_NOT_BOUND")?;
-        Ok(bridge.deferred_negotiation.remove(&key).unwrap_or_default())
-    }
-
-    fn legacy_capability_validated(&self, friend: u32) -> bool {
-        self.legacy_bridge.lock().is_ok_and(|bridge| {
-            bridge
-                .routes
-                .get(&friend)
-                .is_some_and(|key| bridge.validated_capabilities.contains(key))
-        })
-    }
-
-    fn remember_legacy_capability(
-        &self,
-        friend: u32,
-        capability: LegacyCapability,
-    ) -> Result<bool, String> {
-        let mut bridge = self
-            .legacy_bridge
-            .lock()
-            .map_err(|_| "PQ_LEGACY_BRIDGE_LOCKED")?;
-        let key = bridge
-            .routes
-            .get(&friend)
-            .cloned()
-            .ok_or("PQ_CONTACT_NOT_BOUND")?;
-        let previous = bridge.capabilities.get(&key);
-        let changed = previous.is_some_and(|old| old.public_key != capability.public_key)
-            || previous.is_some_and(|old| old.changed);
-        bridge.capabilities.insert(
-            key.clone(),
-            LegacyCapability {
-                changed,
-                ..capability
-            },
-        );
-        bridge.validated_capabilities.insert(key.clone());
-        if changed {
-            bridge.deferred_negotiation.remove(&key);
-            bridge.manual_requests.remove(&key);
-        }
-        drop(bridge);
-        if changed {
-            self.purge_legacy_negotiation(friend);
-        }
-        self.v2.legacy_capability_validated(friend);
-        Ok(changed)
-    }
-
-    fn purge_legacy_negotiation(&self, friend: u32) {
-        if let Ok(mut outbox) = self.outbox.lock() {
-            outbox.retain(|(owner, packet)| {
-                *owner != friend || !is_legacy_negotiation_packet(packet)
-            });
-        }
-        let Some(legacy) = self.legacy.get() else {
-            return;
-        };
-        let mut retained = legacy.take_outbox();
-        retained
-            .retain(|(owner, packet)| *owner != friend || !is_legacy_negotiation_packet(packet));
-        legacy.requeue_front(retained);
+        result
     }
 
     pub fn commit_received(&self, friend: u32, wire: u64) -> Result<Vec<Vec<u8>>, String> {
@@ -1007,91 +405,14 @@ impl PqEngine {
         self.v2.has_durable_message(id)
     }
 
-    pub fn discard_message(
-        &self,
-        friend: u32,
-        operation: &str,
-        legacy_wires: &[u64],
-    ) -> Result<(), String> {
+    pub fn discard_message(&self, friend: u32, operation: &str) -> Result<(), String> {
         let retired = self.v2.discard_message(friend, operation)?;
-        let keep = |owner: u32, packet: &[u8]| {
-            owner != friend
-                || !(retired.iter().any(|old| old == packet)
-                    || packet.len() >= DATA_HEADER_SIZE
-                        && packet[4] == VERSION
-                        && packet[5] == KIND_DATA
-                        && legacy_wires.contains(&u64::from_be_bytes(
-                            packet[6..14].try_into().expect("validated data header"),
-                        )))
-        };
         self.outbox
             .lock()
             .map_err(|_| "PQ_STATE_LOCKED")?
-            .retain(|(owner, packet)| keep(*owner, packet));
-        if let Some(legacy) = self.legacy.get() {
-            let mut packets = legacy.take_outbox();
-            packets.retain(|(owner, packet)| keep(*owner, packet));
-            legacy.requeue_front(packets);
-        }
+            .retain(|(owner, packet)| *owner != friend || !retired.contains(packet));
         Ok(())
     }
-}
-
-fn parse_legacy_capability(bytes: &[u8]) -> Result<Option<LegacyCapability>, String> {
-    if bytes.len() < HEADER_SIZE
-        || bytes[0] != PACKET_ID
-        || &bytes[1..4] != MAGIC
-        || bytes[4] != VERSION
-        || !matches!(bytes[5], KIND_CAPABILITY | KIND_CAPABILITY_ACK)
-    {
-        return Ok(None);
-    }
-    let payload = &bytes[HEADER_SIZE..];
-    if payload.len() != KAIGEN_CAPABILITY_TAG.len() + MLKEM_PUBLIC_KEY_BYTES
-        || !payload.starts_with(KAIGEN_CAPABILITY_TAG)
-    {
-        return Err("Некорректный идентификатор возможности Kaigen PQ".to_string());
-    }
-    let public_key = payload[KAIGEN_CAPABILITY_TAG.len()..].to_vec();
-    let mut packet = bytes.to_vec();
-    // Replaying either capability kind as a request makes the freshly created
-    // local identity visible before a queued offer. This also repairs a delayed
-    // ACK that referred to an identity file which no longer exists.
-    packet[5] = KIND_CAPABILITY;
-    Ok(Some(LegacyCapability {
-        fingerprint: fingerprint(&public_key),
-        public_key,
-        packet,
-        changed: false,
-    }))
-}
-
-fn is_legacy_negotiation_packet(bytes: &[u8]) -> bool {
-    bytes.len() >= HEADER_SIZE
-        && bytes[0] == PACKET_ID
-        && &bytes[1..4] == MAGIC
-        && bytes[4] == VERSION
-        && matches!(
-            bytes[5],
-            KIND_OFFER | KIND_ACCEPT | KIND_CONFIRM | KIND_REJECT | KIND_WITHDRAW
-        )
-}
-
-fn merge_legacy_negotiation_result(
-    target: &mut PacketResult,
-    mut replayed: PacketResult,
-) -> Result<(), String> {
-    if replayed.received_wire_id.is_some()
-        || replayed.received_text.is_some()
-        || replayed.acknowledged_wire_id.is_some()
-    {
-        return Err("PQ_LEGACY_NEGOTIATION_RESULT_INVALID".to_string());
-    }
-    target.outgoing.append(&mut replayed.outgoing);
-    if replayed.session_event.is_some() {
-        target.session_event = replayed.session_event;
-    }
-    Ok(())
 }
 
 fn empty_packet_result() -> PacketResult {
@@ -1114,12 +435,18 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
+    static NEXT_ROOT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
     fn test_root(label: &str) -> PathBuf {
         let suffix = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("system clock")
             .as_nanos();
-        let root = std::env::temp_dir().join(format!("kaigen-pq-engine-{label}-{suffix}"));
+        let sequence = NEXT_ROOT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "kaigen-pq-engine-{label}-{}-{suffix}-{sequence}",
+            std::process::id()
+        ));
         std::fs::create_dir_all(&root).expect("create test root");
         root
     }
@@ -1151,11 +478,40 @@ mod tests {
             .collect()
     }
 
-    fn confirm_readiness(local: &PqEngine, friend: u32) {
-        let key = local.stable_key(friend).unwrap();
+    // Readiness is a separate fixture boundary from PQ capability discovery.
+    // Reassemble actual generated records so CapabilityProbe/Ack cannot leak in.
+    fn readiness_only_packets(packets: Vec<Vec<u8>>) -> Vec<Vec<u8>> {
+        let mut groups = BTreeMap::<[u8; 16], BTreeMap<u16, Vec<u8>>>::new();
+        for packet in packets {
+            let digest = v2::packet_id(&packet).expect("generated v2 packet");
+            let index = u16::from_be_bytes(packet[22..24].try_into().unwrap());
+            groups.entry(digest).or_default().insert(index, packet);
+        }
+        groups
+            .into_values()
+            .flat_map(|parts| {
+                let packets = parts.into_values().collect::<Vec<_>>();
+                let bytes = packets
+                    .iter()
+                    .flat_map(|p| p[30..].iter().copied())
+                    .collect::<Vec<_>>();
+                let record = serde_json::from_slice::<serde_json::Value>(&bytes).unwrap();
+                if matches!(
+                    record["kind"].as_str(),
+                    Some("ReadinessProbe" | "ReadinessAck")
+                ) {
+                    packets
+                } else {
+                    Vec::new()
+                }
+            })
+            .collect()
+    }
+
+    fn confirm_readiness(local: &PqEngine, friend: u32, key: &str) {
         local.connection_changed(friend, true).unwrap();
         local
-            .observe_contact_readiness(friend, &key, local.connection_revision(friend), true)
+            .observe_contact_readiness(friend, key, local.connection_revision(friend), true)
             .unwrap();
         let path = test_root("readiness-peer-fixture");
         std::fs::create_dir_all(&path).unwrap();
@@ -1166,25 +522,15 @@ mod tests {
         peer.connection_changed(friend, true).unwrap();
         peer.observe_contact_readiness(friend, &remote_key, peer.connection_revision(friend), true)
             .unwrap();
-        for packet in local.v2.discovery(friend) {
+        for packet in readiness_only_packets(local.v2.discovery(friend)) {
             let result = peer.handle_packet(friend, &packet).unwrap();
-            for reply in result.outgoing {
+            for reply in readiness_only_packets(result.outgoing) {
                 local.handle_packet(friend, &reply).unwrap();
             }
         }
         assert!(local.contact_ready(friend, &key));
         drop(peer);
         std::fs::remove_dir_all(path).unwrap();
-    }
-
-    fn has_legacy_kind(packets: &VecDeque<(u32, Vec<u8>)>, kind: u8) -> bool {
-        packets.iter().any(|(_, packet)| {
-            packet.len() >= HEADER_SIZE
-                && packet[0] == PACKET_ID
-                && &packet[1..4] == MAGIC
-                && packet[4] == VERSION
-                && packet[5] == kind
-        })
     }
 
     #[test]
@@ -1197,26 +543,21 @@ mod tests {
         let friend = 7;
         let peer_key = "11".repeat(32);
         let owner_key = "22".repeat(32);
-        let remote_legacy = LegacyEngine::new(&remote_dir).unwrap();
         let remote = PqEngine::new(&remote_dir).unwrap();
         let local = PqEngine::new(&local_dir).unwrap();
         local
             .bind_contact(friend, &peer_key, &owner_key, false)
             .unwrap();
-        confirm_readiness(&local, friend);
+        confirm_readiness(&local, friend, &peer_key);
         local.connection_changed(friend, true).unwrap();
-        confirm_readiness(&local, friend);
-        // A deferred old OFFER must not be replayed after v2 discovery wins.
-        local
-            .handle_packet(friend, &packet(KIND_OFFER, &[]))
-            .unwrap();
+        confirm_readiness(&local, friend, &peer_key);
+        // An obsolete wire version cannot establish a session.
+        let obsolete_offer = [PACKET_ID, b'T', b'P', b'Q', 1, 2];
+        let ignored = local.handle_packet(friend, &obsolete_offer).unwrap();
+        assert!(ignored.session_event.is_none() && ignored.outgoing.is_empty());
         for packet in remote.v2.capability() {
             local.handle_packet(friend, &packet).unwrap();
         }
-        local
-            .handle_packet(friend, &remote_legacy.capability_packet())
-            .unwrap();
-        assert!(!local.legacy_owns(friend));
         local.take_outbox();
         local.request(friend).unwrap();
         local.complete_identity(&[0x42; 32]).unwrap();
@@ -1235,29 +576,18 @@ mod tests {
         restarted
             .bind_contact(friend, &peer_key, &owner_key, false)
             .unwrap();
-        confirm_readiness(&restarted, friend);
+        confirm_readiness(&restarted, friend, &peer_key);
         restarted.connection_changed(friend, true).unwrap();
-        confirm_readiness(&restarted, friend);
-        restarted
-            .handle_packet(friend, &remote_legacy.capability_packet())
-            .unwrap();
-        // Neither a repeated request nor explicit legacy consent can downgrade
-        // a contact whose v2 capability was durably confirmed.
+        confirm_readiness(&restarted, friend, &peer_key);
         restarted.request(friend).unwrap();
-        assert_eq!(
-            restarted.request_legacy(friend).unwrap_err(),
-            "PQ_LEGACY_DOWNGRADE_FORBIDDEN"
-        );
         restarted.drive(friend, true, true).unwrap();
         let before_marker = restarted.take_outbox();
-        assert!(!has_legacy_kind(&before_marker, KIND_OFFER));
         assert!(!v2_record_kinds(&before_marker)
             .iter()
             .any(|kind| kind == "Offer"));
         assert_eq!(restarted.status(friend).protocol_version, 2);
         assert_eq!(restarted.status(friend).state, "accepting");
         assert!(restarted.status(friend).manual_waiting_for_capability);
-        assert!(!restarted.status(friend).legacy_available);
 
         for packet in remote.v2.capability() {
             restarted.handle_packet(friend, &packet).unwrap();
@@ -1265,296 +595,7 @@ mod tests {
         restarted.drive(friend, true, true).unwrap();
         let resumed = restarted.take_outbox();
         assert!(v2_record_kinds(&resumed).iter().any(|kind| kind == "Offer"));
-        assert!(!has_legacy_kind(&resumed, KIND_OFFER));
-        assert!(restarted.is_v2(friend));
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn manual_discovery_chooses_v2_in_both_capability_orders() {
-        for legacy_first in [false, true] {
-            let root = test_root("manual-capability-order");
-            let local_dir = root.join("local");
-            let remote_dir = root.join("remote");
-            std::fs::create_dir_all(&local_dir).unwrap();
-            std::fs::create_dir_all(&remote_dir).unwrap();
-            let friend = 7;
-            let local = PqEngine::new(&local_dir).unwrap();
-            local
-                .bind_contact(friend, &"11".repeat(32), &"22".repeat(32), false)
-                .unwrap();
-            confirm_readiness(&local, friend);
-            local.v2.request_identity_only(friend).unwrap();
-            local.complete_identity(&[0x42; 32]).unwrap();
-            local.v2.finish_legacy_request(friend).unwrap();
-            local.connection_changed(friend, true).unwrap();
-            confirm_readiness(&local, friend);
-            let remote_legacy = LegacyEngine::new(&remote_dir).unwrap();
-            let remote = PqEngine::new(&remote_dir).unwrap();
-            if !legacy_first {
-                for packet in remote.v2.capability() {
-                    local.handle_packet(friend, &packet).unwrap();
-                }
-            }
-            local
-                .handle_packet(friend, &remote_legacy.capability_packet())
-                .unwrap();
-            assert!(local.request(friend).unwrap().is_empty());
-            assert_eq!(local.status(friend).state, "accepting");
-            assert!(!has_legacy_kind(&local.take_outbox(), KIND_OFFER));
-            if legacy_first {
-                // Repeated drive ticks with a lost marker cannot silently
-                // choose v1. The late v2 marker is the only resumption trigger.
-                for _ in 0..8 {
-                    local.drive(friend, true, true).unwrap();
-                    let waiting = local.take_outbox();
-                    assert!(!has_legacy_kind(&waiting, KIND_OFFER));
-                    assert!(!v2_record_kinds(&waiting).iter().any(|kind| kind == "Offer"));
-                }
-                // Discovery remains pending beyond the removed 2s fallback;
-                // elapsed time alone cannot grant consent to legacy mode.
-                std::thread::sleep(std::time::Duration::from_millis(2_100));
-                local.drive(friend, true, true).unwrap();
-                assert!(!has_legacy_kind(&local.take_outbox(), KIND_OFFER));
-                assert_eq!(local.status(friend).protocol_version, 2);
-                assert!(local.status(friend).manual_waiting_for_capability);
-                assert!(local.status(friend).legacy_available);
-                for packet in remote.v2.capability() {
-                    local.handle_packet(friend, &packet).unwrap();
-                }
-            }
-            local.drive(friend, true, true).unwrap();
-            let offered = local.take_outbox();
-            assert!(v2_record_kinds(&offered).iter().any(|kind| kind == "Offer"));
-            assert!(!has_legacy_kind(&offered, KIND_OFFER));
-
-            // Delayed compatibility controls cannot shadow this v2 attempt.
-            for kind in [
-                KIND_OFFER,
-                KIND_ACCEPT,
-                KIND_CONFIRM,
-                KIND_REJECT,
-                KIND_WITHDRAW,
-                KIND_CLOSE_REQUEST,
-                KIND_CLOSE_READY,
-                KIND_CLOSE_BUSY,
-                KIND_CLOSE_COMMIT,
-                KIND_CLOSE_ACK,
-                KIND_CLOSE_FINAL,
-                KIND_ACK,
-                KIND_DATA,
-            ] {
-                let ignored = local.handle_packet(friend, &packet(kind, &[])).unwrap();
-                assert!(ignored.session_event.is_none());
-            }
-            assert!(local.is_v2(friend));
-            assert_eq!(local.status(friend).state, "offered");
-            assert!(!local.legacy_owns(friend));
-            std::fs::remove_dir_all(root).unwrap();
-        }
-    }
-
-    #[test]
-    fn manual_v2_wait_survives_lost_discovery_and_restart_until_explicit_legacy_choice() {
-        let root = test_root("manual-v2-wait-explicit-legacy");
-        let local_dir = root.join("local");
-        let remote_dir = root.join("remote");
-        std::fs::create_dir_all(&local_dir).unwrap();
-        std::fs::create_dir_all(&remote_dir).unwrap();
-        let friend = 7;
-        let peer_key = "11".repeat(32);
-        let owner_key = "22".repeat(32);
-        let remote = LegacyEngine::new(&remote_dir).unwrap();
-        let local = PqEngine::new(&local_dir).unwrap();
-        local
-            .bind_contact(friend, &peer_key, &owner_key, false)
-            .unwrap();
-        confirm_readiness(&local, friend);
-        local
-            .handle_packet(friend, &remote.capability_packet())
-            .unwrap();
-        local.request(friend).unwrap();
-        local.complete_identity(&[0x42; 32]).unwrap();
-        assert!(!has_legacy_kind(&local.take_outbox(), KIND_OFFER));
-        drop(local);
-
-        let restarted = PqEngine::new(&local_dir).unwrap();
-        restarted
-            .bind_contact(friend, &peer_key, &owner_key, false)
-            .unwrap();
-        confirm_readiness(&restarted, friend);
-        restarted.connection_changed(friend, true).unwrap();
-        confirm_readiness(&restarted, friend);
-        restarted
-            .handle_packet(friend, &remote.capability_packet())
-            .unwrap();
-        restarted.drive(friend, true, true).unwrap();
-        assert!(!has_legacy_kind(&restarted.take_outbox(), KIND_OFFER));
-        assert_eq!(restarted.status(friend).protocol_version, 2);
-        assert!(restarted.status(friend).manual_waiting_for_capability);
-        assert!(restarted.status(friend).legacy_available);
-        for _ in 0..8 {
-            restarted.drive(friend, true, true).unwrap();
-            assert!(!has_legacy_kind(&restarted.take_outbox(), KIND_OFFER));
-        }
-        let negotiation = restarted
-            .request_legacy(friend)
-            .unwrap()
-            .into_iter()
-            .map(|packet| (friend, packet))
-            .collect();
-        assert!(has_legacy_kind(&negotiation, KIND_OFFER));
-        assert_eq!(restarted.status(friend).protocol_version, 1);
-        assert_eq!(restarted.status(friend).state, "offered");
-        assert!(!restarted.status(friend).manual_waiting_for_capability);
-        assert!(!restarted.status(friend).legacy_available);
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn explicit_legacy_consent_is_not_restored_before_identity_completion() {
-        let root = test_root("legacy-consent-runtime-only");
-        let local_dir = root.join("local");
-        let remote_dir = root.join("remote");
-        std::fs::create_dir_all(&local_dir).unwrap();
-        std::fs::create_dir_all(&remote_dir).unwrap();
-        let friend = 7;
-        let peer_key = "11".repeat(32);
-        let owner_key = "22".repeat(32);
-        let remote = LegacyEngine::new(&remote_dir).unwrap();
-        let local = PqEngine::new(&local_dir).unwrap();
-        local
-            .bind_contact(friend, &peer_key, &owner_key, false)
-            .unwrap();
-        confirm_readiness(&local, friend);
-        assert_eq!(
-            local.request_legacy(friend).unwrap_err(),
-            "PQ_LEGACY_CAPABILITY_REQUIRED"
-        );
-        local
-            .handle_packet(friend, &remote.capability_packet())
-            .unwrap();
-        assert!(local.request_legacy(friend).unwrap().is_empty());
-        assert_eq!(local.status(friend).protocol_version, 1);
-        drop(local);
-
-        let restarted = PqEngine::new(&local_dir).unwrap();
-        restarted
-            .bind_contact(friend, &peer_key, &owner_key, false)
-            .unwrap();
-        confirm_readiness(&restarted, friend);
-        restarted
-            .handle_packet(friend, &remote.capability_packet())
-            .unwrap();
-        restarted.complete_identity(&[0x42; 32]).unwrap();
-        restarted.drive(friend, true, true).unwrap();
-        assert!(!has_legacy_kind(&restarted.take_outbox(), KIND_OFFER));
-        assert_eq!(restarted.status(friend).protocol_version, 2);
-        assert!(restarted.status(friend).manual_waiting_for_capability);
-        let packets = restarted.request_legacy(friend).unwrap();
-        assert!(packets
-            .iter()
-            .any(|packet| packet[4] == VERSION && packet[5] == KIND_OFFER));
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn late_v2_discovery_preempts_unstarted_explicit_legacy_request() {
-        let root = test_root("late-v2-before-legacy-identity");
-        let local_dir = root.join("local");
-        let remote_dir = root.join("remote");
-        std::fs::create_dir_all(&local_dir).unwrap();
-        std::fs::create_dir_all(&remote_dir).unwrap();
-        let friend = 7;
-        let local = PqEngine::new(&local_dir).unwrap();
-        local
-            .bind_contact(friend, &"11".repeat(32), &"22".repeat(32), false)
-            .unwrap();
-        confirm_readiness(&local, friend);
-        let remote_legacy = LegacyEngine::new(&remote_dir).unwrap();
-        let remote = PqEngine::new(&remote_dir).unwrap();
-        local
-            .handle_packet(friend, &remote_legacy.capability_packet())
-            .unwrap();
-        local.request_legacy(friend).unwrap();
-        for packet in remote.v2.capability() {
-            local.handle_packet(friend, &packet).unwrap();
-        }
-        local.complete_identity(&[0x42; 32]).unwrap();
-        local.drive(friend, true, true).unwrap();
-        let offered = local.take_outbox();
-        assert!(!has_legacy_kind(&offered, KIND_OFFER));
-        assert!(v2_record_kinds(&offered).iter().any(|kind| kind == "Offer"));
-        assert_eq!(local.status(friend).protocol_version, 2);
-        assert!(!local.legacy_request_pending(friend));
-        assert_eq!(
-            local.request_legacy(friend).unwrap_err(),
-            "PQ_LEGACY_DOWNGRADE_FORBIDDEN"
-        );
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn default_request_revokes_unstarted_legacy_consent_and_wait_can_be_withdrawn() {
-        let root = test_root("revoke-legacy-consent");
-        let local_dir = root.join("local");
-        let remote_dir = root.join("remote");
-        std::fs::create_dir_all(&local_dir).unwrap();
-        std::fs::create_dir_all(&remote_dir).unwrap();
-        let friend = 7;
-        let local = PqEngine::new(&local_dir).unwrap();
-        local
-            .bind_contact(friend, &"11".repeat(32), &"22".repeat(32), false)
-            .unwrap();
-        confirm_readiness(&local, friend);
-        let remote = LegacyEngine::new(&remote_dir).unwrap();
-        local
-            .handle_packet(friend, &remote.capability_packet())
-            .unwrap();
-        local.request_legacy(friend).unwrap();
-        local.request(friend).unwrap();
-        assert!(!local.legacy_request_pending(friend));
-        assert!(local.status(friend).manual_waiting_for_capability);
-        local.complete_identity(&[0x42; 32]).unwrap();
-        local.drive(friend, true, true).unwrap();
-        assert!(!has_legacy_kind(&local.take_outbox(), KIND_OFFER));
-        local.withdraw(friend).unwrap();
-        assert!(!local.holds_plaintext_messages(friend));
-        assert!(!local.status(friend).manual_waiting_for_capability);
-        assert!(local.status(friend).legacy_available);
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn changed_legacy_identity_revokes_unstarted_explicit_consent() {
-        let root = test_root("changed-legacy-consent");
-        let local_dir = root.join("local");
-        let remote_dir = root.join("remote");
-        let changed_dir = root.join("changed");
-        std::fs::create_dir_all(&local_dir).unwrap();
-        std::fs::create_dir_all(&remote_dir).unwrap();
-        std::fs::create_dir_all(&changed_dir).unwrap();
-        let friend = 7;
-        let local = PqEngine::new(&local_dir).unwrap();
-        local
-            .bind_contact(friend, &"11".repeat(32), &"22".repeat(32), false)
-            .unwrap();
-        confirm_readiness(&local, friend);
-        let remote = LegacyEngine::new(&remote_dir).unwrap();
-        let changed = LegacyEngine::new(&changed_dir).unwrap();
-        local
-            .handle_packet(friend, &remote.capability_packet())
-            .unwrap();
-        local.request_legacy(friend).unwrap();
-        local
-            .handle_packet(friend, &changed.capability_packet())
-            .unwrap();
-        assert!(!local.legacy_request_pending(friend));
-        local.complete_identity(&[0x42; 32]).unwrap();
-        local.drive(friend, true, true).unwrap();
-        assert!(!has_legacy_kind(&local.take_outbox(), KIND_OFFER));
-        assert_eq!(local.status(friend).protocol_version, 2);
-        assert!(local.status(friend).manual_waiting_for_capability);
+        assert!(restarted.owns_session(friend));
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -1593,7 +634,7 @@ mod tests {
         engine
             .bind_contact(7, &"BB".repeat(32), &"AA".repeat(32), false)
             .unwrap();
-        confirm_readiness(&engine, 7);
+        confirm_readiness(&engine, 7, &"BB".repeat(32));
 
         let queued_before_arm = fault_record("Data");
         engine.queue(7, [queued_before_arm.clone()]);
@@ -1604,15 +645,10 @@ mod tests {
         )
         .unwrap();
 
-        let legacy = vec![PACKET_ID, b'T', b'P', b'Q', 1, 1];
-        engine.queue(7, [fault_record("Accept"), legacy.clone()]);
-        assert_eq!(engine.take_outbox(), VecDeque::from([(7, legacy.clone())]));
-
-        engine.requeue_front(VecDeque::from([
-            (7, queued_before_arm),
-            (7, legacy.clone()),
-        ]));
-        assert_eq!(engine.take_outbox(), VecDeque::from([(7, legacy)]));
+        engine.queue(7, [fault_record("Accept")]);
+        assert!(engine.take_outbox().is_empty());
+        engine.requeue_front(VecDeque::from([(7, queued_before_arm)]));
+        assert!(engine.take_outbox().is_empty());
 
         std::fs::remove_dir_all(portable).unwrap();
     }
@@ -1624,20 +660,20 @@ mod tests {
         engine
             .bind_contact(7, &"11".repeat(32), &"22".repeat(32), false)
             .unwrap();
-        confirm_readiness(&engine, 7);
+        confirm_readiness(&engine, 7, &"11".repeat(32));
         let make_packet = |number: u64| {
             let mut packet = vec![0u8; 1230];
             packet[..6].copy_from_slice(&[PACKET_ID, b'T', b'P', b'Q', 2, 1]);
             packet[6..14].copy_from_slice(&number.to_be_bytes());
             packet
         };
-        engine.queue(7, (0..MAX_V2_TRANSPORT_PACKETS as u64 + 1).map(make_packet));
+        engine.queue(7, (0..MAX_TRANSPORT_PACKETS as u64 + 1).map(make_packet));
         let queued = engine.take_outbox();
         assert!(
-            queued.iter().map(|(_, packet)| packet.len()).sum::<usize>() <= MAX_V2_TRANSPORT_BYTES
+            queued.iter().map(|(_, packet)| packet.len()).sum::<usize>() <= MAX_TRANSPORT_BYTES
         );
-        assert!(queued.len() <= MAX_V2_TRANSPORT_PACKETS);
-        let retry = make_packet(MAX_V2_TRANSPORT_PACKETS as u64);
+        assert!(queued.len() <= MAX_TRANSPORT_PACKETS);
+        let retry = make_packet(MAX_TRANSPORT_PACKETS as u64);
         assert!(!queued.iter().any(|(_, packet)| *packet == retry));
         engine.queue(7, [retry.clone(), retry.clone()]);
         assert_eq!(engine.take_outbox(), VecDeque::from([(7, retry)]));
@@ -1660,18 +696,18 @@ mod tests {
         local
             .bind_contact(friend, &peer_key, &owner_key, false)
             .unwrap();
-        confirm_readiness(&local, friend);
+        confirm_readiness(&local, friend, &peer_key);
         remote
             .bind_contact(friend, &owner_key, &peer_key, false)
             .unwrap();
-        confirm_readiness(&remote, friend);
+        confirm_readiness(&remote, friend, &owner_key);
         local.connection_changed(friend, true).unwrap();
-        confirm_readiness(&local, friend);
+        confirm_readiness(&local, friend, &peer_key);
         remote.connection_changed(friend, true).unwrap();
-        confirm_readiness(&remote, friend);
-        local.v2.request_identity_only(friend).unwrap();
+        confirm_readiness(&remote, friend, &owner_key);
+        local.request(friend).unwrap();
         local.complete_identity(&[0x41; 32]).unwrap();
-        local.v2.finish_legacy_request(friend).unwrap();
+        local.withdraw(friend).unwrap();
         local.take_outbox();
 
         let make_packet = |number: u64| {
@@ -1686,9 +722,9 @@ mod tests {
         };
         local.queue(
             friend,
-            (0..MAX_V2_TRANSPORT_PACKETS as u64).map(make_packet),
+            (0..MAX_TRANSPORT_PACKETS as u64).map(make_packet),
         );
-        assert_eq!(local.outbox.lock().unwrap().len(), MAX_V2_TRANSPORT_PACKETS);
+        assert_eq!(local.outbox.lock().unwrap().len(), MAX_TRANSPORT_PACKETS);
 
         let local_capability = local.v2.capability();
         let local_probe = local.v2.capability_probe(friend);
@@ -1709,9 +745,9 @@ mod tests {
         local.queue(friend, ack.clone());
         assert_eq!(*local.outbox.lock().unwrap(), before_retry);
         let queued = local.take_outbox();
-        assert_eq!(queued.len(), MAX_V2_TRANSPORT_PACKETS);
+        assert_eq!(queued.len(), MAX_TRANSPORT_PACKETS);
         assert!(
-            queued.iter().map(|(_, packet)| packet.len()).sum::<usize>() <= MAX_V2_TRANSPORT_BYTES
+            queued.iter().map(|(_, packet)| packet.len()).sum::<usize>() <= MAX_TRANSPORT_BYTES
         );
         for expected in local_capability.iter().chain(&local_probe).chain(&ack) {
             assert!(queued
@@ -1749,13 +785,13 @@ mod tests {
         local
             .bind_contact(friend, &peer_key, &owner_key, false)
             .unwrap();
-        confirm_readiness(&local, friend);
+        confirm_readiness(&local, friend, &peer_key);
         remote
             .bind_contact(friend, &owner_key, &peer_key, false)
             .unwrap();
-        confirm_readiness(&remote, friend);
+        confirm_readiness(&remote, friend, &owner_key);
         local.connection_changed(friend, true).unwrap();
-        confirm_readiness(&local, friend);
+        confirm_readiness(&local, friend, &peer_key);
         for packet in remote.v2.capability() {
             local.handle_packet(friend, &packet).unwrap();
         }
@@ -1780,7 +816,7 @@ mod tests {
         assert!(!local.status(friend).supported);
         assert!(local.take_outbox().is_empty());
         local.connection_changed(friend, true).unwrap();
-        confirm_readiness(&local, friend);
+        confirm_readiness(&local, friend, &peer_key);
         local.drive(friend, true, true).unwrap();
         let before_marker = local.take_outbox();
         let before_kinds = v2_record_kinds(&before_marker);
@@ -1799,222 +835,6 @@ mod tests {
     }
 
     #[test]
-    fn legacy_negotiation_waits_for_same_connection_capability_and_key() {
-        let root = test_root("legacy-connection-control-fence");
-        let local_dir = root.join("local");
-        let remote_dir = root.join("remote");
-        let changed_dir = root.join("changed");
-        std::fs::create_dir_all(&local_dir).unwrap();
-        std::fs::create_dir_all(&remote_dir).unwrap();
-        std::fs::create_dir_all(&changed_dir).unwrap();
-        let friend = 9;
-        let peer_key = "33".repeat(32);
-        let owner_key = "44".repeat(32);
-        let local = PqEngine::new(&local_dir).unwrap();
-        local
-            .bind_contact(friend, &peer_key, &owner_key, false)
-            .unwrap();
-        confirm_readiness(&local, friend);
-        local.v2.request_identity_only(friend).unwrap();
-        local.complete_identity(&[0x42; 32]).unwrap();
-        local.v2.finish_legacy_request(friend).unwrap();
-        let local_legacy = local.legacy.get().unwrap();
-        let remote = LegacyEngine::new(&remote_dir).unwrap();
-        remote
-            .handle_packet(friend, &local_legacy.capability_packet())
-            .unwrap();
-        local
-            .handle_packet(friend, &remote.capability_packet())
-            .unwrap();
-        local.connection_changed(friend, false).unwrap();
-        local.connection_changed(friend, true).unwrap();
-        confirm_readiness(&local, friend);
-
-        let offer = remote.request(friend).unwrap();
-        assert_eq!(offer.len(), 1);
-        let before_marker = local.handle_packet(friend, &offer[0]).unwrap();
-        assert!(before_marker.outgoing.is_empty());
-        assert!(before_marker.session_event.is_none());
-        assert_ne!(local_legacy.status(friend).state, "incoming_offer");
-        let replayed = local
-            .handle_packet(friend, &remote.capability_packet())
-            .unwrap();
-        assert_eq!(replayed.session_event, Some(PqSessionEvent::OfferReceived));
-        assert_eq!(local_legacy.status(friend).state, "incoming_offer");
-        local.reject(friend).unwrap();
-
-        // Outbound negotiation is retained while capability traffic passes.
-        let outbound_dir = root.join("outbound");
-        std::fs::create_dir_all(&outbound_dir).unwrap();
-        let outbound = PqEngine::new(&outbound_dir).unwrap();
-        outbound
-            .bind_contact(friend, &peer_key, &owner_key, false)
-            .unwrap();
-        confirm_readiness(&outbound, friend);
-        outbound
-            .handle_packet(friend, &remote.capability_packet())
-            .unwrap();
-        assert!(outbound.request_legacy(friend).unwrap().is_empty());
-        outbound.complete_identity(&[0x43; 32]).unwrap();
-        assert!(outbound
-            .outbox
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|(_, packet)| is_legacy_negotiation_packet(packet)));
-        outbound.connection_changed(friend, false).unwrap();
-        outbound.connection_changed(friend, true).unwrap();
-        confirm_readiness(&outbound, friend);
-        outbound.queue(friend, [outbound.capability_packet()]);
-        let capability_only = outbound.take_outbox();
-        assert!(has_legacy_kind(&capability_only, KIND_CAPABILITY));
-        assert!(!has_legacy_kind(&capability_only, KIND_OFFER));
-        assert!(outbound
-            .outbox
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|(_, packet)| is_legacy_negotiation_packet(packet)));
-        outbound
-            .handle_packet(friend, &remote.capability_packet())
-            .unwrap();
-        assert!(has_legacy_kind(&outbound.take_outbox(), KIND_OFFER));
-
-        // A different current identity invalidates both directions of the
-        // fenced transaction instead of replaying it against a new key.
-        let changed_remote = LegacyEngine::new(&changed_dir).unwrap();
-        local.connection_changed(friend, false).unwrap();
-        local.connection_changed(friend, true).unwrap();
-        confirm_readiness(&local, friend);
-        local.handle_packet(friend, &offer[0]).unwrap();
-        let changed = local
-            .handle_packet(friend, &changed_remote.capability_packet())
-            .unwrap();
-        assert!(changed.session_event.is_none());
-        assert_ne!(local_legacy.status(friend).state, "incoming_offer");
-        assert!(!local
-            .take_outbox()
-            .iter()
-            .any(|(_, packet)| is_legacy_negotiation_packet(packet)));
-
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn manual_v1_capability_waits_for_entropy_then_replays_without_v2_shadowing() {
-        let root = test_root("legacy-before-identity");
-        let local_dir = root.join("local");
-        let remote_dir = root.join("remote");
-        let bare_v2_dir = root.join("bare-v2");
-        std::fs::create_dir_all(&local_dir).unwrap();
-        std::fs::create_dir_all(&remote_dir).unwrap();
-        std::fs::create_dir_all(&bare_v2_dir).unwrap();
-
-        let friend = 7;
-        let peer_key = "11".repeat(32);
-        let owner_key = "22".repeat(32);
-        let local = PqEngine::new(&local_dir).unwrap();
-        local
-            .bind_contact(friend, &peer_key, &owner_key, false)
-            .unwrap();
-        confirm_readiness(&local, friend);
-        let remote = LegacyEngine::new(&remote_dir).unwrap();
-
-        let cached = local
-            .handle_packet(friend, &remote.capability_packet())
-            .unwrap();
-        assert!(cached.outgoing.is_empty());
-        assert!(!local_dir.join("pq-identity.json").exists());
-        let available = local.status(friend);
-        assert!(available.supported);
-        assert_eq!(available.protocol_version, 1);
-        assert_eq!(available.state, "available");
-
-        assert!(local.request_legacy(friend).unwrap().is_empty());
-        let waiting = local.status(friend);
-        assert!(waiting.identity_needs_entropy);
-        assert!(waiting.identity_waiting);
-        assert!(waiting.supported);
-        assert_eq!(waiting.protocol_version, 1);
-
-        assert!(!has_legacy_kind(&local.take_outbox(), KIND_OFFER));
-        local.complete_identity(&[0x42; 32]).unwrap();
-        let negotiation = local.take_outbox().into_iter().collect::<Vec<_>>();
-        assert_eq!(negotiation.len(), 2);
-        assert!(negotiation
-            .iter()
-            .any(|(_, packet)| packet[4] == VERSION && packet[5] == KIND_CAPABILITY_ACK));
-        assert!(negotiation
-            .iter()
-            .any(|(_, packet)| packet[4] == VERSION && packet[5] == KIND_OFFER));
-        assert_eq!(local.status(friend).state, "offered");
-        assert_eq!(local.status(friend).protocol_version, 1);
-
-        // A v2 capability without identity can arrive after a v1 offer. It may
-        // update future compatibility, but cannot steal dispatch mid-session.
-        let bare_v2 = PqEngine::new(&bare_v2_dir).unwrap();
-        for packet in bare_v2.v2.capability() {
-            local.handle_packet(friend, &packet).unwrap();
-        }
-        assert!(!local.is_v2(friend));
-        assert_eq!(local.status(friend).state, "offered");
-        assert_eq!(local.status(friend).protocol_version, 1);
-
-        // Once an actual legacy negotiation started, a concurrent v2 OFFER
-        // cannot create a second session behind the selected legacy transport.
-        let modern_remote = PqEngine::new(&remote_dir).unwrap();
-        modern_remote
-            .bind_contact(friend, &owner_key, &peer_key, false)
-            .unwrap();
-        confirm_readiness(&modern_remote, friend);
-        modern_remote.connection_changed(friend, true).unwrap();
-        confirm_readiness(&modern_remote, friend);
-        for packet in local.v2.capability() {
-            modern_remote.handle_packet(friend, &packet).unwrap();
-        }
-        modern_remote.request(friend).unwrap();
-        modern_remote.drive(friend, true, true).unwrap();
-        let concurrent_offer = modern_remote.take_outbox();
-        assert!(v2_record_kinds(&concurrent_offer)
-            .iter()
-            .any(|kind| kind == "Offer"));
-        for (_, packet) in concurrent_offer {
-            local.handle_packet(friend, &packet).unwrap();
-        }
-        assert_eq!(local.status(friend).protocol_version, 1);
-        assert_eq!(local.status(friend).state, "offered");
-        assert_eq!(local.v2.status(friend).state, "available");
-
-        let mut offer_received = false;
-        for (_, packet) in negotiation {
-            let result = remote.handle_packet(friend, &packet).unwrap();
-            offer_received |= result.session_event == Some(PqSessionEvent::OfferReceived);
-        }
-        assert!(offer_received);
-        let mut confirms = Vec::new();
-        for packet in remote.accept(friend).unwrap() {
-            let result = local.handle_packet(friend, &packet).unwrap();
-            assert_eq!(result.session_event, Some(PqSessionEvent::Active));
-            confirms.extend(result.outgoing);
-        }
-        for packet in confirms {
-            remote.handle_packet(friend, &packet).unwrap();
-        }
-        assert!(local.queues_encrypted_messages(friend));
-
-        drop(local);
-        let restarted = PqEngine::new(&local_dir).unwrap();
-        restarted
-            .bind_contact(friend, &peer_key, &owner_key, false)
-            .unwrap();
-        confirm_readiness(&restarted, friend);
-        assert!(!restarted.first_send(friend, true).unwrap());
-        assert!(!restarted.status(friend).auto_pending);
-
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
     fn queue_deduplicates_capability_expansion_exactly() {
         let root = test_root("queue-dedup");
         let engine = PqEngine::new(&root).unwrap();
@@ -2027,9 +847,9 @@ mod tests {
         engine
             .bind_contact(3, &"11".repeat(32), &"22".repeat(32), false)
             .unwrap();
-        confirm_readiness(&engine, 3);
+        confirm_readiness(&engine, 3, &"11".repeat(32));
         engine.connection_changed(3, true).unwrap();
-        confirm_readiness(&engine, 3);
+        confirm_readiness(&engine, 3, &"11".repeat(32));
         engine.queue(3, [engine.capability_packet(), engine.capability_packet()]);
         let queued = engine.take_outbox().into_iter().collect::<Vec<_>>();
         let unique = queued.iter().cloned().collect::<HashSet<_>>();
@@ -2041,140 +861,4 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
-    #[test]
-    fn validated_v1_stays_manual_and_is_hidden_after_a_connection_change() {
-        let root = test_root("legacy-auto-boundary");
-        let local_dir = root.join("local");
-        let remote_dir = root.join("remote");
-        std::fs::create_dir_all(&local_dir).unwrap();
-        std::fs::create_dir_all(&remote_dir).unwrap();
-        let friend = 9;
-        let peer_key = "33".repeat(32);
-        let owner_key = "44".repeat(32);
-
-        let local = PqEngine::new(&local_dir).unwrap();
-        local
-            .bind_contact(friend, &peer_key, &owner_key, false)
-            .unwrap();
-        confirm_readiness(&local, friend);
-        let remote = LegacyEngine::new(&remote_dir).unwrap();
-        local
-            .handle_packet(friend, &remote.capability_packet())
-            .unwrap();
-
-        assert!(!local.first_send(friend, true).unwrap());
-        let available = local.status(friend);
-        assert_eq!(available.protocol_version, 1);
-        assert!(available.supported);
-        assert!(!available.auto_pending);
-        assert!(available.identity_needs_entropy);
-        assert!(!available.identity_waiting);
-        assert!(!local_dir.join("pq-identity.json").exists());
-        assert!(local.take_outbox().is_empty());
-
-        local.connection_changed(friend, false).unwrap();
-        local.connection_changed(friend, true).unwrap();
-        confirm_readiness(&local, friend);
-        let unconfirmed = local.status(friend);
-        assert_eq!(unconfirmed.protocol_version, 2);
-        assert!(!unconfirmed.supported);
-        assert!(!unconfirmed.auto_pending);
-        assert_eq!(
-            local.request_legacy(friend).unwrap_err(),
-            "PQ_LEGACY_CAPABILITY_REQUIRED"
-        );
-
-        drop(local);
-        let restarted = PqEngine::new(&local_dir).unwrap();
-        restarted
-            .bind_contact(friend, &peer_key, &owner_key, false)
-            .unwrap();
-        confirm_readiness(&restarted, friend);
-        assert!(!restarted.first_send(friend, true).unwrap());
-        assert!(!restarted.status(friend).auto_pending);
-        assert!(!local_dir.join("pq-identity.json").exists());
-
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn cancel_before_entropy_clears_the_runtime_legacy_request() {
-        let root = test_root("cancel-before-entropy");
-        let local_dir = root.join("local");
-        let remote_one_dir = root.join("remote-one");
-        let remote_two_dir = root.join("remote-two");
-        std::fs::create_dir_all(&local_dir).unwrap();
-        std::fs::create_dir_all(&remote_one_dir).unwrap();
-        std::fs::create_dir_all(&remote_two_dir).unwrap();
-        let local = PqEngine::new(&local_dir).unwrap();
-        let owner_key = "55".repeat(32);
-        local
-            .bind_contact(1, &"66".repeat(32), &owner_key, false)
-            .unwrap();
-        confirm_readiness(&local, 1);
-        local
-            .bind_contact(2, &"77".repeat(32), &owner_key, false)
-            .unwrap();
-        confirm_readiness(&local, 2);
-        let remote_one = LegacyEngine::new(&remote_one_dir).unwrap();
-        let remote_two = LegacyEngine::new(&remote_two_dir).unwrap();
-        local
-            .handle_packet(1, &remote_one.capability_packet())
-            .unwrap();
-        local
-            .handle_packet(2, &remote_two.capability_packet())
-            .unwrap();
-
-        assert!(local.request_legacy(1).unwrap().is_empty());
-        assert!(local.withdraw(1).unwrap().is_empty());
-        assert!(local.request_legacy(2).unwrap().is_empty());
-        local.complete_identity(&[0x24; 32]).unwrap();
-
-        let queued = local.take_outbox().into_iter().collect::<Vec<_>>();
-        assert!(!queued
-            .iter()
-            .any(|(friend, packet)| *friend == 1 && packet[5] == KIND_OFFER));
-        assert!(queued
-            .iter()
-            .any(|(friend, packet)| *friend == 2 && packet[5] == KIND_OFFER));
-
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn os_only_identity_timeout_initializes_legacy_and_resumes_manual_request() {
-        let root = test_root("legacy-os-fallback");
-        let local_dir = root.join("local");
-        let remote_dir = root.join("remote");
-        std::fs::create_dir_all(&local_dir).unwrap();
-        std::fs::create_dir_all(&remote_dir).unwrap();
-        let friend = 5;
-        let local = PqEngine::new(&local_dir).unwrap();
-        local
-            .bind_contact(friend, &"88".repeat(32), &"99".repeat(32), false)
-            .unwrap();
-        confirm_readiness(&local, friend);
-        let remote = LegacyEngine::new(&remote_dir).unwrap();
-        local
-            .handle_packet(friend, &remote.capability_packet())
-            .unwrap();
-        assert!(local.request_legacy(friend).unwrap().is_empty());
-
-        local.drive(friend, true, true).unwrap();
-        assert!(local.legacy.get().is_none());
-        assert!(!local_dir.join("pq-identity.json").exists());
-        std::thread::sleep(std::time::Duration::from_millis(20_100));
-        local.drive(friend, true, true).unwrap();
-
-        assert!(local.legacy.get().is_some());
-        assert!(local_dir.join("pq-identity.json").exists());
-        assert!(local
-            .take_outbox()
-            .iter()
-            .any(|(owner, packet)| *owner == friend
-                && packet[4] == VERSION
-                && packet[5] == KIND_OFFER));
-
-        std::fs::remove_dir_all(root).unwrap();
-    }
 }

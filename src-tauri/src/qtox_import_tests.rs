@@ -121,17 +121,12 @@ fn create_database(
 ) {
     assert!(!path.exists());
     let api = Api::load(&runtime().join("runtime/qtox-import/libsqlcipher-0.dll")).unwrap();
-    let mut raw = ptr::null_mut();
     let cpath = CString::new(path.to_str().unwrap()).unwrap();
-    assert_eq!(
-        unsafe { (api.open_v2)(cpath.as_ptr(), &mut raw, 0x2 | 0x4 | 0x8000, ptr::null()) },
-        0
-    );
-    let database = Database { api: &api, raw };
+    let database = Database::open(&api, &cpath, 0x2 | 0x4).unwrap();
     if let Some(password) = password {
         let key =
             crate::hex_upper(&profiles::derive_qtox_database_key(password, self_key).unwrap());
-        exec(&api, raw, &format!("PRAGMA key=\"x'{key}'\"; PRAGMA cipher_page_size=4096; PRAGMA kdf_iter=256000; PRAGMA cipher_hmac_algorithm=HMAC_SHA512; PRAGMA cipher_kdf_algorithm=PBKDF2_HMAC_SHA512;")).unwrap();
+        database.exec(&format!("PRAGMA key=\"x'{key}'\"; PRAGMA cipher_page_size=4096; PRAGMA kdf_iter=256000; PRAGMA cipher_hmac_algorithm=HMAC_SHA512; PRAGMA cipher_kdf_algorithm=PBKDF2_HMAC_SHA512;")).unwrap();
     }
     let modern = schema >= 11;
     let split = schema >= 7;
@@ -140,19 +135,17 @@ fn create_database(
     } else {
         "CREATE TABLE peers(id INTEGER PRIMARY KEY, public_key TEXT NOT NULL UNIQUE);"
     };
-    exec(&api, raw, peers_schema).unwrap();
-    exec(&api, raw, "CREATE TABLE aliases(id INTEGER PRIMARY KEY, owner INTEGER, display_name BLOB NOT NULL, UNIQUE(owner,display_name)); CREATE TABLE faux_offline_pending(id INTEGER PRIMARY KEY, required_extensions INTEGER NOT NULL DEFAULT 0); CREATE TABLE broken_messages(id INTEGER PRIMARY KEY, reason INTEGER NOT NULL DEFAULT 0);").unwrap();
+    database.exec(peers_schema).unwrap();
+    database.exec("CREATE TABLE aliases(id INTEGER PRIMARY KEY, owner INTEGER, display_name BLOB NOT NULL, UNIQUE(owner,display_name)); CREATE TABLE faux_offline_pending(id INTEGER PRIMARY KEY, required_extensions INTEGER NOT NULL DEFAULT 0); CREATE TABLE broken_messages(id INTEGER PRIMARY KEY, reason INTEGER NOT NULL DEFAULT 0);").unwrap();
     if split {
-        exec(&api, raw, "CREATE TABLE history(id INTEGER PRIMARY KEY, message_type CHAR(1) NOT NULL DEFAULT 'T', timestamp INTEGER NOT NULL, chat_id INTEGER NOT NULL, UNIQUE(id,message_type)); CREATE TABLE text_messages(id INTEGER PRIMARY KEY, message_type CHAR(1) NOT NULL, sender_alias INTEGER NOT NULL, message BLOB NOT NULL); CREATE TABLE file_transfers(id INTEGER PRIMARY KEY, message_type CHAR(1) NOT NULL, sender_alias INTEGER NOT NULL, file_restart_id BLOB NOT NULL, file_name BLOB NOT NULL, file_path BLOB NOT NULL, file_hash BLOB NOT NULL, file_size INTEGER NOT NULL, direction INTEGER NOT NULL, file_state INTEGER NOT NULL); CREATE TABLE system_messages(id INTEGER PRIMARY KEY, message_type CHAR(1) NOT NULL, system_message_type INTEGER NOT NULL, arg1 BLOB,arg2 BLOB,arg3 BLOB,arg4 BLOB);").unwrap();
+        database.exec("CREATE TABLE history(id INTEGER PRIMARY KEY, message_type CHAR(1) NOT NULL DEFAULT 'T', timestamp INTEGER NOT NULL, chat_id INTEGER NOT NULL, UNIQUE(id,message_type)); CREATE TABLE text_messages(id INTEGER PRIMARY KEY, message_type CHAR(1) NOT NULL, sender_alias INTEGER NOT NULL, message BLOB NOT NULL); CREATE TABLE file_transfers(id INTEGER PRIMARY KEY, message_type CHAR(1) NOT NULL, sender_alias INTEGER NOT NULL, file_restart_id BLOB NOT NULL, file_name BLOB NOT NULL, file_path BLOB NOT NULL, file_hash BLOB NOT NULL, file_size INTEGER NOT NULL, direction INTEGER NOT NULL, file_state INTEGER NOT NULL); CREATE TABLE system_messages(id INTEGER PRIMARY KEY, message_type CHAR(1) NOT NULL, system_message_type INTEGER NOT NULL, arg1 BLOB,arg2 BLOB,arg3 BLOB,arg4 BLOB);").unwrap();
     } else if schema == 0 {
-        exec(&api, raw, "CREATE TABLE history(id INTEGER PRIMARY KEY, timestamp INTEGER NOT NULL, chat_id INTEGER NOT NULL, sender_alias INTEGER NOT NULL, message BLOB NOT NULL);").unwrap();
+        database.exec("CREATE TABLE history(id INTEGER PRIMARY KEY, timestamp INTEGER NOT NULL, chat_id INTEGER NOT NULL, sender_alias INTEGER NOT NULL, message BLOB NOT NULL);").unwrap();
     } else {
-        exec(&api, raw, "CREATE TABLE history(id INTEGER PRIMARY KEY, timestamp INTEGER NOT NULL, chat_id INTEGER NOT NULL, sender_alias INTEGER NOT NULL, message BLOB NOT NULL, file_id INTEGER); CREATE TABLE file_transfers(id INTEGER PRIMARY KEY, chat_id INTEGER NOT NULL, file_restart_id BLOB NOT NULL, file_name BLOB NOT NULL, file_path BLOB NOT NULL, file_hash BLOB NOT NULL, file_size INTEGER NOT NULL, direction INTEGER NOT NULL, file_state INTEGER NOT NULL);").unwrap();
+        database.exec("CREATE TABLE history(id INTEGER PRIMARY KEY, timestamp INTEGER NOT NULL, chat_id INTEGER NOT NULL, sender_alias INTEGER NOT NULL, message BLOB NOT NULL, file_id INTEGER); CREATE TABLE file_transfers(id INTEGER PRIMARY KEY, chat_id INTEGER NOT NULL, file_restart_id BLOB NOT NULL, file_name BLOB NOT NULL, file_path BLOB NOT NULL, file_hash BLOB NOT NULL, file_size INTEGER NOT NULL, direction INTEGER NOT NULL, file_state INTEGER NOT NULL);").unwrap();
     }
     let owner = crate::hex_upper(self_key);
-    exec(
-        &api,
-        raw,
+    database.exec(
         &if modern {
             format!("INSERT INTO authors VALUES(1,X'{owner}');")
         } else {
@@ -160,9 +153,7 @@ fn create_database(
         },
     )
     .unwrap();
-    exec(
-        &api,
-        raw,
+    database.exec(
         "INSERT INTO aliases VALUES(1,1,'Synthetic owner'); BEGIN;",
     )
     .unwrap();
@@ -181,9 +172,7 @@ fn create_database(
             };
             format!("INSERT INTO peers VALUES({id},'{key}');")
         };
-        exec(
-            &api,
-            raw,
+        database.exec(
             &format!("{peer} INSERT INTO aliases VALUES({id},{id},'Network name {index}');"),
         )
         .unwrap();
@@ -193,17 +182,15 @@ fn create_database(
         let sender = format!("CASE WHEN n%2=0 THEN 1 ELSE {id} END");
         let message = format!("'Synthetic contact {index:03}, message ' || n || ': Привет / hello / 你好. Ten-year qTox import regression.'");
         if split {
-            exec(&api, raw, &format!("{seq} INSERT INTO history SELECT {start_id}+n,CASE WHEN n%100>=98 THEN 'F' ELSE 'T' END,{stamp},{id} FROM sequence; {seq} INSERT INTO text_messages SELECT {start_id}+n,'T',{sender},{message} FROM sequence WHERE n%100<98; {seq} INSERT INTO file_transfers SELECT {start_id}+n,'F',{sender},zeroblob(32),'synthetic-' || n || '.txt','',zeroblob(32),1000+n,n%2,2 FROM sequence WHERE n%100>=98;")).unwrap();
+            database.exec(&format!("{seq} INSERT INTO history SELECT {start_id}+n,CASE WHEN n%100>=98 THEN 'F' ELSE 'T' END,{stamp},{id} FROM sequence; {seq} INSERT INTO text_messages SELECT {start_id}+n,'T',{sender},{message} FROM sequence WHERE n%100<98; {seq} INSERT INTO file_transfers SELECT {start_id}+n,'F',{sender},zeroblob(32),'synthetic-' || n || '.txt','',zeroblob(32),1000+n,n%2,2 FROM sequence WHERE n%100>=98;")).unwrap();
         } else if schema == 0 {
-            exec(&api, raw, &format!("{seq} INSERT INTO history SELECT {start_id}+n,{stamp},{id},{sender},{message} FROM sequence;")).unwrap();
+            database.exec(&format!("{seq} INSERT INTO history SELECT {start_id}+n,{stamp},{id},{sender},{message} FROM sequence;")).unwrap();
         } else {
-            exec(&api, raw, &format!("{seq} INSERT INTO history SELECT {start_id}+n,{stamp},{id},{sender},{message},CASE WHEN n%100>=98 THEN {start_id}+n ELSE NULL END FROM sequence; {seq} INSERT INTO file_transfers SELECT {start_id}+n,{id},zeroblob(32),'synthetic-' || n || '.txt','',zeroblob(32),1000+n,n%2,2 FROM sequence WHERE n%100>=98;")).unwrap();
+            database.exec(&format!("{seq} INSERT INTO history SELECT {start_id}+n,{stamp},{id},{sender},{message},CASE WHEN n%100>=98 THEN {start_id}+n ELSE NULL END FROM sequence; {seq} INSERT INTO file_transfers SELECT {start_id}+n,{id},zeroblob(32),'synthetic-' || n || '.txt','',zeroblob(32),1000+n,n%2,2 FROM sequence WHERE n%100>=98;")).unwrap();
         }
         start_id += count;
     }
-    exec(
-        &api,
-        raw,
+    database.exec(
         &format!(
             "COMMIT; CREATE INDEX chat_id_idx ON history(chat_id); PRAGMA user_version={schema};"
         ),
@@ -227,28 +214,16 @@ fn savedata(root: &Path) -> (Vec<u8>, [u8; 32]) {
         None,
     )
     .unwrap();
-    let mut address = [0; 38];
-    unsafe { crate::tox_self_get_address(handle.instance.as_ptr(), address.as_mut_ptr()) };
+    let address = handle.address();
     let mut self_key = [0; 32];
     self_key.copy_from_slice(&address[..32]);
     for index in 0..FRIEND_COUNT {
         let mut error = 0;
-        let number = unsafe {
-            crate::tox_friend_add_norequest(
-                handle.instance.as_ptr(),
-                friend_key(index).as_ptr(),
-                &mut error,
-            )
-        };
+        let number = handle.native().friend_add_norequest(&friend_key(index), &mut error);
         assert_eq!(error, 0);
         assert_eq!(number as usize, index);
     }
-    let size = unsafe { crate::tox_get_savedata_size(handle.instance.as_ptr()) };
-    let mut bytes = vec![0; size];
-    unsafe {
-        crate::tox_get_savedata(handle.instance.as_ptr(), bytes.as_mut_ptr());
-        crate::tox_kill(handle.instance.as_ptr());
-    }
+    let bytes = handle.savedata();
     (bytes, self_key)
 }
 
@@ -290,23 +265,12 @@ fn imported_state(root: &Path, volume: Arc<KaiProfileVolume>, savedata: Vec<u8>)
 fn friends(state: &ToxState) -> HashMap<Vec<u8>, u32> {
     let guard = state.handle.lock().unwrap();
     let handle = guard.as_ref().unwrap();
-    let count = unsafe { crate::tox_self_get_friend_list_size(handle.instance.as_ptr()) };
-    assert_eq!(count, FRIEND_COUNT);
-    let mut numbers = vec![0; count];
-    unsafe { crate::tox_self_get_friend_list(handle.instance.as_ptr(), numbers.as_mut_ptr()) };
+    let numbers = handle.friend_numbers();
+    assert_eq!(numbers.len(), FRIEND_COUNT);
     numbers
         .into_iter()
         .map(|number| {
-            let mut key = [0; 32];
-            let mut error = 0;
-            assert!(unsafe {
-                crate::tox_friend_get_public_key(
-                    handle.instance.as_ptr(),
-                    number,
-                    key.as_mut_ptr(),
-                    &mut error,
-                )
-            });
+            let key = handle.native().friend_public_key(number, &mut 0).unwrap();
             (key.to_vec(), number)
         })
         .collect()
@@ -475,7 +439,7 @@ fn qtox_history_legacy_schemas_and_encrypted_settings_preserve_all_contacts() {
         .unwrap();
     {
         let handle = state.handle.lock().unwrap();
-        let tox = handle.as_ref().unwrap().instance.as_ptr();
+        let tox = handle.as_ref().unwrap().native();
         // The real driver must bind all 128 imported contacts with a single
         // durable KAI write while it owns Tox, not 128 whole-history writes.
         crate::drive_pq_sessions(&state, tox);
@@ -516,18 +480,11 @@ fn qtox_duplicate_legacy_peer_keys_keep_chronology_across_import_batches() {
         let history = root.join(format!("schema-{schema}.db"));
         create_database(&history, None, &self_key, schema, false);
         let api = Api::load(&runtime().join("runtime/qtox-import/libsqlcipher-0.dll")).unwrap();
-        let mut raw = ptr::null_mut();
         let cpath = CString::new(history.to_str().unwrap()).unwrap();
-        assert_eq!(
-            unsafe { (api.open_v2)(cpath.as_ptr(), &mut raw, 0x2 | 0x8000, ptr::null()) },
-            0
-        );
-        let database = Database { api: &api, raw };
-        exec(&api, raw, "BEGIN; DELETE FROM history;").unwrap();
+        let database = Database::open(&api, &cpath, 0x2).unwrap();
+        database.exec("BEGIN; DELETE FROM history;").unwrap();
         if schema >= 7 {
-            exec(
-                &api,
-                raw,
+            database.exec(
                 "DELETE FROM text_messages; DELETE FROM file_transfers;",
             )
             .unwrap();
@@ -535,18 +492,18 @@ fn qtox_duplicate_legacy_peer_keys_keep_chronology_across_import_batches() {
         let upper_peer = FRIEND_COUNT + 2;
         let address_peer = upper_peer + 1;
         let binary_peer = upper_peer + 2;
-        exec(&api, raw, &format!("INSERT INTO peers VALUES({upper_peer},'{hex}'),({address_peer},'{hex}000000000000'),({binary_peer},X'{hex}');")).unwrap();
+        database.exec(&format!("INSERT INTO peers VALUES({upper_peer},'{hex}'),({address_peer},'{hex}000000000000'),({binary_peer},X'{hex}');")).unwrap();
         let sequence = format!("WITH RECURSIVE sequence(n) AS (VALUES(0) UNION ALL SELECT n+1 FROM sequence WHERE n+1<{MESSAGE_COUNT})");
         let chat = format!("CASE n%4 WHEN 0 THEN 2 WHEN 1 THEN {upper_peer} WHEN 2 THEN {address_peer} ELSE {binary_peer} END");
         // Interleave all four spellings, including equal timestamps that must
         // use the source ID as their stable secondary order.
         let timestamp = format!("{START_MS}+(n/2)*1000");
         if schema >= 7 {
-            exec(&api, raw, &format!("{sequence} INSERT INTO history SELECT n+1,'T',{timestamp},{chat} FROM sequence; {sequence} INSERT INTO text_messages SELECT n+1,'T',1,'interleaved-' || n FROM sequence;")).unwrap();
+            database.exec(&format!("{sequence} INSERT INTO history SELECT n+1,'T',{timestamp},{chat} FROM sequence; {sequence} INSERT INTO text_messages SELECT n+1,'T',1,'interleaved-' || n FROM sequence;")).unwrap();
         } else {
-            exec(&api, raw, &format!("{sequence} INSERT INTO history SELECT n+1,{timestamp},{chat},1,'interleaved-' || n FROM sequence;")).unwrap();
+            database.exec(&format!("{sequence} INSERT INTO history SELECT n+1,{timestamp},{chat},1,'interleaved-' || n FROM sequence;")).unwrap();
         }
-        exec(&api, raw, "COMMIT;").unwrap();
+        database.exec("COMMIT;").unwrap();
         drop(database);
         drop(api);
 

@@ -155,7 +155,6 @@ mod macos_portable {
     fn ensure_writable_copy(layout: &Layout) -> Result<(), String> {
         use std::{
             fs::{self, OpenOptions},
-            os::fd::AsRawFd,
             process::Command,
         };
 
@@ -173,6 +172,7 @@ mod macos_portable {
         let install_lock_path = applications.join(".kaigen-portable-install.lock");
         let install_lock = OpenOptions::new()
             .create(true)
+            .truncate(false)
             .read(true)
             .write(true)
             .open(&install_lock_path)
@@ -182,12 +182,9 @@ mod macos_portable {
                     install_lock_path.display()
                 )
             })?;
-        if unsafe { libc::flock(install_lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-            return Err(format!(
-                "Another Kaigen portable installation is already running: {}",
-                std::io::Error::last_os_error()
-            ));
-        }
+        install_lock.try_lock().map_err(|error| {
+            format!("Another Kaigen portable installation is already running: {error}")
+        })?;
 
         if layout.destination_dir.exists() {
             return validate_portable_dir(&layout.destination_dir);
@@ -318,6 +315,7 @@ pub(crate) fn portable_root_for_current_executable() -> Result<PathBuf, String> 
     executable_parent(&executable)
 }
 
+#[cfg(any(target_os = "windows", test))]
 fn instance_key_for_root(root: &Path) -> String {
     let normalized = root.to_string_lossy().replace('/', "\\").to_lowercase();
     let digest = Sha256::digest(normalized.as_bytes());
@@ -401,22 +399,18 @@ impl Drop for ProfileIdentityGuard {
 }
 
 #[cfg(target_os = "windows")]
+#[path = "windows_named_mutex.rs"]
+mod windows_named_mutex;
+
+#[cfg(target_os = "windows")]
 mod profile_identity_platform {
-    use std::{ffi::OsStr, iter, os::windows::ffi::OsStrExt, ptr};
+    use std::os::windows::io::OwnedHandle;
 
-    use windows_sys::Win32::{
-        Foundation::{CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, HANDLE},
-        System::Threading::CreateMutexW,
-    };
-
-    use super::profile_identity_lock_name;
+    use super::{profile_identity_lock_name, windows_named_mutex};
 
     pub(super) struct Guard {
-        mutex: usize,
+        _mutex: OwnedHandle,
     }
-
-    unsafe impl Send for Guard {}
-    unsafe impl Sync for Guard {}
 
     impl Guard {
         pub(super) fn acquire(public_key: &str) -> Result<Self, String> {
@@ -424,42 +418,27 @@ mod profile_identity_platform {
                 "Local\\Kaigen.ToxProfileIdentity.{}",
                 profile_identity_lock_name(public_key)
             );
-            let wide = OsStr::new(&name)
-                .encode_wide()
-                .chain(iter::once(0))
-                .collect::<Vec<_>>();
-            let mutex = unsafe { CreateMutexW(ptr::null(), 0, wide.as_ptr()) };
-            if mutex.is_null() {
-                return Err(format!(
-                    "Could not create the Tox profile identity mutex: {}",
-                    std::io::Error::last_os_error()
-                ));
-            }
-            if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
-                unsafe { CloseHandle(mutex) };
+            let (mutex, already_exists) = windows_named_mutex::create(&name)
+                .map_err(|error| format!("Could not create the Tox profile identity mutex: {error}"))?;
+            if already_exists {
                 return Err("TOX_PROFILE_IDENTITY_ALREADY_LOADED".to_string());
             }
-            Ok(Self {
-                mutex: mutex as usize,
-            })
-        }
-    }
-
-    impl Drop for Guard {
-        fn drop(&mut self) {
-            unsafe { CloseHandle(self.mutex as HANDLE) };
+            Ok(Self { _mutex: mutex })
         }
     }
 }
 
 #[cfg(not(target_os = "windows"))]
 mod profile_identity_platform {
-    use std::{fs::OpenOptions, io::ErrorKind, os::fd::AsRawFd, path::PathBuf};
+    use std::{
+        fs::{File, OpenOptions, TryLockError},
+        path::PathBuf,
+    };
 
     use super::profile_identity_lock_name;
 
     pub(super) struct Guard {
-        lock: std::fs::File,
+        _lock: File,
     }
 
     impl Guard {
@@ -471,138 +450,142 @@ mod profile_identity_platform {
             let path = directory.join(format!("{}.lock", profile_identity_lock_name(public_key)));
             let lock = OpenOptions::new()
                 .create(true)
+                .truncate(false)
                 .read(true)
                 .write(true)
                 .open(&path)
                 .map_err(|error| format!("Could not open the Tox identity lock: {error}"))?;
-            let result = unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-            if result == 0 {
-                return Ok(Self { lock });
+            match lock.try_lock() {
+                Ok(()) => Ok(Self { _lock: lock }),
+                Err(TryLockError::WouldBlock) => {
+                    Err("TOX_PROFILE_IDENTITY_ALREADY_LOADED".to_string())
+                }
+                Err(TryLockError::Error(error)) => {
+                    Err(format!("Could not lock the Tox profile identity: {error}"))
+                }
             }
-            let error = std::io::Error::last_os_error();
-            match error.kind() {
-                ErrorKind::WouldBlock => Err("TOX_PROFILE_IDENTITY_ALREADY_LOADED".to_string()),
-                _ => Err(format!("Could not lock the Tox profile identity: {error}")),
-            }
-        }
-    }
-
-    impl Drop for Guard {
-        fn drop(&mut self) {
-            unsafe { libc::flock(self.lock.as_raw_fd(), libc::LOCK_UN) };
         }
     }
 }
 
 #[cfg(target_os = "windows")]
 mod platform {
-    use std::{ffi::OsStr, iter, os::windows::ffi::OsStrExt, ptr, thread};
+    use std::{
+        io,
+        os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle},
+        ptr,
+        sync::Arc,
+        thread,
+    };
 
     use tauri::Manager;
     use windows_sys::Win32::{
-        Foundation::{CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, HANDLE, WAIT_OBJECT_0},
-        System::Threading::{CreateEventW, CreateMutexW, SetEvent, WaitForSingleObject, INFINITE},
+        Foundation::WAIT_OBJECT_0,
+        System::Threading::{CreateEventW, SetEvent, WaitForMultipleObjects, INFINITE},
     };
 
-    use super::{instance_key_for_root, portable_root_for_current_executable, InstanceOutcome};
+    use super::{
+        instance_key_for_root, portable_root_for_current_executable, windows_named_mutex,
+        InstanceOutcome,
+    };
 
     pub struct InstanceGuard {
-        mutex: usize,
-        activation_event: usize,
-        update_shutdown_event: usize,
+        _mutex: OwnedHandle,
+        activation_event: Arc<Event>,
+        update_shutdown_event: Arc<Event>,
+        stop_event: Arc<Event>,
     }
 
-    // Win32 kernel handles may be waited on and closed from another thread.
-    unsafe impl Send for InstanceGuard {}
-    unsafe impl Sync for InstanceGuard {}
+    struct Event(OwnedHandle);
 
-    fn wide(value: &str) -> Vec<u16> {
-        OsStr::new(value)
-            .encode_wide()
-            .chain(iter::once(0))
-            .collect()
+    impl Event {
+        /// Creates or opens an initially reset event with default security.
+        fn create(name: Option<&str>, manual_reset: bool) -> io::Result<Self> {
+            if name.is_some_and(|name| name.contains('\0')) {
+                return Err(io::Error::new(io::ErrorKind::InvalidInput, "Invalid event name"));
+            }
+            let name = name.map(|name| name.encode_utf16().chain(Some(0)).collect::<Vec<_>>());
+            let name = name.as_ref().map_or(ptr::null(), |name| name.as_ptr());
+            // SAFETY: The name is null or points to a live NUL-terminated string.
+            let event = unsafe { CreateEventW(ptr::null(), i32::from(manual_reset), 0, name) };
+            if event.is_null() {
+                return Err(io::Error::last_os_error());
+            }
+            // SAFETY: CreateEventW returned one caller-owned event handle.
+            Ok(Self(unsafe { OwnedHandle::from_raw_handle(event) }))
+        }
+
+        fn signal(&self) {
+            // SAFETY: This event owns its handle and CreateEventW grants signal access.
+            let _ = unsafe { SetEvent(self.0.as_raw_handle()) };
+        }
+
+        /// Cancellation wins if both events are signaled.
+        fn wait_for_request(&self, request: &Self) -> bool {
+            let events = [self.0.as_raw_handle(), request.0.as_raw_handle()];
+            // SAFETY: The live event handles are distinct at all call sites.
+            let result = unsafe {
+                WaitForMultipleObjects(events.len() as u32, events.as_ptr(), 0, INFINITE)
+            };
+            result == WAIT_OBJECT_0 + 1
+        }
     }
 
     impl InstanceGuard {
         pub fn acquire_for_current_executable() -> Result<InstanceOutcome, String> {
             let root = portable_root_for_current_executable()?;
             let key = instance_key_for_root(&root);
-            let mutex_name = wide(&format!("Local\\Kaigen.Instance.{key}"));
-            let event_name = wide(&format!("Local\\Kaigen.Activate.{key}"));
-            let update_shutdown_event_name = wide(&format!(
-                "Local\\Kaigen.UpdateShutdown.{}",
-                std::process::id()
-            ));
+            let mutex_name = format!("Local\\Kaigen.Instance.{key}");
+            let event_name = format!("Local\\Kaigen.Activate.{key}");
+            let update_shutdown_event_name =
+                format!("Local\\Kaigen.UpdateShutdown.{}", std::process::id());
 
-            let mutex = unsafe { CreateMutexW(ptr::null(), 0, mutex_name.as_ptr()) };
-            if mutex.is_null() {
-                return Err(format!(
-                    "Could not create the Kaigen instance mutex: {}",
-                    std::io::Error::last_os_error()
-                ));
-            }
-            let already_running = unsafe { GetLastError() } == ERROR_ALREADY_EXISTS;
-            let activation_event = unsafe { CreateEventW(ptr::null(), 0, 0, event_name.as_ptr()) };
-            if activation_event.is_null() {
-                unsafe {
-                    CloseHandle(mutex);
-                }
-                return Err(format!(
-                    "Could not create the Kaigen activation event: {}",
-                    std::io::Error::last_os_error()
-                ));
-            }
-            let update_shutdown_event =
-                unsafe { CreateEventW(ptr::null(), 0, 0, update_shutdown_event_name.as_ptr()) };
-            if update_shutdown_event.is_null() {
-                unsafe {
-                    CloseHandle(activation_event);
-                    CloseHandle(mutex);
-                }
-                return Err(format!(
-                    "Could not create the Kaigen update shutdown event: {}",
-                    std::io::Error::last_os_error()
-                ));
-            }
+            let (mutex, already_running) = windows_named_mutex::create(&mutex_name)
+                .map_err(|error| format!("Could not create the Kaigen instance mutex: {error}"))?;
+            let activation_event = Event::create(Some(&event_name), false).map_err(|error| {
+                format!("Could not create the Kaigen activation event: {error}")
+            })?;
+            let update_shutdown_event = Event::create(Some(&update_shutdown_event_name), false)
+                .map_err(|error| {
+                    format!("Could not create the Kaigen update shutdown event: {error}")
+                })?;
 
             if already_running {
-                unsafe {
-                    let _ = SetEvent(activation_event);
-                    CloseHandle(update_shutdown_event);
-                    CloseHandle(activation_event);
-                    CloseHandle(mutex);
-                }
+                activation_event.signal();
                 return Ok(InstanceOutcome::SecondaryActivated);
             }
 
+            let stop_event = Event::create(None, true).map_err(|error| {
+                format!("Could not create the Kaigen listener stop event: {error}")
+            })?;
             Ok(InstanceOutcome::Primary(Self {
-                mutex: mutex as usize,
-                activation_event: activation_event as usize,
-                update_shutdown_event: update_shutdown_event as usize,
+                _mutex: mutex,
+                activation_event: Arc::new(activation_event),
+                update_shutdown_event: Arc::new(update_shutdown_event),
+                stop_event: Arc::new(stop_event),
             }))
         }
 
+        /// Starts the named activation and update-shutdown listeners for the primary instance.
         pub fn start_activation_listener(&self, app: tauri::AppHandle) {
-            let activation_event = self.activation_event;
+            let activation_event = Arc::clone(&self.activation_event);
+            let stop_event = Arc::clone(&self.stop_event);
             let activation_app = app.clone();
-            thread::spawn(move || loop {
-                let result = unsafe { WaitForSingleObject(activation_event as HANDLE, INFINITE) };
-                if result != WAIT_OBJECT_0 {
-                    return;
+            thread::spawn(move || {
+                while stop_event.wait_for_request(&activation_event) {
+                    let Some(window) = activation_app.get_webview_window("main") else {
+                        return;
+                    };
+                    let _ = window.show();
+                    let _ = window.unminimize();
+                    let _ = window.set_focus();
                 }
-                let Some(window) = activation_app.get_webview_window("main") else {
-                    return;
-                };
-                let _ = window.show();
-                let _ = window.unminimize();
-                let _ = window.set_focus();
             });
 
-            let update_shutdown_event = self.update_shutdown_event;
+            let update_shutdown_event = Arc::clone(&self.update_shutdown_event);
+            let stop_event = Arc::clone(&self.stop_event);
             thread::spawn(move || {
-                let result =
-                    unsafe { WaitForSingleObject(update_shutdown_event as HANDLE, INFINITE) };
-                if result == WAIT_OBJECT_0 {
+                if stop_event.wait_for_request(&update_shutdown_event) {
                     app.exit(0);
                 }
             });
@@ -611,25 +594,21 @@ mod platform {
 
     impl Drop for InstanceGuard {
         fn drop(&mut self) {
-            unsafe {
-                CloseHandle(self.update_shutdown_event as HANDLE);
-                CloseHandle(self.activation_event as HANDLE);
-                CloseHandle(self.mutex as HANDLE);
-            }
+            self.stop_event.signal();
         }
     }
 }
 
 #[cfg(not(target_os = "windows"))]
 mod platform {
-    use std::{fs::OpenOptions, io::ErrorKind, os::fd::AsRawFd};
+    use std::fs::{File, OpenOptions, TryLockError};
 
     #[cfg(target_os = "macos")]
     use super::macos_portable;
     use super::{portable_instance_error, portable_root_for_current_executable, InstanceOutcome};
 
     pub struct InstanceGuard {
-        lock: std::fs::File,
+        _lock: File,
     }
 
     impl InstanceGuard {
@@ -650,6 +629,7 @@ mod platform {
             let lock_path = data_dir.join(".kaigen-instance.lock");
             let lock = match OpenOptions::new()
                 .create(true)
+                .truncate(false)
                 .read(true)
                 .write(true)
                 .open(&lock_path)
@@ -667,14 +647,10 @@ mod platform {
                     ));
                 }
             };
-            let result = unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-            if result == 0 {
-                return Ok(InstanceOutcome::Primary(Self { lock }));
-            }
-            let error = std::io::Error::last_os_error();
-            match error.kind() {
-                ErrorKind::WouldBlock => Ok(InstanceOutcome::SecondaryActivated),
-                _ => {
+            match lock.try_lock() {
+                Ok(()) => Ok(InstanceOutcome::Primary(Self { _lock: lock })),
+                Err(TryLockError::WouldBlock) => Ok(InstanceOutcome::SecondaryActivated),
+                Err(TryLockError::Error(error)) => {
                     #[cfg(target_os = "macos")]
                     if macos_portable::install_and_relaunch(&root)? {
                         return Ok(InstanceOutcome::SecondaryActivated);
@@ -689,14 +665,6 @@ mod platform {
         }
 
         pub fn start_activation_listener(&self, _app: tauri::AppHandle) {}
-    }
-
-    impl Drop for InstanceGuard {
-        fn drop(&mut self) {
-            unsafe {
-                libc::flock(self.lock.as_raw_fd(), libc::LOCK_UN);
-            }
-        }
     }
 }
 

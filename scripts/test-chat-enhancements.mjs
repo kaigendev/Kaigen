@@ -47,53 +47,6 @@ assert.deepEqual(
 );
 
 assert.deepEqual(
-  richText.toggleFormattingForSelection(
-    "abcdef",
-    2,
-    4,
-    "bold",
-    [{ kind: "bold", offsetUtf16: 0, lengthUtf16: 6 }],
-  ),
-  [
-    { kind: "bold", offsetUtf16: 0, lengthUtf16: 2 },
-    { kind: "bold", offsetUtf16: 4, lengthUtf16: 2 },
-  ],
-  "toggling a covered subrange removes only that subrange",
-);
-
-assert.deepEqual(
-  richText.toggleFormattingForSelection(
-    "abcdef",
-    1,
-    5,
-    "bold",
-    [{ kind: "bold", offsetUtf16: 0, lengthUtf16: 2 }],
-  ),
-  [{ kind: "bold", offsetUtf16: 0, lengthUtf16: 5 }],
-  "toggling a partially covered range applies and merges it",
-);
-
-assert.deepEqual(
-  richText.rebaseFormattingAfterTextEdit(
-    "abcdef",
-    "abXcdef",
-    [{ kind: "bold", offsetUtf16: 1, lengthUtf16: 4 }],
-  ),
-  [{ kind: "bold", offsetUtf16: 1, lengthUtf16: 5 }],
-  "typing inside a formatted range keeps the inserted text formatted",
-);
-
-assert.deepEqual(
-  richText.rebaseFormattingAfterTextEdit(
-    "abcdef",
-    "abef",
-    [{ kind: "bold", offsetUtf16: 1, lengthUtf16: 4 }],
-  ),
-  [{ kind: "bold", offsetUtf16: 1, lengthUtf16: 2 }],
-  "deleting text joins the surviving formatted sides",
-);
-
-assert.deepEqual(
   richText.prepareFormattedSubmission(
     "  hello  ",
     [{ kind: "strikethrough", offsetUtf16: 0, lengthUtf16: 9 }],
@@ -111,10 +64,10 @@ assert.equal(richText.shouldSubmitComposerKey({ key: "Enter", shiftKey: false, i
 assert.equal(richText.shouldSubmitComposerKey({ key: "Enter", shiftKey: false, keyCode: 229 }, true), false);
 assert.equal(richText.shouldSubmitComposerKey({ key: "Enter", shiftKey: true }, false), true);
 
-assert.equal(
-  richText.serializeQtoxQuote("first\r\nsecond\u2028third"),
-  "> first\n> second\n> third\n",
-  "qTox compatibility normalizes every upstream-supported line separator",
+assert.deepEqual(
+  richText.parseQtoxQuoteMessage("> first\r\n> second\u2028> third\nanswer"),
+  { quoteText: "first\nsecond\nthird", body: "answer" },
+  "qTox plaintext quote parsing normalizes upstream line separators",
 );
 assert.deepEqual(
   richText.parseQtoxQuoteMessage("> first\n> second\nanswer"),

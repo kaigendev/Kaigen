@@ -28,7 +28,12 @@ driver = driver.replace('from "vite"', 'from ' + JSON.stringify(pathToFileURL(re
   .replace('await mkdtemp(path.join(os.tmpdir(), "kaigen-chat-geometry-"))', 'await mkdtemp(path.join(evidenceDirectory,"disposable-browser-"))')
   .replace('  configFile: false,', '  configFile: false,\n  cacheDir: path.join(profile,"vite-cache"),');
 // The reused launch/cleanup code performs no unrelated source assertions/scenarios.
-driver = driver.slice(0, driver.indexOf("const appSource =")) + driver.slice(driver.indexOf("const profile ="));
+const sourceAssertionsStart = driver.indexOf("const appSource =");
+const navigationSupportStart = driver.indexOf("const verifiedFixtureNavigations =");
+const profileStart = driver.indexOf("const profile =");
+assert.ok(sourceAssertionsStart > 0 && navigationSupportStart > sourceAssertionsStart && profileStart > navigationSupportStart,
+  "shared fixture navigation support must follow the unrelated source assertions");
+driver = driver.slice(0, sourceAssertionsStart) + driver.slice(navigationSupportStart);
 const modulesStart = driver.indexOf("    const fixtureModules =");
 const modulesEnd = driver.indexOf("  await within((async () => {", modulesStart);
 assert.ok(modulesStart > 0 && modulesEnd > modulesStart);

@@ -194,114 +194,7 @@ export function selectionHasFormatting(
   return end > start && kindCoversRange(normalizeFormattingSpans(text, spans), kind, start, end);
 }
 
-export function toggleFormattingForSelection(
-  text: string,
-  selectionStart: number,
-  selectionEnd: number,
-  kind: ChatFormattingKind,
-  spans: readonly Partial<ChatFormattingSpan>[] | null | undefined,
-): ChatFormattingSpan[] {
-  const start = safeUtf16Boundary(text, Math.min(selectionStart, selectionEnd), "start");
-  const end = safeUtf16Boundary(text, Math.max(selectionStart, selectionEnd), "end");
-  const normalized = normalizeFormattingSpans(text, spans);
-  if (end <= start) return normalized;
-
-  if (!kindCoversRange(normalized, kind, start, end)) {
-    return normalizeFormattingSpans(text, [
-      ...normalized,
-      { kind, offsetUtf16: start, lengthUtf16: end - start },
-    ]);
-  }
-
-  const next: ChatFormattingSpan[] = [];
-  for (const span of normalized) {
-    if (span.kind !== kind) {
-      next.push(span);
-      continue;
-    }
-    const spanStart = span.offsetUtf16;
-    const spanEnd = span.offsetUtf16 + span.lengthUtf16;
-    if (spanEnd <= start || spanStart >= end) {
-      next.push(span);
-      continue;
-    }
-    if (spanStart < start) next.push({ kind, offsetUtf16: spanStart, lengthUtf16: start - spanStart });
-    if (spanEnd > end) next.push({ kind, offsetUtf16: end, lengthUtf16: spanEnd - end });
-  }
-  return normalizeFormattingSpans(text, next);
-}
-
-function formattingKindsAtInsertion(
-  spans: readonly ChatFormattingSpan[],
-  changeStart: number,
-  oldChangeEnd: number,
-) {
-  return CHAT_FORMAT_KINDS.filter((kind) => spans.some((span) => {
-    if (span.kind !== kind) return false;
-    const start = span.offsetUtf16;
-    const end = start + span.lengthUtf16;
-    if (oldChangeEnd > changeStart) return start <= changeStart && end >= oldChangeEnd;
-    return start < changeStart && end >= changeStart;
-  }));
-}
-
-/** Keeps styles attached to unchanged text and to replacement text only when
- * the entire replaced range carried that style. */
-export function rebaseFormattingAfterTextEdit(
-  previousText: string,
-  nextText: string,
-  spans: readonly Partial<ChatFormattingSpan>[] | null | undefined,
-): ChatFormattingSpan[] {
-  const normalized = normalizeFormattingSpans(previousText, spans);
-  if (!normalized.length || previousText === nextText) return normalizeFormattingSpans(nextText, normalized);
-
-  let prefix = 0;
-  const prefixLimit = Math.min(previousText.length, nextText.length);
-  while (prefix < prefixLimit && previousText.charCodeAt(prefix) === nextText.charCodeAt(prefix)) prefix += 1;
-  prefix = safeUtf16Boundary(previousText, prefix, "start");
-
-  let suffix = 0;
-  while (
-    suffix < previousText.length - prefix
-    && suffix < nextText.length - prefix
-    && previousText.charCodeAt(previousText.length - 1 - suffix) === nextText.charCodeAt(nextText.length - 1 - suffix)
-  ) suffix += 1;
-
-  const oldChangeEnd = previousText.length - suffix;
-  const newChangeEnd = nextText.length - suffix;
-  const insertedKinds = new Set(formattingKindsAtInsertion(normalized, prefix, oldChangeEnd));
-  const nextKindRuns = new Map<ChatFormattingKind, Array<{ start: number; end: number }>>();
-
-  const appendRun = (kind: ChatFormattingKind, start: number, end: number) => {
-    if (end <= start) return;
-    const ranges = nextKindRuns.get(kind) ?? [];
-    ranges.push({ start, end });
-    nextKindRuns.set(kind, ranges);
-  };
-
-  for (const span of normalized) {
-    const spanStart = span.offsetUtf16;
-    const spanEnd = spanStart + span.lengthUtf16;
-    appendRun(span.kind, spanStart, Math.min(spanEnd, prefix));
-    if (spanEnd > oldChangeEnd) {
-      const suffixStart = Math.max(spanStart, oldChangeEnd);
-      appendRun(
-        span.kind,
-        newChangeEnd + (suffixStart - oldChangeEnd),
-        newChangeEnd + (spanEnd - oldChangeEnd),
-      );
-    }
-  }
-  for (const kind of insertedKinds) appendRun(kind, prefix, newChangeEnd);
-
-  const rebased = [...nextKindRuns.entries()].flatMap(([kind, ranges]) => ranges.map((range) => ({
-    kind,
-    offsetUtf16: range.start,
-    lengthUtf16: range.end - range.start,
-  })));
-  return normalizeFormattingSpans(nextText, rebased);
-}
-
+/** Trim the message and keep its UTF-16 formatting offsets aligned. */
 export function prepareFormattedSubmission(
   value: string,
   spans: readonly Partial<ChatFormattingSpan>[] | null | undefined,
@@ -320,19 +213,16 @@ export function prepareFormattedSubmission(
 }
 
 export function shouldSubmitComposerKey(
-  event: Readonly<{ key: string; shiftKey: boolean; isComposing?: boolean; keyCode?: number }>,
+  event: Readonly<{ key: string; shiftKey: boolean; ctrlKey?: boolean; isComposing?: boolean; keyCode?: number }>,
   sendOnEnter: boolean,
+  requireControl = false,
 ) {
   if (event.key !== "Enter" || event.isComposing || event.keyCode === 229) return false;
-  return sendOnEnter ? !event.shiftKey : event.shiftKey;
+  if (sendOnEnter) return !event.shiftKey;
+  return requireControl ? event.ctrlKey === true : event.shiftKey;
 }
 
-/** Exact plaintext shape produced by qTox GenericChatForm::quoteSelectedText. */
-export function serializeQtoxQuote(text: string) {
-  if (!text) return "";
-  return `> ${text.replace(/\r\n|[\r\n\u2028\u2029]/gu, "\n> ")}\n`;
-}
-
+/** Separate a qTox plaintext quote from its reply body. */
 export function parseQtoxQuoteMessage(value: string): { quoteText: string; body: string } | null {
   const normalized = value.replace(/\r\n|[\r\u2028\u2029]/gu, "\n");
   if (!normalized.startsWith("> ")) return null;

@@ -53,12 +53,16 @@ pub(crate) struct ConsumedNativeFile {
 struct NativeFileGrant {
     profile_id: String,
     recipient_public_key: String,
+    contact_incarnation: u64,
     name: String,
     mime: String,
     path: std::path::PathBuf,
     size: u64,
     issued_at: Instant,
     owned_temporary_file: bool,
+    read_context: Option<String>,
+    reader: Option<File>,
+    read_position: u64,
 }
 
 pub(crate) struct NativeFileGrantStore {
@@ -189,12 +193,16 @@ impl NativeFileGrantStore {
             NativeFileGrant {
                 profile_id,
                 recipient_public_key,
+                contact_incarnation: 0,
                 name: name.clone(),
                 mime: mime.clone(),
                 path: canonical,
                 size,
                 issued_at: now,
                 owned_temporary_file,
+                read_context: None,
+                reader: None,
+                read_position: 0,
             },
         );
 
@@ -206,6 +214,39 @@ impl NativeFileGrantStore {
         })
     }
 
+    pub(crate) fn issue_with_incarnation(
+        &mut self, path: &Path, profile_id: String, recipient_public_key: String,
+        max_bytes: u64, contact_incarnation: u64,
+    ) -> Result<NativeFileSelection, String> {
+        let selection = self.issue(path, profile_id, recipient_public_key, max_bytes)?;
+        self.bind_incarnation(&selection.grant_token, contact_incarnation)?;
+        Ok(selection)
+    }
+
+    pub(crate) fn issue_owned_with_incarnation(
+        &mut self, path: &Path, profile_id: String, recipient_public_key: String,
+        max_bytes: u64, contact_incarnation: u64,
+    ) -> Result<NativeFileSelection, String> {
+        let selection = self.issue_owned(path, profile_id, recipient_public_key, max_bytes)?;
+        self.bind_incarnation(&selection.grant_token, contact_incarnation)?;
+        Ok(selection)
+    }
+
+    fn bind_incarnation(&mut self, token: &str, contact_incarnation: u64) -> Result<(), String> {
+        let grant = self.grants.get_mut(token).ok_or("NATIVE_FILE_GRANT_INVALID")?;
+        grant.contact_incarnation = contact_incarnation;
+        Ok(())
+    }
+
+    pub(crate) fn consume_with_incarnation(
+        &mut self, token: &str, profile_id: &str, recipient_public_key: &str,
+        contact_incarnation: u64,
+    ) -> Result<ConsumedNativeFile, String> {
+        self.consume_at_with_incarnation(token, profile_id, recipient_public_key,
+            contact_incarnation, Instant::now())
+    }
+
+    #[cfg(test)]
     pub(crate) fn consume(
         &mut self,
         token: &str,
@@ -215,11 +256,64 @@ impl NativeFileGrantStore {
         self.consume_at(token, profile_id, recipient_public_key, Instant::now())
     }
 
+    /// Bind this existing OS-selected grant to one remote chat view before exposure.
+    pub(crate) fn bind_read_context(&mut self, token: &str, context: &str) -> Result<(), String> {
+        let grant = self.grants.get_mut(token).ok_or("NATIVE_FILE_GRANT_INVALID")?;
+        if grant.read_context.is_some() || grant.reader.is_some() {
+            return Err("NATIVE_FILE_GRANT_INVALID".into());
+        }
+        grant.read_context = Some(context.to_string());
+        Ok(())
+    }
+
+    /// Sequential, bounded reads from the same opaque grant; EOF/errors consume it.
+    pub(crate) fn read_chunk(
+        &mut self, token: &str, profile_id: &str, recipient_public_key: &str,
+        contact_incarnation: u64, context: &str, position: u64, length: usize,
+    ) -> Result<(Vec<u8>, bool), String> {
+        let mut grant = self.remove_grant(token).ok_or("NATIVE_FILE_GRANT_INVALID")?;
+        let result = (|| {
+            if grant.issued_at.elapsed() > self.ttl { return Err("NATIVE_FILE_GRANT_EXPIRED".into()); }
+            if grant.profile_id != profile_id { return Err("NATIVE_FILE_GRANT_PROFILE_MISMATCH".into()); }
+            if grant.recipient_public_key != recipient_public_key { return Err("NATIVE_FILE_GRANT_RECIPIENT_MISMATCH".into()); }
+            if grant.contact_incarnation != contact_incarnation { return Err("CHAT_CONTACT_INCARNATION_CHANGED".into()); }
+            if grant.read_context.as_deref() != Some(context) || grant.read_position != position
+                || length == 0 || length > 256 * 1024 || position >= grant.size {
+                return Err("NATIVE_FILE_GRANT_RANGE_INVALID".into());
+            }
+            if grant.reader.is_none() {
+                let canonical = fs::canonicalize(&grant.path).map_err(|_| "NATIVE_FILE_GRANT_FILE_CHANGED")?;
+                if canonical != grant.path { return Err("NATIVE_FILE_GRANT_FILE_CHANGED".into()); }
+                grant.reader = Some(File::open(canonical).map_err(|_| "NATIVE_FILE_GRANT_FILE_CHANGED")?);
+            }
+            let reader = grant.reader.as_mut().ok_or("NATIVE_FILE_GRANT_INVALID")?;
+            let metadata = reader.metadata().map_err(|_| "NATIVE_FILE_GRANT_FILE_CHANGED")?;
+            if !metadata.is_file() || metadata.len() != grant.size { return Err("NATIVE_FILE_GRANT_FILE_CHANGED".into()); }
+            let count = length.min((grant.size - position) as usize);
+            let mut bytes = vec![0; count];
+            if reader.read_exact(&mut bytes).is_err() {
+                bytes.fill(0);
+                return Err("NATIVE_FILE_GRANT_FILE_CHANGED".into());
+            }
+            grant.read_position += count as u64;
+            Ok((bytes, grant.read_position == grant.size))
+        })();
+        if matches!(&result, Ok((_, false))) {
+            self.aggregate_bytes = self.aggregate_bytes.saturating_add(grant.size);
+            self.grants.insert(token.to_string(), grant);
+        } else {
+            let owned_path = grant.owned_temporary_file.then(|| grant.path.clone());
+            drop(grant);
+            if let Some(path) = owned_path { let _ = fs::remove_file(path); }
+        }
+        result
+    }
+
     pub(crate) fn discard(&mut self, token: &str) {
         if let Some(grant) = self.remove_grant(token) {
-            if grant.owned_temporary_file {
-                let _ = fs::remove_file(grant.path);
-            }
+            let owned_path = grant.owned_temporary_file.then(|| grant.path.clone());
+            drop(grant);
+            if let Some(path) = owned_path { let _ = fs::remove_file(path); }
         }
     }
 
@@ -242,12 +336,20 @@ impl NativeFileGrantStore {
         }
     }
 
+    #[cfg(test)]
     fn consume_at(
         &mut self,
         token: &str,
         profile_id: &str,
         recipient_public_key: &str,
         now: Instant,
+    ) -> Result<ConsumedNativeFile, String> {
+        self.consume_at_with_incarnation(token, profile_id, recipient_public_key, 0, now)
+    }
+
+    fn consume_at_with_incarnation(
+        &mut self, token: &str, profile_id: &str, recipient_public_key: &str,
+        contact_incarnation: u64, now: Instant,
     ) -> Result<ConsumedNativeFile, String> {
         // Removal happens before every validation. A failed, expired, replayed,
         // or cross-profile token therefore never becomes usable later.
@@ -262,11 +364,17 @@ impl NativeFileGrantStore {
             {
                 return Err("NATIVE_FILE_GRANT_EXPIRED".to_string());
             }
+            if grant.read_context.is_some() || grant.reader.is_some() {
+                return Err("NATIVE_FILE_GRANT_INVALID".to_string());
+            }
             if grant.profile_id != profile_id {
                 return Err("NATIVE_FILE_GRANT_PROFILE_MISMATCH".to_string());
             }
             if grant.recipient_public_key != recipient_public_key {
                 return Err("NATIVE_FILE_GRANT_RECIPIENT_MISMATCH".to_string());
+            }
+            if grant.contact_incarnation != contact_incarnation {
+                return Err("CHAT_CONTACT_INCARNATION_CHANGED".to_string());
             }
 
             let canonical = fs::canonicalize(&grant.path)
@@ -437,6 +545,51 @@ mod tests {
             .consume(&selection.grant_token, "profile-a", "FRIEND-A")
             .is_err());
         drop(store);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn readded_contact_cannot_consume_an_old_grant() {
+        let (root, path) = temporary_file("incarnation", b"payload");
+        let mut store = NativeFileGrantStore::default();
+        let old = store.issue_with_incarnation(
+            &path, "profile-a".into(), "FRIEND-A".into(), 1024, 1,
+        ).unwrap();
+        assert_eq!(store.consume_with_incarnation(
+            &old.grant_token, "profile-a", "FRIEND-A", 2,
+        ).unwrap_err(), "CHAT_CONTACT_INCARNATION_CHANGED");
+        assert_eq!(fs::read(&path).unwrap(), b"payload");
+        assert!(store.consume_with_incarnation(
+            &old.grant_token, "profile-a", "FRIEND-A", 1,
+        ).is_err());
+        let current = store.issue_with_incarnation(
+            &path, "profile-a".into(), "FRIEND-A".into(), 1024, 2,
+        ).unwrap();
+        assert_eq!(store.consume_with_incarnation(
+            &current.grant_token, "profile-a", "FRIEND-A", 2,
+        ).unwrap().bytes, b"payload");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn incarnation_change_during_read_removes_only_the_owned_copy() {
+        let (root, original) = temporary_file("read-incarnation", b"payload");
+        let owned = root.join("managed-copy.png");
+        fs::copy(&original, &owned).unwrap();
+        let mut store = NativeFileGrantStore::default();
+        let selected = store.issue_owned_with_incarnation(
+            &owned, "profile-a".into(), "FRIEND-A".into(), 1024, 1,
+        ).unwrap();
+        store.bind_read_context(&selected.grant_token, "view-a").unwrap();
+        assert_eq!(store.read_chunk(
+            &selected.grant_token, "profile-a", "FRIEND-A", 1, "view-a", 0, 2,
+        ).unwrap(), (b"pa".to_vec(), false));
+        assert_eq!(store.read_chunk(
+            &selected.grant_token, "profile-a", "FRIEND-A", 2, "view-a", 2, 2,
+        ).unwrap_err(), "CHAT_CONTACT_INCARNATION_CHANGED");
+        assert!(!owned.exists());
+        assert_eq!(fs::read(&original).unwrap(), b"payload");
+        assert_eq!(store.aggregate_bytes, 0);
         fs::remove_dir_all(root).unwrap();
     }
 

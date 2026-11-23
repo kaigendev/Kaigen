@@ -108,7 +108,7 @@
   outline: 0;
   border-radius: 15px;
   background: transparent;
-  color: var(--kaigen-theme-app-compose-row-textarea-color-5bawp8);
+  color: var(--kaigen-theme-app-rich-composer-editor-color-5bawp8);
   padding: 15px 22px 13px;
   font-family: var(--chat-font);
   font-size: var(--chat-font-size);
@@ -116,18 +116,23 @@
   font-weight: 400;
   line-height: 1.25;
   scrollbar-width: thin;
-  scrollbar-color: var(--kaigen-theme-app-compose-row-textarea-scrollbar-color-xflhs8);
+  scrollbar-color: var(--kaigen-theme-app-rich-composer-editor-scrollbar-color-xflhs8);
 }
 
 .rich-composer-editor[data-empty="true"]::before {
   content: attr(data-placeholder);
   position: absolute;
-  color: var(--kaigen-theme-app-compose-row-textarea-placeholder-color-1r08goh);
+  inset-inline: 0;
+  padding-inline: inherit;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--kaigen-theme-app-rich-composer-editor-placeholder-color-1r08goh);
   pointer-events: none;
 }
 
 .rich-composer-editor::highlight(kaigen-spelling) {
-  text-decoration: var(--kaigen-theme-app-spellcheck-error-text-decoration-d3tp3d);
+  text-decoration: var(--kaigen-theme-app-rich-composer-spelling-text-decoration-d3tp3d);
   text-underline-offset: 3px;
 }
 

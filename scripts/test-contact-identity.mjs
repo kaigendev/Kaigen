@@ -3,16 +3,9 @@ import { readFile } from "node:fs/promises";
 import { importTypeScriptModule } from "./import-typescript-module.mjs";
 
 const identity = await importTypeScriptModule(new URL("../src/contactIdentity.ts", import.meta.url));
-const friends = [
-  { number: 7, public_key: "A1B2" },
-  { number: 9, public_key: "C3D4" },
-];
 
 assert.equal(identity.toxChatId("a1b2"), "tox-A1B2");
-
-assert.equal(identity.resolveFriendChatId("a1b2", 99, friends), "tox-A1B2");
-assert.equal(identity.resolveFriendChatId(undefined, 9, friends), "tox-C3D4");
-assert.equal(identity.resolveFriendChatId(undefined, 99, friends), undefined);
+assert.equal("resolveFriendChatId" in identity, false);
 
 const [appSource, coreSource, settingsSource] = await Promise.all([
   readFile(new URL("../src/App.tsx", import.meta.url), "utf8"),

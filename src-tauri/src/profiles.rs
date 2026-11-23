@@ -60,12 +60,21 @@ impl ProfileRegistry {
     pub fn load_or_discover(root: &Path, data_dir: &Path) -> Result<Self, String> {
         let path = data_dir.join("profiles.json");
         recover_interrupted_write(&path)?;
-        if path.is_file() {
-            let mut registry: Self = serde_json::from_slice(&fs::read(&path).map_err(|error| {
-                format!("Could not read the portable profile registry: {error}")
-            })?)
-            .map_err(|error| format!("The portable profile registry is invalid: {error}"))?;
-            registry.version = REGISTRY_VERSION;
+        let bytes = match fs::read(&path) {
+            Ok(bytes) => Some(bytes),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => {
+                return Err(format!(
+                    "Could not read the portable profile registry: {error}"
+                ))
+            }
+        };
+        if let Some(bytes) = bytes {
+            let mut registry: Self = serde_json::from_slice(&bytes)
+                .map_err(|error| format!("The portable profile registry is invalid: {error}"))?;
+            if registry.version != REGISTRY_VERSION {
+                return Err("PROFILE_REGISTRY_VERSION_UNSUPPORTED".into());
+            }
             let previous_len = registry.profiles.len();
             registry.retain_safe_records(root);
             registry.ensure_active();
@@ -94,7 +103,12 @@ impl ProfileRegistry {
 
         let mut registry = Self::default();
         let profiles_root = root.join("profiles");
-        if let Ok(entries) = fs::read_dir(&profiles_root) {
+        let entries = match fs::read_dir(&profiles_root) {
+            Ok(entries) => Some(entries),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(format!("Could not discover portable profiles: {error}")),
+        };
+        if let Some(entries) = entries {
             for entry in entries.filter_map(Result::ok) {
                 let directory = entry.path();
                 if !directory.is_dir() {
@@ -120,9 +134,12 @@ impl ProfileRegistry {
                         }
                     })
                     .min_by_key(|(priority, _)| *priority);
-                let Some((_, profile)) = discovered else {
+                let Some((priority, profile)) = discovered else {
                     continue;
                 };
+                if priority != 0 {
+                    return Err("PROFILE_LEGACY_FORMAT_UNSUPPORTED".into());
+                }
                 let name = profile
                     .file_stem()
                     .and_then(|value| value.to_str())
@@ -335,77 +352,98 @@ pub fn file_is_encrypted(path: &Path) -> Result<bool, String> {
     {
         return KaiProfileVolume::inspect(path).map(|info| info.password_protected);
     }
-    let bytes = read_file(path)
+    let mut bytes = read_file(path)
         .map_err(|error| format!("Could not inspect Tox profile {}: {error}", path.display()))?;
-    Ok(is_encrypted(&bytes))
+    let encrypted = is_encrypted(&bytes);
+    crate::wipe_secret_bytes(&mut bytes);
+    Ok(encrypted)
 }
 
+/// Recognizes the toxencryptsave header only after checking the minimum file length.
 pub fn is_encrypted(bytes: &[u8]) -> bool {
+    // SAFETY: The minimum-length check guarantees a readable native header.
     bytes.len() >= ENCRYPTION_OVERHEAD && unsafe { tox_is_data_encrypted(bytes.as_ptr()) }
 }
 
+/// Owns one immutable key allocated by the pinned toxencryptsave runtime.
 struct PassKey(NonNull<c_void>);
 
+// SAFETY: Ownership of the C allocation may move between threads, and no
+// operation mutates it. Drop runs only when the last Arc releases ownership.
 unsafe impl Send for PassKey {}
+// SAFETY: The pinned encrypt/decrypt APIs accept a const key and only read
+// it. Each call has independent input, output and error storage.
 unsafe impl Sync for PassKey {}
 
-impl Drop for PassKey {
-    fn drop(&mut self) {
-        unsafe { tox_pass_key_free(self.0.as_ptr()) };
-    }
-}
-
-#[derive(Clone)]
-pub struct ProfileCipher(Arc<PassKey>);
-
-impl ProfileCipher {
-    pub fn new(password: &str) -> Result<Self, String> {
-        let mut error = 0_i32;
+impl PassKey {
+    /// Derives a native key, returning the native error code on failure.
+    fn derive(password: &str, salt: Option<&[u8; SALT_LENGTH]>) -> Result<Self, i32> {
+        let mut error = 0;
+        let bytes = password.as_bytes();
+        // SAFETY: All inputs are borrowed for the duration of the call. A
+        // supplied salt has the fixed length required by toxencryptsave.
         let key = unsafe {
-            tox_pass_key_derive(password.as_bytes().as_ptr(), password.len(), &mut error)
+            match salt {
+                Some(salt) => tox_pass_key_derive_with_salt(
+                    bytes.as_ptr(),
+                    bytes.len(),
+                    salt.as_ptr(),
+                    &mut error,
+                ),
+                None => tox_pass_key_derive(bytes.as_ptr(), bytes.len(), &mut error),
+            }
         };
-        NonNull::new(key)
-            .map(|key| Self(Arc::new(PassKey(key))))
-            .ok_or_else(|| format!("Could not derive the profile encryption key (code {error})"))
+        NonNull::new(key).map(Self).ok_or(error)
     }
 
-    pub fn unlock(ciphertext: &[u8], password: &str) -> Result<Self, String> {
+    /// Copies the pinned native symmetric key bytes used by qTox and Web.
+    fn symmetric_key(&self) -> [u8; 32] {
+        let mut key = [0_u8; 32];
+        // SAFETY: The pinned Tox_Pass_Key contains a 32-byte salt followed
+        // by the 32-byte key. This allocation is live and the output is separate.
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                self.0.as_ptr().cast::<u8>().add(SALT_LENGTH),
+                key.as_mut_ptr(),
+                key.len(),
+            );
+        }
+        key
+    }
+
+    /// Reads the salt only after validating the native savedata header.
+    fn read_salt(ciphertext: &[u8]) -> Result<[u8; SALT_LENGTH], String> {
         if !is_encrypted(ciphertext) {
             return Err("The selected profile is not password protected".to_string());
         }
         let mut salt = [0_u8; SALT_LENGTH];
         let mut salt_error = 0_i32;
+        // SAFETY: is_encrypted checked the full native header length, and
+        // the output buffer has exactly the native salt size.
         if !unsafe { tox_get_salt(ciphertext.as_ptr(), salt.as_mut_ptr(), &mut salt_error) } {
             return Err(format!(
                 "The encrypted profile header is invalid (code {salt_error})"
             ));
         }
-        let mut error = 0_i32;
-        let key = unsafe {
-            tox_pass_key_derive_with_salt(
-                password.as_bytes().as_ptr(),
-                password.len(),
-                salt.as_ptr(),
-                &mut error,
-            )
-        };
-        let cipher = NonNull::new(key)
-            .map(|key| Self(Arc::new(PassKey(key))))
-            .ok_or_else(|| format!("Could not derive the profile decryption key (code {error})"))?;
-        // Authentication is checked now, so a bad password never reaches tox_new.
-        let _ = cipher.decrypt(ciphertext)?;
-        Ok(cipher)
+        Ok(salt)
     }
 
-    pub fn encrypt(&self, plaintext: &[u8]) -> Result<Vec<u8>, String> {
+    /// Encrypts one nonempty native Tox savedata buffer.
+    fn encrypt(&self, plaintext: &[u8]) -> Result<Vec<u8>, String> {
         if plaintext.is_empty() {
             return Err("A zero-length Tox profile cannot be encrypted".to_string());
         }
-        let mut ciphertext = vec![0_u8; plaintext.len() + ENCRYPTION_OVERHEAD];
+        let length = plaintext
+            .len()
+            .checked_add(ENCRYPTION_OVERHEAD)
+            .ok_or_else(|| "Tox profile encryption length overflow".to_string())?;
+        let mut ciphertext = vec![0_u8; length];
         let mut error = 0_i32;
+        // SAFETY: The native key is live, and the separate output allocation
+        // holds the complete plaintext plus the required encryption overhead.
         if !unsafe {
             tox_pass_key_encrypt(
-                self.0 .0.as_ptr(),
+                self.0.as_ptr(),
                 plaintext.as_ptr(),
                 plaintext.len(),
                 ciphertext.as_mut_ptr(),
@@ -417,21 +455,25 @@ impl ProfileCipher {
         Ok(ciphertext)
     }
 
-    pub fn decrypt(&self, ciphertext: &[u8]) -> Result<Vec<u8>, String> {
+    /// Decrypts and authenticates native savedata into a Rust-owned buffer.
+    fn decrypt(&self, ciphertext: &[u8]) -> Result<Vec<u8>, String> {
         if ciphertext.len() < ENCRYPTION_OVERHEAD {
             return Err("The encrypted Tox profile is truncated".to_string());
         }
         let mut plaintext = vec![0_u8; ciphertext.len() - ENCRYPTION_OVERHEAD];
         let mut error = 0_i32;
+        // SAFETY: The native key and ciphertext are live, and the separate
+        // output allocation holds every byte beyond the fixed overhead.
         if !unsafe {
             tox_pass_key_decrypt(
-                self.0 .0.as_ptr(),
+                self.0.as_ptr(),
                 ciphertext.as_ptr(),
                 ciphertext.len(),
                 plaintext.as_mut_ptr(),
                 &mut error,
             )
         } {
+            crate::wipe_secret_bytes(&mut plaintext);
             return Err(if error == 5 {
                 "PROFILE_PASSWORD_INVALID".to_string()
             } else {
@@ -439,6 +481,47 @@ impl ProfileCipher {
             });
         }
         Ok(plaintext)
+    }
+}
+
+impl Drop for PassKey {
+    fn drop(&mut self) {
+        // SAFETY: This is the unique final owner of the native allocation.
+        unsafe { tox_pass_key_free(self.0.as_ptr()) };
+    }
+}
+
+#[derive(Clone)]
+pub struct ProfileCipher(Arc<PassKey>);
+
+impl ProfileCipher {
+    /// Derives a key for a new password-protected Tox profile.
+    pub fn new(password: &str) -> Result<Self, String> {
+        PassKey::derive(password, None)
+            .map(|key| Self(Arc::new(key)))
+            .map_err(|error| format!("Could not derive the profile encryption key (code {error})"))
+    }
+
+    /// Derives the profile key and authenticates the ciphertext before loading it.
+    pub fn unlock(ciphertext: &[u8], password: &str) -> Result<Self, String> {
+        let salt = PassKey::read_salt(ciphertext)?;
+        let key = PassKey::derive(password, Some(&salt)).map_err(|error| {
+            format!("Could not derive the profile decryption key (code {error})")
+        })?;
+        let cipher = Self(Arc::new(key));
+        let mut plaintext = cipher.decrypt(ciphertext)?;
+        crate::wipe_secret_bytes(&mut plaintext);
+        Ok(cipher)
+    }
+
+    /// Encrypts one nonempty native Tox savedata buffer.
+    pub fn encrypt(&self, plaintext: &[u8]) -> Result<Vec<u8>, String> {
+        self.0.encrypt(plaintext)
+    }
+
+    /// Decrypts and authenticates native savedata into a Rust-owned buffer.
+    pub fn decrypt(&self, ciphertext: &[u8]) -> Result<Vec<u8>, String> {
+        self.0.decrypt(ciphertext)
     }
 }
 
@@ -460,29 +543,9 @@ pub fn derive_password_key(password: &str, salt: &[u8; SALT_LENGTH]) -> Result<[
     if password.is_empty() {
         return Err("PROFILE_PASSWORD_REQUIRED".to_string());
     }
-    let mut error = 0_i32;
-    let key = unsafe {
-        tox_pass_key_derive_with_salt(
-            password.as_bytes().as_ptr(),
-            password.len(),
-            salt.as_ptr(),
-            &mut error,
-        )
-    };
-    let key = NonNull::new(key)
-        .ok_or_else(|| format!("Could not derive the qTox history key (code {error})"))?;
-    let owned = PassKey(key);
-    let mut result = [0_u8; 32];
-    // Tox_Pass_Key stores the 32-byte salt first and the 32-byte symmetric
-    // key second. qTox uses that second half verbatim as SQLCipher's raw key.
-    unsafe {
-        std::ptr::copy_nonoverlapping(
-            (owned.0.as_ptr() as *const u8).add(SALT_LENGTH),
-            result.as_mut_ptr(),
-            result.len(),
-        );
-    }
-    Ok(result)
+    PassKey::derive(password, Some(salt))
+        .map(|key| key.symmetric_key())
+        .map_err(|error| format!("Could not derive the qTox history key (code {error})"))
 }
 
 pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), String> {
@@ -538,6 +601,24 @@ pub fn read_file(path: &Path) -> Result<Vec<u8>, String> {
     fs::read(path).map_err(|error| error.to_string())
 }
 
+pub fn read_optional_file(path: &Path) -> Result<Option<Vec<u8>>, String> {
+    if let Some(volume) = kai::managed_volume(path) {
+        return match volume.read(path) {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(error) if error == "KAI_VOLUME_FILE_NOT_FOUND" && !volume.is_dir(path)? => {
+                Ok(None)
+            }
+            Err(error) => Err(error),
+        };
+    }
+    match fs::read(path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+#[cfg(test)]
 pub fn read_text(path: &Path) -> Result<String, String> {
     String::from_utf8(read_file(path)?).map_err(|_| "PROFILE_TEXT_INVALID_UTF8".to_string())
 }
@@ -641,49 +722,9 @@ fn temporary_path(path: &Path) -> PathBuf {
 
 #[cfg(target_os = "windows")]
 fn replace_file(source: &Path, destination: &Path) -> Result<(), String> {
-    let destination_display = destination.display().to_string();
-    let source = extended_windows_path(source)?;
-    let destination = extended_windows_path(destination)?;
-    const MOVEFILE_REPLACE_EXISTING: u32 = 0x1;
-    const MOVEFILE_WRITE_THROUGH: u32 = 0x8;
-    let success = unsafe {
-        MoveFileExW(
-            source.as_ptr(),
-            destination.as_ptr(),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-        )
-    };
-    if success == 0 {
-        return Err(format!(
-            "Could not atomically replace {}: {}",
-            destination_display,
-            std::io::Error::last_os_error()
-        ));
-    }
-    Ok(())
-}
-
-#[cfg(target_os = "windows")]
-fn extended_windows_path(path: &Path) -> Result<Vec<u16>, String> {
-    use std::os::windows::ffi::OsStrExt;
-
-    let absolute = std::path::absolute(path)
-        .map_err(|error| format!("Could not resolve {}: {error}", path.display()))?;
-    let wide = absolute.as_os_str().encode_wide().collect::<Vec<_>>();
-    let verbatim_prefix = r"\\?\".encode_utf16().collect::<Vec<_>>();
-    let unc_prefix = r"\\?\UNC\".encode_utf16().collect::<Vec<_>>();
-    let mut extended = Vec::with_capacity(wide.len() + unc_prefix.len() + 1);
-    if wide.starts_with(&verbatim_prefix) {
-        extended.extend_from_slice(&wide);
-    } else if wide.starts_with(&['\\' as u16, '\\' as u16]) {
-        extended.extend_from_slice(&unc_prefix);
-        extended.extend_from_slice(&wide[2..]);
-    } else {
-        extended.extend_from_slice(&verbatim_prefix);
-        extended.extend_from_slice(&wide);
-    }
-    extended.push(0);
-    Ok(extended)
+    kai::move_file_write_through(source, destination).map_err(|error| {
+        format!("Could not atomically replace {}: {error}", destination.display())
+    })
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -769,12 +810,6 @@ fn now() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs())
         .unwrap_or(0)
-}
-
-#[cfg(target_os = "windows")]
-#[link(name = "kernel32")]
-unsafe extern "system" {
-    fn MoveFileExW(existing_file_name: *const u16, new_file_name: *const u16, flags: u32) -> i32;
 }
 
 unsafe extern "C" {

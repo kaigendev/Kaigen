@@ -85,6 +85,8 @@ const WEB_COMMANDS = new Set([
   "get_tox_friends",
   "get_tox_id",
   "get_tox_messages",
+  "get_tox_messages_snapshot",
+  "release_chat_history",
   "request_pq_shutdown",
   "send_tox_message",
   "set_file_receive_settings",
@@ -239,12 +241,13 @@ async function captureFailureDiagnostics(desktop, page, evidenceRoot) {
       result.stateStatus = "captured";
     } catch { result.stateStatus = "failed"; }
     const maskId = `kaigen-failure-capture-${randomUUID()}`;
+    let screenshotStage = "redaction-evaluate";
     try {
       // Preserve layout only: failure pages may still show passwords, workspace links or messages.
       const masked = await client.evaluate(`(() => {
         const style = document.createElement("style"); style.id = ${JSON.stringify(maskId)};
         const hidden = "input,textarea,[contenteditable],img,svg,canvas,video,iframe,object,embed";
-        style.textContent = "body,body *{color:transparent!important;-webkit-text-fill-color:transparent!important;text-shadow:none!important;background-image:none!important}body *::before,body *::after," + hidden + "{visibility:hidden!important}";
+        style.textContent = "body,body *{transition:none!important;animation:none!important;color:transparent!important;-webkit-text-fill-color:transparent!important;text-shadow:none!important;background-image:none!important}body *::before,body *::after," + hidden + "{visibility:hidden!important}";
         (document.head || document.documentElement).append(style);
         return style.sheet !== null && style.sheet.cssRules.length > 0
           && Array.from(document.querySelectorAll("body,body *")).every(element => {
@@ -254,14 +257,17 @@ async function captureFailureDiagnostics(desktop, page, evidenceRoot) {
               && css.textShadow === "none" && css.backgroundImage === "none";
           });
       })()`);
+      screenshotStage = "redaction-check";
       check(masked === true, "failure screenshot redaction was not confirmed");
+      screenshotStage = "capture";
       const name = `failure-${label}.png`;
       const destination = path.join(evidenceRoot, name);
       if (label === "desktop") await client.captureScreenshot(destination, { waitForChat: false });
       else await client.screenshot(destination);
+      screenshotStage = "hash";
       result.screenshot = { name, sha256: await sha256File(destination) };
       result.screenshotStatus = "captured";
-    } catch { result.screenshotStatus = "failed"; }
+    } catch { result.screenshotStatus = "failed"; result.failureStage = screenshotStage; }
     finally {
       try { await client.evaluate(`document.getElementById(${JSON.stringify(maskId)})?.remove()`); }
       catch { result.redactionCleanupFailed = true; }
@@ -405,10 +411,24 @@ class BrowserPipe {
     this.listeners = new Set();
     this.buffer = Buffer.alloc(0);
     this.closed = false;
+    this.outputEndObserved = false;
+    this.processCloseObserved = false;
+    this.launcherExit = null;
     this.output.on("data", (chunk) => this.onData(chunk));
     this.output.on("error", (error) => this.fail(error));
+    const onOutputEnd = () => {
+      this.outputEndObserved = true;
+      this.fail(new Error("Chromium CDP pipe closed"));
+    };
+    this.output.once("end", onOutputEnd);
+    this.output.once("close", onOutputEnd);
+    processHandle.once("close", () => { this.processCloseObserved = true; });
     processHandle.once("error", (error) => this.fail(error));
-    processHandle.once("exit", () => this.fail(new Error("Chromium exited")));
+    processHandle.once("exit", (code, signal) => {
+      this.launcherExit = { code, signal };
+      if (process.platform === "win32" && code === 0 && signal == null) return;
+      this.fail(new Error(`Chromium exited: code=${code} signal=${signal}`));
+    });
   }
 
   onData(chunk) {
@@ -476,8 +496,8 @@ async function launchBrowser(options, inputs, browserRoot, ChromiumPage, capture
     "--window-size=1600,1000", "--force-device-scale-factor=1", "--lang=ru-RU",
     "--no-first-run", "--no-default-browser-check", "--disable-background-networking",
     "--disable-component-update", "--disable-default-apps", "--disable-sync", "--metrics-recording-only",
-    `--ignore-certificate-errors-spki-list=${options.tlsSpki}`,
-    `--host-resolver-rules=MAP kaigen.test ${options.resolveHost},EXCLUDE localhost`,
+    ...(options.tlsSpki ? [`--ignore-certificate-errors-spki-list=${options.tlsSpki}`] : []),
+    ...(options.resolveHost ? [`--host-resolver-rules=MAP kaigen.test ${options.resolveHost},EXCLUDE localhost`] : []),
     "about:blank",
   ];
   const child = spawn(inputs.chromium.path, browserArguments, {
@@ -531,7 +551,12 @@ function headerValue(headers, name) {
 }
 
 class WebCommandClient {
-  constructor(page, candidateId) {
+  constructor(page, candidateId, origin = "https://kaigen.test") {
+    const parsedOrigin = new URL(origin);
+    check(parsedOrigin.origin === origin && (parsedOrigin.protocol === "https:"
+      || (parsedOrigin.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(parsedOrigin.hostname))),
+    "Web adapter requires an exact HTTPS origin or explicit loopback test origin");
+    this.origin = origin;
     this.label = "web";
     this.page = page;
     this.candidateId = candidateId;
@@ -540,7 +565,7 @@ class WebCommandClient {
       if (event.sessionId !== page.sessionId || event.method !== "Network.requestWillBeSent") return;
       let url;
       try { url = new URL(event.params?.request?.url ?? ""); } catch { return; }
-      if (url.origin !== "https://kaigen.test" || !url.pathname.startsWith("/api/v1/commands/")) return;
+      if (url.origin !== this.origin || !url.pathname.startsWith("/api/v1/commands/")) return;
       const headers = Object.fromEntries(AUTH_HEADERS.map((name) => [name, headerValue(event.params?.request?.headers, name)]));
       if (AUTH_HEADERS.every((name) => headers[name])) this.auth = headers;
     });
@@ -557,8 +582,10 @@ class WebCommandClient {
     const auth = await this.waitForAuth(timeoutMs);
     const expression = `(async () => {
       try {
+        if (location.origin !== ${JSON.stringify(this.origin)}) return { ok: false, code: "WEB_ORIGIN_CHANGED" };
         const response = await fetch(${JSON.stringify(`/api/v1/commands/${command}`)}, {
           method: "POST", credentials: "same-origin", cache: "no-store", referrerPolicy: "no-referrer",
+          signal: AbortSignal.timeout(${JSON.stringify(timeoutMs)}),
           headers: ${JSON.stringify({ "Content-Type": "application/json", ...auth })},
           body: JSON.stringify(${JSON.stringify(args)}),
         });
@@ -732,11 +759,17 @@ async function reopenWorkspace(page, web, workspace, timeoutMs, requireProfile =
   await navigate(page, "about:blank");
   web.clearAuth();
   await navigate(page, workspace.workspaceUrl);
-  await page.waitFor('document.querySelector(".web-shell") || document.querySelector(".web-gate-card form input[type=password]") || document.querySelector(".web-error")', "restored Web workspace route", timeoutMs);
-  const route = await page.evaluate(`(() => ({ shell: !!document.querySelector(".web-shell"), auth: !!document.querySelector(".web-gate-card form input[type=password]"), error: !!document.querySelector(".web-error") }))()`);
-  check(route && !route.error, "restored Web workspace entered an error route");
+  const authSelector = '.web-gate-card form input[type="password"][autocomplete="current-password"]';
+  const fatalSelector = ".web-gate-card > div > p.web-error";
+  await page.waitFor(`document.querySelector(".web-shell") || document.querySelector(${JSON.stringify(authSelector)}) || document.querySelector(${JSON.stringify(fatalSelector)})`, "restored Web workspace route", timeoutMs);
+  const route = await page.evaluate(`(() => ({ shell: !!document.querySelector(".web-shell"), auth: !!document.querySelector(${JSON.stringify(authSelector)}), error: !!document.querySelector(${JSON.stringify(fatalSelector)}) }))()`);
+  check(route, "restored Web workspace route was unavailable");
+  if (route.error) {
+    const detail = await page.evaluate(`document.querySelector(${JSON.stringify(fatalSelector)})?.textContent?.slice(0, 1000) ?? ""`);
+    throw new Error("restored Web workspace entered an error route: " + safeFailure(detail, [[workspace.password, "[redacted-password]"], [workspace.workspaceUrl, "[redacted-workspace-url]"]]));
+  }
   if (route.auth) {
-    await page.setValue('.web-gate-card form input[type="password"]', workspace.password);
+    await page.setValue(authSelector, workspace.password);
     await page.waitFor('document.querySelector(".web-gate-card form .web-primary:not(:disabled)")', "enabled Web workspace login", 10_000);
     await page.click(".web-gate-card form .web-primary");
   }
@@ -937,14 +970,16 @@ async function waitPeerOffline(client, peerPublicKey, timeoutMs, label) {
   }, timeoutMs, label, 250);
 }
 
-async function waitPqStopped(desktop, web, friendNumbers, timeoutMs) {
+async function waitPqStopped(desktop, web, friendNumbers, timeoutMs, observeStatus) {
   const statuses = await waitUntil(async () => {
     const [desktopStatus, webStatus] = await Promise.all([
       desktop.invoke("get_pq_status", { friendNumber: friendNumbers.desktopFriendNumber }),
       web.invoke("get_pq_status", { friendNumber: friendNumbers.webFriendNumber }),
     ]);
+    const current = { desktop: desktopStatus, web: webStatus };
+    if (observeStatus) await observeStatus(current);
     return desktopStatus.state === "available" && webStatus.state === "available"
-      ? { desktop: desktopStatus, web: webStatus } : undefined;
+      ? current : undefined;
   }, timeoutMs, "Desktop-Web bilateral PQ shutdown", 150);
   for (const [label, value] of Object.entries(statuses)) {
     check(value.supported === true && value.protocol_version === 2 && value.auto_pending === false && !value.error, `${label} did not persist manual-only PQv2 shutdown`);
@@ -1260,8 +1295,9 @@ async function run(options) {
       const desktopBacklog = message("old-epoch-web-peer-offline", "desktop");
       await sendDurably(desktop, friendNumbers.desktopFriendNumber, desktopBacklog, options.timeoutMs);
       const desktopPendingBeforeRestart = await assertPendingProtected(desktop, friendNumbers.desktopFriendNumber, desktopBacklog, "old epoch Web-offline desktop backlog");
-      const closing = await desktop.invoke("request_pq_shutdown", { friendNumber: friendNumbers.desktopFriendNumber });
-      check(PROTECTED_STATES.has(closing.state) && closing.state !== "active", "manual shutdown did not retain the old PQ epoch while Web was offline");
+      const offlineProbe = await desktop.invoke("request_pq_shutdown", { friendNumber: friendNumbers.desktopFriendNumber });
+      receipt.offlineShutdownProbe = safePqStatus(offlineProbe);
+      check(offlineProbe.state === "active" && offlineProbe.protocol_version === 2, "offline shutdown readiness probe did not retain an active PQv2 epoch");
       await desktop.hardKill();
       const readyStart = await writeMarker(paths.controlRoot, options.controlNonce, candidateId, "ready-for-web-start");
       const started = await waitOwnerReceipt(paths.controlRoot, inputs, options.controlNonce, "start", ownerTimeoutMs);
@@ -1282,7 +1318,87 @@ async function run(options) {
         waitMessageExact({ sender: desktop, receiver: web, senderFriendNumber: friendNumbers.desktopFriendNumber, receiverFriendNumber: friendNumbers.webFriendNumber, text: desktopBacklog, label: "old-epoch-web-peer-offline", pqProtected: true, timeoutMs: options.timeoutMs }),
         waitMessageExact({ sender: web, receiver: desktop, senderFriendNumber: friendNumbers.webFriendNumber, receiverFriendNumber: friendNumbers.desktopFriendNumber, text: webBacklog, label: "old-epoch-desktop-peer-offline", pqProtected: true, timeoutMs: options.timeoutMs }),
       ]);
-      const stoppedPq = await waitPqStopped(desktop, web, friendNumbers, options.timeoutMs);
+      const shutdownStarted = Date.now();
+      const shutdownDeadline = shutdownStarted + options.timeoutMs;
+      const shutdown = receipt.oldEpochShutdown = {
+        startedAt: new Date(shutdownStarted).toISOString(), timeoutMs: options.timeoutMs,
+        attempts: [], observations: [], closingObserved: false, lastObserved: null,
+      };
+      const remainingShutdownMs = () => {
+        const remaining = shutdownDeadline - Date.now();
+        check(remaining > 0, "Desktop-Web bilateral PQ shutdown timed out");
+        return remaining;
+      };
+      const saveShutdownReceipt = async () => {
+        try {
+          await writeReceipt(receiptPath, receipt);
+        } catch (error) {
+          check(false, "PQ shutdown receipt save failed: " + safeFailure(error?.message ?? error));
+        }
+      };
+      const requestFreshShutdown = async () => {
+        remainingShutdownMs();
+        const attempt = { number: shutdown.attempts.length + 1, elapsedMs: Date.now() - shutdownStarted };
+        shutdown.attempts.push(attempt);
+        let status;
+        try {
+          status = await desktop.invoke("request_pq_shutdown", { friendNumber: friendNumbers.desktopFriendNumber });
+        } catch (error) {
+          attempt.requestError = safeFailure(error?.message ?? error);
+          // The invocation may have taken effect. Never retry an uncertain result.
+          check(false, "online shutdown request failed: " + attempt.requestError);
+        }
+        attempt.request = safePqStatus(status);
+        if (attempt.number === 1) receipt.onlineShutdownAfterRecovery = attempt.request;
+        await saveShutdownReceipt();
+        remainingShutdownMs();
+        check(status.state === "active" && status.shutdown_state === "checking"
+          && status.shutdown_cancellable === true && !status.shutdown_error,
+        "online shutdown did not begin authenticated readiness checking");
+        check(status.protocol_version === 2, "shutdown checkpoint fell back from PQv2");
+      };
+      let stoppedPq;
+      try {
+        await requestFreshShutdown();
+        let previousStatuses = "";
+        stoppedPq = await waitPqStopped(desktop, web, friendNumbers, remainingShutdownMs(), async (current) => {
+          const statuses = { desktop: safePqStatus(current.desktop), web: safePqStatus(current.web) };
+          shutdown.lastObserved = { elapsedMs: Date.now() - shutdownStarted, ...statuses };
+          if (Object.values(current).some((status) =>
+            (PROTECTED_STATES.has(status.state) && status.state !== "active") || status.shutdown_state === "closing")) {
+            shutdown.closingObserved = true;
+          }
+          const serialized = JSON.stringify(statuses);
+          if (serialized !== previousStatuses) {
+            previousStatuses = serialized;
+            shutdown.observations.push({ attempt: shutdown.attempts.length, ...shutdown.lastObserved });
+            await saveShutdownReceipt();
+          }
+          remainingShutdownMs();
+          const refused = current.desktop.state === "active" && current.desktop.shutdown_state === "idle"
+            && current.desktop.shutdown_cancellable === false && current.desktop.shutdown_error === "PQ_SHUTDOWN_PEER_NOT_READY";
+          const peerIdle = current.web.state === "active" && current.web.shutdown_state === "idle"
+            && current.web.shutdown_cancellable === false && !current.web.shutdown_error;
+          if (!shutdown.closingObserved && refused && peerIdle) {
+            for (const [label, status] of Object.entries(current)) {
+              check(status.supported === true && status.protocol_version === 2 && !status.error,
+                label + " lost healthy PQv2 before a fresh shutdown request");
+            }
+            shutdown.attempts.at(-1).refused = statuses;
+            await requestFreshShutdown();
+          }
+        });
+        shutdown.stopped = stoppedPq;
+        await saveShutdownReceipt();
+      } catch (error) {
+        shutdown.failure = { elapsedMs: Date.now() - shutdownStarted, message: safeFailure(error?.message ?? error) };
+        try {
+          await writeReceipt(receiptPath, receipt);
+        } catch (saveError) {
+          throw new AggregateError([error, saveError], safeFailure(error?.message ?? error) + "; shutdown receipt save also failed");
+        }
+        throw error;
+      }
       receipt.scenarios.push({
         name: "real-web-backend-outage-bidirectional-old-epoch-recovery", status: "PASS", ownerCoordination: {
           readyStopSha256: await sha256File(readyStop), stoppedSha256: stopped.sha256,
@@ -1598,6 +1714,7 @@ async function selfTest(options) {
 
 export {
   bindInputs,
+  cleanupLocal,
   validateExpandedUiResult,
   launchBrowser,
   WebCommandClient,

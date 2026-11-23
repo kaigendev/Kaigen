@@ -1,13 +1,15 @@
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import { createPortal } from "react-dom";
-import { openUrl } from "@kaigen/platform";
+import { loadAttachmentMedia, openUrl, saveAttachmentCopy } from "@kaigen/platform";
+import type { AttachmentFileRequest } from "./platform/types";
 import { ChatMessageText } from "./ChatMessageText";
 import { chatLinkAtTarget } from "./chatLinks";
 import { elementGeometryScale } from "./chatNavigation";
 import { convertFileSrc, invoke, listen, platformCapabilities, recoverIncomingTransfer, releaseProfileTransferPreviews, releaseTransferPreviews, sendFile, setTransferPreviewChatActive, setTransferPreviewPins, transferPreviewSource } from "@kaigen/platform";
 import "./App.css";
 import "./Compact.css";
+import { DesktopUpdateNotice } from "./DesktopUpdates";
 import { useCompactLayout } from "./compactLayout";
 import { CompactModal, CompactMenu } from "./CompactModal";
 import ControlTooltip from "./ControlTooltip";
@@ -15,21 +17,26 @@ import Settings, { type SettingsOpenRequest, type TorStatus } from "./Settings";
 import MessageComposer, { clearSpellcheckMemory } from "./SpellcheckComposer";
 import { ChatImageViewer } from "./ChatImageViewer";
 import { ChatImagePreview } from "./ChatImagePreview";
+import { ChatMediaCard, stopChatMediaPlayback } from "./ChatMediaCard";
+import { chatMediaKind } from "./chatAttachmentMedia";
 import PqEntropy, { isPqAwaitingManualDecision, PqCapabilityWait, PQ_ENTROPY_MIN_LEASE_MS, PQ_ENTROPY_SUCCESS_NOTICE_MS, PqSessionControl } from "./PqEntropy";
 import { FormattedMessageText, MessageQuotePreview, OffscreenReactionNotice, ReactionBar, ReactionPicker } from "./ChatMessageEnhancements";
 import { dismissContextMenus, registerContextMenuDismissal } from "./contextMenuCoordinator";
 import { contactMenuPairAnchor, fitAnchoredContextMenuPoint, fitContextMenuPoint } from "./contextMenuPlacement";
 import { ContactGroupHeader } from "./ContactGroupHeader";
-import { UNGROUPED_ID, normalizeContactGroups, createContactGroup, renameContactGroup, assignContactGroup, deleteContactGroup, toggleContactGroup, removeContactFromGroups, groupNameError, type ContactGroupsState } from "./contactGroups";
+import { UNGROUPED_ID, normalizeContactGroups, createContactGroup, renameContactGroup, assignContactGroup, deleteContactGroup, toggleContactGroup, reorderContactGroup, removeContactFromGroups, groupNameError, type ContactGroupsState } from "./contactGroups";
 import "./ContactGroups.css";
 import { applyPeerReactionEvents, dismissReactionNotice, restoreReactionNotices, type PeerReactionEvent, type ReactionNotice, type ReactionNoticeStore } from "./chatReactionNotices";
 import { parseChatNotificationTarget } from "./chatNotificationTarget";
-import { NOTIFICATION_OPEN_EVENT } from "./desktopNotifications";
+import { NOTIFICATION_OPEN_EVENT, NOTIFICATION_VIEW_EVENT, NOTIFICATION_VIEW_QUERY_EVENT } from "./desktopNotifications";
 import { DEFAULT_NOTIFICATION_SOUND, normalizeNotificationSound } from "./notificationSound";
 import { formatChatDate } from "./chatDateFormat";
 import ProfileAvatar, { type ProfileAvatarState } from "./ProfileAvatar";
 import { contactPresence, profilePresence } from "./profilePresence";
 import type { ProfileSummary } from "./RootApp";
+import { watchProfileUpdates } from "./webgate/realtime";
+import { isWebgateProfileId } from "./webgate/platformRouter";
+import { transferRetryDelay } from "./web/transferPump";
 import { isEditableTextTarget } from "./editableTextTarget";
 import { getDefaultSendOnEnter } from "./platform/browser-input";
 import { attachTouchContextMenu } from "./touchContextMenu";
@@ -42,6 +49,7 @@ import { canStageChatFile, hasFileDragType } from "./chatFileDrop";
 import { admitChatFileBatch, formatChatFileBatchNotice } from "./chatFileBatch";
 import {
   canAcceptIncomingFile,
+  MAX_CHAT_FILE_BYTES,
   normalizeFileReceiveSettings,
   type FileReceiveSettings,
 } from "./fileReceiveSettings";
@@ -73,6 +81,7 @@ import {
   type ActivityHold,
   type ContactSortDirection,
   type ContactSortState,
+  type ContactListStatus,
 } from "./contactListOrder";
 import {
   APP_RAIL_WIDTH,
@@ -96,6 +105,7 @@ import {
   formatProfileSwitcherAria,
   formatProfileSwitcherTitle,
   formatTorIndicator,
+  formatTorRecoveryStatus,
   formatUnreadMessagesLabel,
   formatUserFacingError,
 } from "./localization";
@@ -117,7 +127,7 @@ import {
   shouldShowJumpToLatest,
   shouldShowTransferActivity,
 } from "./chatNavigation";
-import { anchorScrollDelta, captureChatAnchor, isMessageInViewport, isMessageLocallySeen, mayAcknowledgeLocalView, retainSearchTarget, userScrollCancelsHistoryRestore, ChatHistoryCache, LatestChatSearch, type ChatViewAnchor } from "./chatViewState";
+import { anchorScrollDelta, captureChatAnchor, isNearChatEnd, isMessageInViewport, isMessageLocallySeen, mayAcknowledgeLocalView, retainSearchTarget, userScrollCancelsHistoryRestore, ChatHistoryCache, LatestChatSearch, type ChatViewAnchor } from "./chatViewState";
 import { buildHistoryOffsets, historyIndexAtOffset, historyWindowRange } from "./chatWindow";
 import { parseQtoxQuoteMessage, searchTextSegments, type ChatFormattingSpan, type ChatQuote, type ChatMessageReactions, type ChatReactionCode } from "./chatRichText";
 import appUiCatalog from "./App.ui-ids.json" with { type: "json" };
@@ -135,7 +145,7 @@ type Chat = {
   preview: string;
   time: string;
   color: string;
-  status: UserStatus;
+  status: ContactListStatus;
   lastOnline: string;
   toxId: string;
   friendNumber?: number;
@@ -168,6 +178,7 @@ const chats: Chat[] = [];
 
 type Attachment = {
   name: string; size: number; type: string; path?: string; url?: string;
+  unavailableLocally?: boolean;
   image?: boolean;
   transferred?: number; speed?: number; eta?: number | null;
   transferState?: "uploading" | "queued" | "sending" | "awaiting_confirmation" | "receiving" | "paused" | "cancelled" | "failed" | "complete";
@@ -175,12 +186,17 @@ type Attachment = {
 };
 
 type PqHistoryEvent = { kind: "pq"; status: "offered" | "incoming_offer" | "accepting" | "active" | "rejected" | "withdrawn" | "superseded" | "close_pending" | "closed" | "error"; role: "initiator" | "responder"; local_fingerprint: string; peer_fingerprint?: string | null; fingerprint_changed?: boolean; error?: string | null };
-type Message = { id: number; coreId?: string; text: string; mine?: boolean; timestamp: number; time: string; attachment?: Attachment; delivery?: "queued" | "pending" | "awaiting_receipt" | "delivered" | "sent" | "unknown_recovered" | "unknown" | "failed" | "cancelled"; deliveredAt?: number | null; event?: PqHistoryEvent | null; protocolVersion?: number; quote?: ChatQuote; formatting?: readonly ChatFormattingSpan[]; reactions?: ChatMessageReactions; pqProtected?: boolean };
+type Message = { id: number; coreId?: string; operationId?: string; text: string; mine?: boolean; timestamp: number; time: string; attachment?: Attachment; delivery?: "queued" | "pending" | "awaiting_receipt" | "delivered" | "sent" | "unknown_recovered" | "unknown" | "failed" | "cancelled"; deliveredAt?: number | null; event?: PqHistoryEvent | null; protocolVersion?: number; quote?: ChatQuote; formatting?: readonly ChatFormattingSpan[]; reactions?: ChatMessageReactions; pqProtected?: boolean };
 type UserStatus = "online" | "away" | "busy" | "offline";
 
-function PresenceDot({ status, className = "" }: { status: UserStatus; className?: string }) {
+function PresenceDot({ status, className = "" }: { status: ContactListStatus; className?: string }) {
   if (status === "offline") return null;
   return <span className={`status-dot ${status}${className ? ` ${className}` : ""}`} aria-hidden="true" />;
+}
+
+function contactStatusText(status: ContactListStatus): string {
+  return status === "pending" ? "Ожидает авторизации" : status === "online" ? "Онлайн"
+    : status === "away" ? "Отошёл" : status === "busy" ? "Занят" : "Отключен";
 }
 
 function ActivitySortIcon({ direction }: { direction: ContactSortDirection }) {
@@ -213,7 +229,7 @@ type NetworkStatus = "connecting-tor" | "connecting" | "online" | "offline";
 type CoreFriend = { number: number; public_key: string; tox_id: string; authorized: boolean; connection: "online" | "offline"; name: string; status: UserStatus; status_message: string; avatar_path?: string | null; last_online?: number | null; last_event?: number | null; lastEventSequence?: number; addedAt?: number };
 type IncomingFriendRequest = { public_key: string; message: string };
 type OutgoingFriendRequest = { toxId: string; message: string };
-type CoreMessage = { id?: string; friend_number: number; text: string; mine: boolean; timestamp: number; delivery?: Message["delivery"]; delivered_at?: number | null; attachment?: { name: string; size: number; mime: string; path: string; preview_source?: string; image: boolean; transferred?: number; speed_bytes_per_sec?: number; eta_seconds?: number | null; transfer_state?: "queued" | "sending" | "awaiting_confirmation" | "receiving" | "paused" | "cancelled" | "failed" | "complete"; completed?: boolean; completed_at?: number | null; transfer_error?: string | null; retry_count?: number } | null; event?: PqHistoryEvent | null; protocol_version?: Message["protocolVersion"]; quote?: ChatQuote; formatting?: readonly ChatFormattingSpan[]; reactions?: ChatMessageReactions; pq_protected?: boolean };
+type CoreMessage = { id?: string; operation_id?: string; friend_number: number; text: string; mine: boolean; timestamp: number; delivery?: Message["delivery"]; delivered_at?: number | null; attachment?: { name: string; size: number; mime: string; path: string; preview_source?: string; image: boolean; transferred?: number; speed_bytes_per_sec?: number; eta_seconds?: number | null; transfer_state?: "queued" | "sending" | "awaiting_confirmation" | "receiving" | "paused" | "cancelled" | "failed" | "complete"; completed?: boolean; completed_at?: number | null; transfer_error?: string | null; retry_count?: number } | null; event?: PqHistoryEvent | null; protocol_version?: Message["protocolVersion"]; quote?: ChatQuote; formatting?: readonly ChatFormattingSpan[]; reactions?: ChatMessageReactions; pq_protected?: boolean };
 type NativeFileSelection = { grantToken: string; name: string; mime: string; size: number };
 type NativeFileBatchSelection = {
   accepted: NativeFileSelection[];
@@ -224,19 +240,25 @@ type NativeFileBatchSelection = {
 type NativeFileDropBatch = {
   profileId: string;
   friendNumber: number;
+  expectedPublicKey: string;
+  expectedContactIncarnation: number;
+  viewLeaseId: string | null;
+  targetRevision: number;
   batch: NativeFileBatchSelection;
 };
-type ChatFileTarget = { profileId: string; friendNumber: number; chatId: string };
+type ChatFileTarget = { profileId: string; friendNumber: number; expectedPublicKey: string; expectedContactIncarnation: number; chatId: string };
 type PendingChatFile = ChatFileTarget & { file: File; grantToken: string | null; size: number };
 const sameChatFileTarget = (left: ChatFileTarget | null, right: ChatFileTarget) => left !== null
   && left.profileId === right.profileId
   && left.friendNumber === right.friendNumber
+  && left.expectedPublicKey === right.expectedPublicKey
+  && left.expectedContactIncarnation === right.expectedContactIncarnation
   && left.chatId === right.chatId;
-type CoreMessagesSnapshot = { revision: number; messages?: CoreMessage[] | null; windowStart: number; total: number; hasMoreBefore: boolean; hasMoreAfter: boolean; targetIndex?: number; reactionEligibleIds?: string[]; peerReactionEvents?: PeerReactionEvent[]; peerReactionLatestRevision?: number; latestMessageId?: string; firstUnseenMessageId?: string; unseenMessageIds?: string[] };
+type CoreMessagesSnapshot = { revision: number; messages?: CoreMessage[] | null; windowStart: number; total: number; hasMoreBefore: boolean; hasMoreAfter: boolean; targetIndex?: number; reactionEligibleIds?: string[]; peerReactionEvents?: PeerReactionEvent[]; peerReactionLatestRevision?: number; latestMessageId?: string; firstUnseenMessageId?: string; unseenMessageIds?: string[]; unavailableAttachmentIds?: string[] };
 type CoreSearchPage = { matches: Array<{ messageId: string; index: number; field: "text" | "attachment"; start: number; end: number; snippet?: string }>; nextCursor?: string | null; totalMatches?: number };
-type PqStatus = { supported: boolean; state: "unavailable" | "available" | "offered" | "incoming_offer" | "accepting" | "active" | "closing" | "closing_commit" | "closing_ack" | "closing_final" | "error"; local_fingerprint: string; peer_fingerprint?: string | null; fingerprint_changed: boolean; identity_needs_entropy: boolean; identity_waiting: boolean; auto_pending: boolean; protocol_version: number; shutdown_state?: "idle" | "checking" | "closing"; shutdown_cancellable?: boolean; shutdown_error?: string | null; manual_waiting_for_capability?: boolean; legacy_available?: boolean; error?: string | null };
+type PqStatus = { supported: boolean; state: "unavailable" | "available" | "offered" | "incoming_offer" | "accepting" | "active" | "closing" | "closing_commit" | "closing_ack" | "closing_final" | "error"; local_fingerprint: string; peer_fingerprint?: string | null; fingerprint_changed: boolean; identity_needs_entropy: boolean; identity_waiting: boolean; auto_pending: boolean; shutdown_state?: "idle" | "checking" | "closing"; shutdown_cancellable?: boolean; shutdown_error?: string | null; manual_waiting_for_capability?: boolean; error?: string | null };
 type ProfileOwnerLease = { profileId: string; generation: number };
-type PqContactTarget = { profileId: string; friendNumber: number; expectedPublicKey: string; chatId: string; statusKey: string; generation: number };
+type PqContactTarget = { profileId: string; friendNumber: number; expectedPublicKey: string; expectedContactIncarnation: number; chatId: string; statusKey: string; generation: number };
 const pqContactKey = (profileId: string, publicKey: string) => JSON.stringify([profileId, publicKey.trim().toUpperCase()]);
 const pqContactArgs = ({ profileId, friendNumber, expectedPublicKey }: PqContactTarget) => ({ profileId, friendNumber, expectedPublicKey });
 const PQ_PROTECTED_STATES = new Set<PqStatus["state"]>(["active", "closing", "closing_commit", "closing_ack", "closing_final"]);
@@ -298,7 +320,10 @@ type AutoScrollIntent = { chatId: string; messageKey: string; boundaryMessageKey
 type MessageSearchMatch = { messageKey: string; field: "text" | "attachment"; start: number; end: number };
 type AttachmentContext = { x: number; y: number; anchorX: number; anchorY: number; kind: "copy" | "image" | "file"; path?: string; previewPath?: string; showInFolder?: boolean; messageKey?: string; copyValue?: string; linkUrl?: string; preserveEditorFocus?: boolean };
 type SendResult = { messageId: string; delivery: Message["delivery"]; recovered?: boolean };
-type PendingSend = { operationId: string; profileId: string; friendNumber: number; expectedPublicKey?: string; chatId: string; text: string; formatting?: readonly ChatFormattingSpan[]; quote?: ChatQuote };
+type PendingSend = { operationId: string; profileId: string; friendNumber: number; expectedPublicKey?: string; expectedContactIncarnation?: number; chatId: string; text: string; formatting?: readonly ChatFormattingSpan[]; quote?: ChatQuote; webQueuedAt?: number; failureKind?: "rejected" | "unknown" };
+type WebQueuedSend = PendingSend & { webQueuedAt: number };
+type WebAcceptedSend = { operation: WebQueuedSend; messageId: string; delivery: Message["delivery"] };
+type NativePendingSend = { operation: PendingSend; queuedAt: number; messageId?: string; delivery: Message["delivery"] };
 type ChatCapabilities = { reactions: boolean; formatting: boolean; quotes: boolean; protocolVersion?: number };
 type LocalState = Partial<{
   activeChat: string;
@@ -311,6 +336,7 @@ type LocalState = Partial<{
   draftFormatting: Record<string, readonly ChatFormattingSpan[]>;
   draftQuotes: Record<string, ChatQuote>;
   historyClearEpoch: number;
+  contactIncarnations: Record<string, number>;
   pendingSendOperations: Record<string, PendingSend>;
   scrollAnchors: Record<string, ChatViewAnchor>;
   peerReactionNotices: ReactionNoticeStore;
@@ -324,6 +350,9 @@ type LocalState = Partial<{
   spellcheckRussian: boolean;
   spellcheckEnglish: boolean;
 }>;
+
+type SpellcheckPreferences = Required<Pick<LocalState, "spellcheckEnabled" | "spellcheckRussian" | "spellcheckEnglish">>;
+type SpellcheckChange = { key: keyof SpellcheckPreferences; enabled: boolean };
 
 type LayoutState = {
   appearance: AppearanceSettings;
@@ -462,6 +491,7 @@ function sameMessages(left: Message[], right: Message[]): boolean {
       && attachment.type === otherAttachment.type
       && attachment.path === otherAttachment.path
       && attachment.url === otherAttachment.url
+      && attachment.unavailableLocally === otherAttachment.unavailableLocally
       && attachment.image === otherAttachment.image
       && attachment.transferred === otherAttachment.transferred
       && attachment.speed === otherAttachment.speed
@@ -825,6 +855,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
   const { theme, setTheme } = useKaigenTheme();
   const activeProfileAtMount = profiles.find((profile) => profile.active && profile.loaded);
   const activeProfileId = activeProfileAtMount?.id ?? "";
+  const nativeProfileFilesystem = platformCapabilities.nativeFilesystem && !isWebgateProfileId(activeProfileId);
   const layoutAtMount = useRef(readPortableLayoutSnapshot() as Partial<LayoutState> | null).current;
   const [layoutHydrated, setLayoutHydrated] = useState(() => isPortableLayoutHydrated());
   const [transferUiStateOverrides, setTransferUiStateOverrides] = useState<
@@ -872,7 +903,17 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
   const [replyQuote, setReplyQuote] = useState<ChatQuote | null>(null);
   const [chatCapabilities, setChatCapabilities] = useState<ChatCapabilities>({ reactions: false, formatting: false, quotes: false });
   const [failedSends, setFailedSends] = useState<PendingSend[]>([]);
+  const [webQueuedSends, setWebQueuedSends] = useState<WebQueuedSend[]>([]);
+  const [webAcceptedSends, setWebAcceptedSends] = useState<WebAcceptedSend[]>([]);
+  const [nativePendingSends, setNativePendingSends] = useState<NativePendingSend[]>([]);
   const pendingSendOperationsRef = useRef<Record<string, PendingSend>>({});
+  const webSendRetryRef = useRef(new Map<string, { attempts: number; retryAt: number }>());
+  const sendInFlightRef = useRef(new Set<string>());
+  const webFinishedSendIdsRef = useRef(new Set<string>());
+  const webSendQueueTimeRef = useRef(0);
+  const webSendFollowTailRef = useRef<{ profileId: string; chatId: string } | null>(null);
+  const nativeSendFollowTailRef = useRef<{ operationId: string; profileId: string; chatId: string; generation: number } | null>(null);
+  const drainWebSendsRef = useRef<(reconnected?: boolean) => void>(() => {});
   // A fresh request rejected before admission must never become a later retry.
   const freshSendAdmissionsRef = useRef(new Set<string>());
   const pendingMessageCancellationsRef = useRef(new Set<string>());
@@ -901,7 +942,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
   const [historyRequest, setHistoryRequest] = useState<{ rangeOffset?: number; targetMessageId?: string }>({});
   const [reactionEligibleIds, setReactionEligibleIds] = useState<string[]>([]);
   const latestHistoryMessageIdRef = useRef<string | undefined>(undefined);
-  const historyCacheRangesRef = useRef(new Map<string, { start: number; total: number; limit: HistoryMessageLimit }>());
+  const historyCacheRangesRef = useRef(new Map<string, { start: number; total: number; limit: HistoryMessageLimit; openingLimit: HistoryMessageLimit }>());
   const historySnapshotAtTailRef = useRef(true);
   const pendingHistoryIndexRef = useRef<number | null>(null);
   const [windowAnchorKey, setWindowAnchorKey] = useState<string | null>(null);
@@ -909,6 +950,34 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
   const [heightMeasurementRevision, setHeightMeasurementRevision] = useState(0);
   const [localPersistenceError, setLocalPersistenceError] = useState(false);
   const [messages, setMessages] = useState(initialMessages);
+  const [localWebgateDownloads, setLocalWebgateDownloads] = useState<Set<string>>(() => new Set());
+  const [localWebgateDownloadRevision, setLocalWebgateDownloadRevision] = useState(0);
+  const localWebgateRequests = messages.flatMap((message) => message.coreId && message.attachment?.path?.startsWith("browser-stream://")
+    ? [{ messageId: message.coreId, transferId: message.attachment.path.slice("browser-stream://".length) }] : []);
+  const localWebgateRequestKey = JSON.stringify(localWebgateRequests);
+  useEffect(() => {
+    const changed = () => setLocalWebgateDownloadRevision((revision) => revision + 1);
+    window.addEventListener("webgate-local-downloads-changed", changed);
+    return () => window.removeEventListener("webgate-local-downloads-changed", changed);
+  }, []);
+  useEffect(() => {
+    let cancelled = false;
+    setLocalWebgateDownloads(new Set());
+    if (!platformCapabilities.nativeFilesystem || !isWebgateProfileId(activeProfileId)) return;
+    const requests = JSON.parse(localWebgateRequestKey) as { messageId: string; transferId: string }[];
+    void (async () => {
+      const found = new Set<string>();
+      for (let offset = 0; offset < requests.length && !cancelled; offset += 128) {
+        const batch = await invoke<{ messageId: string; transferId: string }[]>("webgate_local_downloads", {
+          profileId: activeProfileId, requests: requests.slice(offset, offset + 128),
+        });
+        for (const receipt of batch) found.add(JSON.stringify([receipt.messageId, receipt.transferId]));
+      }
+      if (!cancelled) setLocalWebgateDownloads(found);
+    })().catch(() => { if (!cancelled) setLocalWebgateDownloads(new Set()); });
+    return () => { cancelled = true; };
+  }, [activeProfileId, localWebgateRequestKey, localWebgateDownloadRevision]);
+
   const [showJumpToLatest, setShowJumpToLatest] = useState(false);
   const [pendingIncomingCount, setPendingIncomingCount] = useState(0);
   const [messageVisibilityRevision, setMessageVisibilityRevision] = useState(0);
@@ -926,6 +995,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
   const coreFriendsRef = useRef(coreFriends);
   coreFriendsRef.current = coreFriends;
   const friendMutationRevisionRef = useRef(0);
+  const contactMutationRevisionsRef = useRef<Record<string, number>>({});
   const deletingContactKeysRef = useRef(new Set<string>());
   const [incomingFriendRequests, setIncomingFriendRequests] = useState<IncomingFriendRequest[]>([]);
   const [incomingRequestBusy, setIncomingRequestBusy] = useState<string | null>(null);
@@ -957,8 +1027,13 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
   const searchJumpedTargetRef = useRef("");
   const [contactSearch, setContactSearch] = useState("");
   const [contactSort, setContactSort] = useState(() => normalizeContactSort(layoutAtMount?.contactSort ?? DEFAULT_CONTACT_SORT));
+  const contactSortSavingRef = useRef(false);
+  const [contactSortSaving, setContactSortSaving] = useState(false);
   const [hideOfflineContacts, setHideOfflineContacts] = useState(() => layoutAtMount?.hideOfflineContacts === true);
   const [contactGroups, setContactGroups] = useState(() => normalizeContactGroups(null));
+  const confirmedContactGroupsRef = useRef(contactGroups);
+  const groupActionSaveRef = useRef(false);
+  const [groupActionSaving, setGroupActionSaving] = useState(false);
   const [contactGroupDrag, setContactGroupDrag] = useState<{ id: string; target: { id: string; edge: "before" | "after" } | null } | null>(null);
   const [activityHold, setActivityHold] = useState<ActivityHold>({ contactId: null, selectedId: "", events: {} });
   const [promotedActivityId, setPromotedActivityId] = useState<string | undefined>(undefined);
@@ -1004,16 +1079,23 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
   const [fileSendBusy, setFileSendBusy] = useState(false);
   const [profileSwitchPending, setProfileSwitchPending] = useState(false);
   const [transferErrors, setTransferErrors] = useState<Record<string, string>>({});
-  const [fullImage, setFullImage] = useState<Attachment | null>(null);
+  const [fullMedia, setFullMedia] = useState<(Attachment & { videoPreview?: boolean }) | null>(null);
+  const [expandedMediaKey, setExpandedMediaKey] = useState<string | null>(null);
+  const [savingFileKey, setSavingFileKey] = useState<string | null>(null);
+  const fileCopyAbortRef = useRef<AbortController | null>(null);
+  const videoPreviewRequestRef = useRef(0);
   const [autoDownloadImages, setAutoDownloadImages] = useState(true);
   const [saveChatHistory, setSaveChatHistory] = useState(true);
   const [notifyMessages, setNotifyMessages] = useState<boolean>(DEFAULT_NOTIFICATION_SETTINGS.messages);
   const [notifyRequests, setNotifyRequests] = useState<boolean>(DEFAULT_NOTIFICATION_SETTINGS.requests);
   const [notifySound, setNotifySound] = useState<boolean>(DEFAULT_NOTIFICATION_SOUND.notifySound);
   const [notificationVolume, setNotificationVolume] = useState<number>(DEFAULT_NOTIFICATION_SOUND.notificationVolume);
-  const [spellcheckEnabled, setSpellcheckEnabled] = useState(false);
-  const [spellcheckRussian, setSpellcheckRussian] = useState(false);
-  const [spellcheckEnglish, setSpellcheckEnglish] = useState(false);
+  const [{ spellcheckEnabled, spellcheckRussian, spellcheckEnglish }, setSpellcheckPreferences] = useState<SpellcheckPreferences>({
+    spellcheckEnabled: false, spellcheckRussian: false, spellcheckEnglish: false,
+  });
+  const confirmedSpellcheckRef = useRef(new Map<string, SpellcheckPreferences>());
+  const spellcheckSavePendingRef = useRef(false);
+  const [spellcheckSave, setSpellcheckSave] = useState<{ profileId: string; status: "saving" | "failed" } | null>(null);
   const [showReceivedImages, setShowReceivedImages] = useState(true);
   const [revealedImages, setRevealedImages] = useState<string[]>([]);
   const [ownToxId, setOwnToxId] = useState("");
@@ -1022,8 +1104,11 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
   const [ownStatusMessage, setOwnStatusMessage] = useState("");
   const [editingOwnStatusMessage, setEditingOwnStatusMessage] = useState(false);
   const [addContactOpen, setAddContactOpenState] = useState(false);
+  const addContactFormGenerationRef = useRef(0);
+  const pendingContactFocusRef = useRef<{ owner: ProfileOwnerLease; formGeneration: number; publicKey: string } | null>(null);
   const contactClipboardRef = useRef(new ContactClipboardPrefill());
   const setAddContactOpen = useCallback((open: boolean) => {
+    addContactFormGenerationRef.current += 1;
     if (!open) contactClipboardRef.current.cancel();
     setAddContactOpenState(open);
   }, []);
@@ -1033,9 +1118,10 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
   const friendRequestCustomized = useRef(false);
   const [addContactStatus, setAddContactStatus] = useState<string | null>(null);
   const [incomingRequestsOpen, setIncomingRequestsOpen] = useState(false);
-  const [persistenceReady, setPersistenceReady] = useState(false);
+  const [loadedStateOwner, setLoadedStateOwner] = useState<string | null>(null);
+  const persistenceReady = loadedStateOwner === activeProfileId;
   const [settingsOpenRequest, setSettingsOpenRequest] = useState<SettingsOpenRequest>({ tab: "profile", nonce: 0 });
-  const sharedLayoutState = { appearance, chatListWidth, profileOrder, contactSort, hideOfflineContacts };
+  const sharedLayoutState = { appearance, chatListWidth, profileOrder, hideOfflineContacts };
   if (layoutHydrated) retainPortableLayoutPatch(sharedLayoutState);
   const [pqStatuses, setPqStatuses] = useState<Record<string, PqStatus>>({});
   const [pqEntropySuccess, setPqEntropySuccess] = useState<{ profileId: string; chatId: string; friendNumber: number } | null>(null);
@@ -1065,6 +1151,15 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
     const owner = pqProfileOwnerRef.current;
     return appOwnerMountedRef.current && owner.profileId === target.profileId && owner.generation === target.generation;
   }, []);
+  useLayoutEffect(() => {
+    const request = pendingContactFocusRef.current;
+    if (addContactOpen || !request) return;
+    pendingContactFocusRef.current = null;
+    if (!currentProfileOwner(request.owner) || request.formGeneration !== addContactFormGenerationRef.current) return;
+    const entityKey = opaqueUiEntityKey("contact", request.publicKey);
+    const row = appShellRef.current?.querySelector<HTMLButtonElement>(`.chat-item[data-kaigen-ui-entity-key="${entityKey}"]`);
+    if (row?.getClientRects().length) row.focus();
+  }, [addContactOpen, currentProfileOwner]);
   const captureProfileOwner = useCallback((): ProfileOwnerLease => {
     const owner = pqProfileOwnerRef.current;
     if (!appOwnerMountedRef.current || !activeProfileId || owner.profileId !== activeProfileId) throw new Error("PROFILE_OWNER_CHANGED");
@@ -1076,11 +1171,12 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
     const publicKey = (expectedPublicKey ?? friend?.public_key ?? "").trim().toUpperCase();
     if (!appOwnerMountedRef.current || !activeProfileId || owner.profileId !== activeProfileId || !friend || !/^[0-9A-F]{64}$/.test(publicKey)
       || friend.public_key.trim().toUpperCase() !== publicKey) throw new Error("CHAT_CONTACT_IDENTITY_CHANGED");
-    return { profileId: activeProfileId, friendNumber, expectedPublicKey: publicKey, chatId: toxChatId(publicKey), statusKey: pqContactKey(activeProfileId, publicKey), generation: owner.generation };
+    return { profileId: activeProfileId, friendNumber, expectedPublicKey: publicKey, expectedContactIncarnation: contactIncarnationsRef.current[publicKey] ?? 0, chatId: toxChatId(publicKey), statusKey: pqContactKey(activeProfileId, publicKey), generation: owner.generation };
   }, [activeProfileId]);
   const currentPqTarget = useCallback((target: PqContactTarget, revision?: number) => {
     const owner = pqProfileOwnerRef.current;
     return appOwnerMountedRef.current && owner.profileId === target.profileId && owner.generation === target.generation
+      && (contactIncarnationsRef.current[target.expectedPublicKey] ?? 0) === target.expectedContactIncarnation
       && (revision === undefined || pqStatusRequestsRef.current[target.statusKey] === revision)
       && coreFriendsRef.current.some((friend) => friend.number === target.friendNumber && friend.public_key.trim().toUpperCase() === target.expectedPublicKey);
   }, []);
@@ -1150,7 +1246,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
         : torStatus.state === "connected"
           ? (torDoneVisible ? "Done!" : t("Подключен"))
           : torStatus.state === "error"
-            ? "Error"
+            ? (formatTorRecoveryStatus(torStatus, language, true) || "Error")
             : torStatus.state === "disabled"
               ? t("Отключен")
               : "";
@@ -1164,7 +1260,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
         : torStatus.state === "connected"
           ? t("Подключен")
           : torStatus.state === "error"
-            ? (language === "ru" ? "Ошибка" : "Error")
+            ? (formatTorRecoveryStatus(torStatus, language, true) || (language === "ru" ? "Ошибка" : "Error"))
             : t("Отключен");
   const visibleTorStatusLine = compactMode ? compactTorStatusLine : torStatusLine;
   const torStatusDotsRunning = torStatus.state === "starting" || torStatus.state === "connecting";
@@ -1206,7 +1302,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
   chatVisibilityRef.current = {
     activeId: activeChat,
     chatOpen: screen === "chat" && (!compactMode || compactChatOpen),
-    overlayOpen: !!fullImage || pendingFiles.length > 0 || !!contactAction || !!groupAction || addContactOpen || incomingRequestsOpen || profileDrawerOpen || ownActionsOpen || !!contactContext || !!generalContext || !!groupContext,
+    overlayOpen: !!fullMedia || !!expandedMediaKey || pendingFiles.length > 0 || !!contactAction || !!groupAction || addContactOpen || incomingRequestsOpen || profileDrawerOpen || ownActionsOpen || !!contactContext || !!generalContext || !!groupContext,
   };
   const [unseenBoundary, setUnseenBoundary] = useState<string | null>(null);
   const pendingNavigationRef = useRef<{ messageKey: string; generation: number; deadline: number; anchor?: ChatViewAnchor } | null>(null);
@@ -1214,7 +1310,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
   const historyCacheRef = useRef(new ChatHistoryCache<Message>({ maxEntries: 3, maxCost: 2_000_000, cost: (message) => 128 + message.text.length + (message.quote?.text.length ?? 0) }));
   const viewOwnerRef = useRef({ key: "", generation: 0, leaseId: "" });
   const viewFramesRef = useRef(new Set<number>());
-  const viewKey = `${activeProfileId}:${activeChat}:${screen}:${incomingRequestsOpen}:${addContactOpen}:${compactMode && compactChatOpen}`;
+  const viewKey = `${activeProfileId}:${activeChat}:${screen}:${incomingRequestsOpen}:${addContactOpen}:${!compactMode || compactChatOpen}`;
   const displayedChatActiveRef = useRef(false);
   useLayoutEffect(() => {
     const generation = ++chatViewGeneration;
@@ -1252,6 +1348,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
   const persistenceReadyRef = useRef(false);
   const localStateSnapshotRef = useRef<LocalState | null>(null);
   const historyClearEpochRef = useRef(0);
+  const contactIncarnationsRef = useRef<Record<string, number>>({});
   const localSaveQueueRef = useRef<Promise<void>>(Promise.resolve());
   const profileSwitchRequestRef = useRef<Promise<void> | null>(null);
   const nicknameUpdateOwnerRef = useRef(activeProfileId);
@@ -1314,11 +1411,12 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
     draftFormatting: draftFormattingRef.current,
     draftQuotes: draftQuotesRef.current,
     historyClearEpoch: historyClearEpochRef.current,
+    contactIncarnations: contactIncarnationsRef.current,
     pendingSendOperations: pendingSendOperationsRef.current,
     // Reading positions live for the lifetime of their in-memory history window.
     scrollAnchors: {},
     peerReactionNotices: reactionNoticeStoreRef.current,
-    contactGroups,
+    contactGroups: confirmedContactGroupsRef.current,
     historyMessageLimit,
     notifyMessages,
     notifyRequests,
@@ -1329,11 +1427,27 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
     spellcheckEnglish,
   };
 
-  const persistLocalState = useCallback(async (required = false) => {
+  const enqueueLocalStateOperation = useCallback(<T,>(operation: () => Promise<T>): Promise<T> => {
+    const result = localSaveQueueRef.current.catch(() => {}).then(operation);
+    localSaveQueueRef.current = result.then(() => {}, () => {});
+    return result;
+  }, []);
+
+  const publishContactGroups = useCallback((groups: ContactGroupsState) => {
+    confirmedContactGroupsRef.current = groups;
+    if (localStateSnapshotRef.current) localStateSnapshotRef.current.contactGroups = groups;
+    setContactGroups(groups);
+  }, []);
+
+  const persistLocalState = useCallback(async (
+    required = false,
+    updateGroups?: (current: ContactGroupsState) => ContactGroupsState,
+    updateSpellcheck?: SpellcheckChange,
+  ) => {
     let owner: ProfileOwnerLease;
     try { owner = captureProfileOwner(); }
-    catch (error) { if (required) throw error; return; }
-    if (!persistenceReadyRef.current || !localStateSnapshotRef.current) return;
+    catch (error) { if (required) throw error; return false; }
+    if (!persistenceReadyRef.current || !localStateSnapshotRef.current) return false;
     // Capture bytes and owner together, before waiting behind any older save.
     // Fresh IPC admission is not a durable retry: a typed refusal keeps its draft.
     const state = structuredClone({
@@ -1341,21 +1455,103 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
       pendingSendOperations: Object.fromEntries(Object.entries(pendingSendOperationsRef.current)
         .filter(([id, operation]) => operation.profileId === owner.profileId && !freshSendAdmissionsRef.current.has(id))),
     });
-    const save = localSaveQueueRef.current.catch(() => {}).then(async () => {
+    const contactRevisions = { ...contactMutationRevisionsRef.current };
+    function changedContacts() {
+      return Object.entries(contactMutationRevisionsRef.current).flatMap(([key, revision]) => {
+        if ((contactRevisions[key] ?? 0) === revision) return [];
+        const [profileId, publicKey] = JSON.parse(key) as [string, string];
+        return profileId === owner.profileId ? [publicKey] : [];
+      });
+    }
+    const save = enqueueLocalStateOperation(async () => {
       try {
         // Profile changes keep this App alive; workspace teardown does not.
         if (!appOwnerMountedRef.current) throw new Error("PROFILE_OWNER_CHANGED");
+        if ((updateGroups || updateSpellcheck) && !currentProfileOwner(owner)) return false;
+        const confirmedSpellcheck = confirmedSpellcheckRef.current.get(owner.profileId);
+        if (updateSpellcheck && !confirmedSpellcheck) return false;
+        const nextSpellcheck = updateSpellcheck && confirmedSpellcheck
+          ? { ...confirmedSpellcheck, [updateSpellcheck.key]: updateSpellcheck.enabled }
+          : confirmedSpellcheck;
+        // A full save captured before an acknowledgment must keep the saved preferences.
+        if (nextSpellcheck) Object.assign(state, nextSpellcheck);
+        // Resolve queued group edits in order. A queued automatic save must not
+        // overwrite a group edit that was acknowledged after it was captured.
+        if (currentProfileOwner(owner)) {
+          const currentGroups = confirmedContactGroupsRef.current;
+          state.contactGroups = updateGroups ? updateGroups(currentGroups) : currentGroups;
+          if (updateGroups && state.contactGroups === currentGroups) return false;
+        }
+        // A clone queued during contact deletion must not restore that contact's data.
+        // Preserve preferences and other contacts, including those in another profile.
+        for (const publicKey of changedContacts()) {
+          const chatId = toxChatId(publicKey);
+          for (const field of ["contactNames", "drafts", "draftFormatting", "draftQuotes", "scrollAnchors", "peerReactionNotices"] as const) {
+            delete state[field]?.[chatId];
+          }
+          if (state.activeChat === chatId) state.activeChat = "";
+          state.outgoingFriendRequests = state.outgoingFriendRequests?.filter((request) => !outgoingRequestMatchesPeer(request.toxId, publicKey));
+          for (const [id, operation] of Object.entries(state.pendingSendOperations)) {
+            if (operation.profileId === owner.profileId && (operation.chatId === chatId || operation.expectedPublicKey?.toUpperCase() === publicKey)) delete state.pendingSendOperations[id];
+          }
+          if (state.contactGroups) state.contactGroups = removeContactFromGroups(state.contactGroups, publicKey);
+        }
         await invoke("save_local_state", { profileId: owner.profileId, state });
-        if (currentProfileOwner(owner)) setLocalPersistenceError(false);
+        const stillCurrent = currentProfileOwner(owner);
+        if (updateSpellcheck && nextSpellcheck) {
+          confirmedSpellcheckRef.current.set(owner.profileId, nextSpellcheck);
+          if (stillCurrent) setSpellcheckPreferences(nextSpellcheck);
+        }
+        if (stillCurrent) {
+          if (updateGroups && state.contactGroups) {
+            publishContactGroups(changedContacts().reduce(removeContactFromGroups, state.contactGroups));
+          }
+          setLocalPersistenceError(false);
+        }
+        return !(updateGroups || updateSpellcheck) || stillCurrent;
       } catch (error) {
+        if (pqErrorCode(error) === "CHAT_CONTACT_INCARNATION_CHANGED" && currentProfileOwner(owner)) {
+          const saved = await invoke<LocalState | null>("load_local_state", { profileId: owner.profileId });
+          if (currentProfileOwner(owner)) {
+            for (const [publicKey, incarnation] of Object.entries(saved?.contactIncarnations ?? {})) {
+              if ((contactIncarnationsRef.current[publicKey] ?? 0) !== incarnation) adoptContactIncarnation(owner, publicKey, saved);
+            }
+            setLocalPersistenceError(false);
+            showTransferNotice(language === "ru" ? "Контакт был удалён или добавлен заново. Его устаревшие локальные данные очищены." : "The contact was removed or added again. Its outdated local data was cleared.");
+          }
+          return false;
+        }
         if (currentProfileOwner(owner)) setLocalPersistenceError(true);
         throw error;
       }
     });
-    localSaveQueueRef.current = save;
-    if (required) await save;
-    else await save.catch(() => {});
-  }, [captureProfileOwner, currentProfileOwner]);
+    return required ? save : save.catch(() => false);
+  }, [captureProfileOwner, currentProfileOwner, enqueueLocalStateOperation, language, publishContactGroups]);
+
+  function updateNotificationPreference(setting: "notifyMessages" | "notifyRequests", enabled: boolean) {
+    const snapshot = localStateSnapshotRef.current;
+    if (!persistenceReadyRef.current || !snapshot) return;
+    if (setting === "notifyMessages") setNotifyMessages(enabled);
+    else setNotifyRequests(enabled);
+    localStateSnapshotRef.current = { ...snapshot, [setting]: enabled };
+    void persistLocalState();
+  }
+
+  async function updateSpellcheckPreference(key: keyof SpellcheckPreferences, enabled: boolean) {
+    if (!persistenceReadyRef.current || spellcheckSavePendingRef.current) return;
+    const owner = pqProfileOwnerRef.current;
+    if (!owner.profileId || !currentProfileOwner(owner)) return;
+    spellcheckSavePendingRef.current = true;
+    setSpellcheckSave({ profileId: owner.profileId, status: "saving" });
+    try {
+      const saved = await persistLocalState(false, undefined, { key, enabled }).catch(() => false);
+      if (appOwnerMountedRef.current) {
+        setSpellcheckSave(!saved && currentProfileOwner(owner) ? { profileId: owner.profileId, status: "failed" } : null);
+      }
+    } finally {
+      spellcheckSavePendingRef.current = false;
+    }
+  }
 
   const persistProfileBeforeTransition = useCallback(async (action?: () => Promise<void>) => {
     const owner = activeProfileId;
@@ -1401,13 +1597,13 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
     }
   }, [onDisableProfile, persistProfileBeforeTransition]);
 
-  function changeContactGroups(update: (current: ContactGroupsState) => ContactGroupsState) {
-    if (profileSwitchRequestRef.current || profileSwitching || !persistenceReadyRef.current) return;
-    setContactGroups((current) => {
-      const next = update(current);
-      if (localStateSnapshotRef.current) localStateSnapshotRef.current.contactGroups = next;
-      return next;
-    });
+  function changeContactGroups(update: (current: ContactGroupsState) => ContactGroupsState, publicKey?: string) {
+    if (profileSwitchRequestRef.current || profileSwitching || !persistenceReadyRef.current) return Promise.resolve(false);
+    const expectedPublicKey = publicKey?.toUpperCase();
+    return persistLocalState(false, (current) => {
+      if (expectedPublicKey && !coreFriendsRef.current.some((friend) => friend.public_key.toUpperCase() === expectedPublicKey)) return current;
+      return update(current);
+    }).catch(() => false);
   }
 
   function flushReactionNotices() {
@@ -1729,24 +1925,27 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
       return;
     }
     if (item.target === "requests") {
-      if (screen === "chat" && incomingRequestsOpen) { sessionStorage.removeItem("kaigen-open-unread-target"); return; }
+      if (screen === "chat" && incomingRequestsOpen && !addContactOpen && !compactChatOpen && !profileDrawerOpen) { sessionStorage.removeItem("kaigen-open-unread-target"); return; }
       setScreen("chat");
       setAddContactOpen(false);
       setIncomingRequestsOpen(true);
       setActiveChat("");
+      setCompactChatOpen(false);
+      setProfileDrawerOpen(false);
     } else {
       const publicKey = item.target.slice("friend-key:".length).toUpperCase();
       const friend = coreFriends.find((candidate) => candidate.public_key.toUpperCase() === publicKey);
       if (!friend) return;
       const chatId = toxChatId(friend.public_key);
-      if (screen === "chat" && activeChat === chatId && !incomingRequestsOpen && !addContactOpen) { sessionStorage.removeItem("kaigen-open-unread-target"); return; }
+      if (screen === "chat" && activeChat === chatId && !incomingRequestsOpen && !addContactOpen && (!compactMode || compactChatOpen) && !profileDrawerOpen) { sessionStorage.removeItem("kaigen-open-unread-target"); return; }
       setScreen("chat");
       setAddContactOpen(false);
       setIncomingRequestsOpen(false);
       setActiveChat(chatId);
+      setCompactChatOpen(true);
+      setProfileDrawerOpen(false);
     }
-  }, [activeProfileId, coreFriends, persistenceReady, screen, activeChat, incomingRequestsOpen, addContactOpen, notificationTargetRevision, profileSwitching, profiles, switchProfileAfterDraftSave]);
-  const hasPendingOutgoingRequest = (friend: CoreFriend) => outgoingFriendRequests.some((request) => request.toxId.trim().toUpperCase().startsWith(friend.public_key));
+  }, [activeProfileId, coreFriends, persistenceReady, screen, activeChat, incomingRequestsOpen, addContactOpen, notificationTargetRevision, profileSwitching, profiles, switchProfileAfterDraftSave, compactMode, compactChatOpen, profileDrawerOpen]);
   useEffect(() => {
     if (!friendRequestCustomized.current) setFriendRequestMessage(formatFriendRequestDefault(language));
     setAddContactStatus(null);
@@ -1754,21 +1953,17 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
     setTransferNotice(null);
   }, [language]);
   const coreChats: Chat[] = coreFriends
-    // toxcore creates a local friend record immediately. It becomes a visible
-    // contact only after the remote side accepts. Authorization is persisted
-    // as soon as a connection or a valid inbound Kaigen/Tox event proves it.
-    .filter((friend) => !hasPendingOutgoingRequest(friend) || friend.authorized)
     .map((friend) => {
-      const status = contactPresence(friend, userStatus, networkStatus);
+      const status: ContactListStatus = friend.authorized === false ? "pending" : contactPresence(friend, userStatus, networkStatus);
       return {
         id: toxChatId(friend.public_key),
         initial: plainText(friend.name).trim().charAt(0).toLocaleUpperCase() || "?",
         name: plainText(friend.name).trim() || `Контакт ${friend.public_key.slice(-6)}`,
-        preview: plainText(friend.status_message) || (status !== "offline" ? "В сети Tox" : "Отключен"),
+        preview: plainText(friend.status_message) || (status === "pending" ? t("Сообщения будут отправлены после авторизации") : t(status !== "offline" ? "В сети Tox" : "Отключен")),
         time: formatContactEvent(friend.last_event ?? friend.addedAt, language),
         color: "blue",
         status,
-        lastOnline: status !== "offline" ? "сейчас в сети" : formatLastOnline(friend.last_online, language),
+        lastOnline: status === "pending" ? "Ожидает авторизации" : status !== "offline" ? "сейчас в сети" : formatLastOnline(friend.last_online, language),
         toxId: friend.tox_id || friend.public_key,
         friendNumber: friend.number,
         publicKey: friend.public_key,
@@ -1788,7 +1983,19 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
     });
   }, [coreFriends]);
   const active = allChats.find((chat) => chat.id === activeChat) ?? emptyChat;
-  useLayoutEffect(() => setFullImage(null), [active.id, screen]);
+  useLayoutEffect(() => {
+    videoPreviewRequestRef.current += 1;
+    setFullMedia(null);
+    setExpandedMediaKey(null);
+    stopChatMediaPlayback();
+    fileCopyAbortRef.current?.abort();
+    fileCopyAbortRef.current = null;
+    setSavingFileKey(null);
+  }, [activeProfileId, active.id, screen]);
+  useEffect(() => () => { fileCopyAbortRef.current?.abort(); }, []);
+  useEffect(() => {
+    if (compactMode && !compactChatOpen) stopChatMediaPlayback();
+  }, [compactMode, compactChatOpen]);
   useEffect(() => {
     const previewReady = () => setMessageRefreshRequest((current) => current + 1);
     const previewInvalidated = (event: Event) => {
@@ -1810,6 +2017,8 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
       window.removeEventListener("kaigen:transfer-pump-error", pumpFailed);
     };
   }, [activeProfileId, active.friendNumber]);
+  const historyContactKey = active.publicKey?.toUpperCase() ?? "";
+  const historyContactIncarnation = contactIncarnationsRef.current[historyContactKey] ?? 0;
   const messageKeys = useMemo(() => messages.map((message) => message.coreId ?? String(message.id)), [messages]);
   const historyOffsets = useMemo(() => buildHistoryOffsets(messageKeys, measuredMessageHeightsRef.current), [messageKeys, heightMeasurementRevision]);
   const windowAnchorIndex = windowAnchorKey ? messageKeys.indexOf(windowAnchorKey) : -1;
@@ -1821,6 +2030,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
   const contextMessage = generalContext?.messageKey
     ? messages.find((message) => (message.coreId ?? String(message.id)) === generalContext.messageKey)
     : undefined;
+  const contextAttachmentAvailable = contextMessage?.attachment?.unavailableLocally !== true;
   const contextReactionEligible = !!contextMessage && !contextMessage.mine && !contextMessage.event
     && chatCapabilities.reactions && reactionEligibleKeys.has(contextMessage.coreId ?? "");
   const accessibleHistoryStart = Math.max(0, historyTotal - (loadedHistoryLimit === "all" ? historyTotal : loadedHistoryLimit));
@@ -1835,21 +2045,21 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
   const canStageFileForActiveChat = !profileSwitching
     && !profileSwitchPending
     && canStageChatFile(chatFileAdmission);
+  const fileRecipientKey = coreFriends.find((friend) => friend.number === active.friendNumber)?.public_key.trim().toUpperCase() ?? "";
   const activeFileTarget: ChatFileTarget | null = canStageFileForActiveChat
     && activeProfileId
     && active.friendNumber !== undefined
-    ? { profileId: activeProfileId, friendNumber: active.friendNumber, chatId: active.id }
+    && /^[0-9A-F]{64}$/.test(fileRecipientKey)
+    && active.id === toxChatId(fileRecipientKey)
+    ? { profileId: activeProfileId, friendNumber: active.friendNumber, expectedPublicKey: fileRecipientKey, expectedContactIncarnation: contactIncarnationsRef.current[fileRecipientKey] ?? 0, chatId: active.id }
     : null;
   activeFileTargetRef.current = activeFileTarget;
   const pendingFileMatchesActiveTarget = pendingFiles.length > 0
     && activeFileTarget !== null
-    && pendingFiles.every((file) => file.profileId === activeFileTarget.profileId
-      && file.friendNumber === activeFileTarget.friendNumber
-      && file.chatId === activeFileTarget.chatId);
-  const stageFiles = useCallback((files: Iterable<File>) => {
-    const target = activeFileTargetRef.current;
+    && pendingFiles.every((file) => sameChatFileTarget(file, activeFileTarget));
+  const stageFiles = useCallback((files: Iterable<File>, target = activeFileTargetRef.current) => {
     const admission = admitChatFileBatch(files);
-    if (!admission.selectedCount || !target) return false;
+    if (!admission.selectedCount || !target || !sameChatFileTarget(activeFileTargetRef.current, target)) return false;
     const notice = formatChatFileBatchNotice(admission, language);
     if (notice) showTransferNotice(notice);
     if (!admission.accepted.length) return false;
@@ -1873,17 +2083,60 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
     })));
     return true;
   }, [language]);
+  const stageRemoteNativeFiles = useCallback(async (payload: NativeFileDropBatch, target: ChatFileTarget) => {
+    const request = ++nativeFilePickRevisionRef.current;
+    const current = () => appOwnerMountedRef.current && request === nativeFilePickRevisionRef.current
+      && sameChatFileTarget(activeFileTargetRef.current, target)
+      && payload.viewLeaseId === viewOwnerRef.current.leaseId;
+    const files: File[] = [];
+    try {
+      if (!payload.viewLeaseId || !current()) throw new Error("FILE_DROP_TARGET_CHANGED");
+      const notice = formatChatFileBatchNotice(payload.batch, language);
+      if (notice) showTransferNotice(notice);
+      for (const selection of payload.batch.accepted) {
+        if (!Number.isSafeInteger(selection.size) || selection.size < 1 || selection.size > MAX_CHAT_FILE_BYTES) throw new Error("TRANSFER_FILE_TOO_LARGE");
+        const parts: Uint8Array<ArrayBuffer>[] = [];
+        try {
+          for (let position = 0; position < selection.size;) {
+            if (!current()) throw new Error("FILE_DROP_TARGET_CHANGED");
+            const chunk = await invoke<{ position: number; data: string; eof: boolean }>("read_webgate_file_grant", {
+              profileId: target.profileId, friendNumber: target.friendNumber, expectedPublicKey: target.expectedPublicKey,
+              expectedContactIncarnation: target.expectedContactIncarnation,
+              viewLeaseId: payload.viewLeaseId, targetRevision: payload.targetRevision,
+              grantToken: selection.grantToken, position, length: 256 * 1024,
+            });
+            if (!current()) throw new Error("FILE_DROP_TARGET_CHANGED");
+            if (chunk.position !== position || typeof chunk.data !== "string" || chunk.data.length > 349528) throw new Error("NATIVE_FILE_GRANT_RANGE_INVALID");
+            const bytes = Uint8Array.from(atob(chunk.data), (value) => value.charCodeAt(0));
+            parts.push(bytes);
+            if (bytes.length !== Math.min(256 * 1024, selection.size - position)) throw new Error("NATIVE_FILE_GRANT_RANGE_INVALID");
+            position += bytes.length;
+            if (chunk.eof !== (position === selection.size)) throw new Error("NATIVE_FILE_GRANT_RANGE_INVALID");
+          }
+          files.push(new File(parts, selection.name, { type: selection.mime }));
+        } finally { for (const part of parts) part.fill(0); }
+      }
+      if (current()) stageFiles(files);
+    } catch (error) {
+      if (current()) showTransferNotice(formatUserFacingError(error, { ru: "Не удалось подготовить файлы", en: "Could not prepare the files" }, language));
+    } finally { discardNativeSelections(payload.batch.accepted); }
+  }, [discardNativeSelections, language, stageFiles]);
+
   const stagePastedFiles = useCallback((files: Iterable<File>) => {
-    if (!platformCapabilities.nativeFilesystem) return stageFiles(files);
+    if (!nativeProfileFilesystem) return stageFiles(files);
     const target = activeFileTargetRef.current;
     if (!target) return false;
     const revision = ++nativeFilePickRevisionRef.current;
-    void invoke<NativeFileBatchSelection>("stage_clipboard_image_for_chat", { profileId: target.profileId, friendNumber: target.friendNumber })
+    void invoke<NativeFileBatchSelection>("stage_clipboard_image_for_chat", { profileId: target.profileId, friendNumber: target.friendNumber, expectedPublicKey: target.expectedPublicKey, expectedContactIncarnation: target.expectedContactIncarnation })
       .then((batch) => {
         if (revision !== nativeFilePickRevisionRef.current || !sameChatFileTarget(activeFileTargetRef.current, target)) { discardNativeSelections(batch.accepted); return; }
         stageNativeFileBatch(batch, target);
       })
-      .catch((error) => { if (revision === nativeFilePickRevisionRef.current) showTransferNotice(formatUserFacingError(error, { ru: "Не удалось вставить изображение из буфера", en: "Could not paste the clipboard image" }, language)); });
+      .catch(async (error) => {
+        if (pqErrorCode(error) === "CHAT_CONTACT_INCARNATION_CHANGED") {
+          await refreshContactIncarnation(target.profileId, target.expectedPublicKey);
+        } else if (revision === nativeFilePickRevisionRef.current) showTransferNotice(formatUserFacingError(error, { ru: "Не удалось вставить изображение из буфера", en: "Could not paste the clipboard image" }, language));
+      });
     return true;
   }, [stageFiles, stageNativeFileBatch, discardNativeSelections, language]);
   const resetFileDrag = useCallback(() => {
@@ -1954,6 +2207,30 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
   const statusSortLabel = contactSort.mode === "status"
     ? t(contactSort.direction === "forward" ? "Сортировка по статусу: онлайн сначала" : "Сортировка по статусу: отключённые сначала")
     : t("Сортировать по статусу: онлайн сначала");
+  async function changeContactSort(mode: ContactSortState["mode"]) {
+    if (!layoutHydrated || contactSortSavingRef.current) return;
+    const next = toggleContactSort(contactSort, mode);
+    contactSortSavingRef.current = true;
+    setContactSortSaving(true);
+    try {
+      await savePortableLayoutPatch({ contactSort: next }, async (state) => {
+        try {
+          await invoke("save_layout_state", { state });
+        } catch (error) {
+          // The layout queue retains failed optimistic patches by default.
+          // Restore the confirmed sort before the next queued write can run.
+          retainPortableLayoutPatch({ contactSort });
+          throw error;
+        }
+      });
+      if (appOwnerMountedRef.current) setContactSort(next);
+    } catch (error) {
+      console.error("Не удалось сохранить сортировку контактов", error);
+    } finally {
+      contactSortSavingRef.current = false;
+      if (appOwnerMountedRef.current) setContactSortSaving(false);
+    }
+  }
   const offlineVisibilityLabel = t(hideOfflineContacts ? "Показать отключённые контакты" : "Скрыть отключённые контакты");
   const highlightContactName = (name: string) => {
     const pattern = contactSearch.trim();
@@ -2132,14 +2409,13 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
     const refresh = () => {
       if (document.visibilityState !== "visible" || refreshPending) return;
       refreshPending = true;
-      void invoke<ChatCapabilities>("get_chat_capabilities", { profileId: activeProfileId, friendNumber: active.friendNumber })
+      return invoke<ChatCapabilities>("get_chat_capabilities", { profileId: activeProfileId, friendNumber: active.friendNumber })
         .then((capabilities) => { if (mounted) setChatCapabilities((current) => sameData(current, capabilities) ? current : capabilities); })
         .catch(() => {})
         .finally(() => { refreshPending = false; });
     };
-    refresh();
-    const timer = window.setInterval(refresh, 3000);
-    return () => { mounted = false; window.clearInterval(timer); };
+    const stop = watchProfileUpdates(activeProfileId, refresh, 3000);
+    return () => { mounted = false; stop(); };
   }, [active.id, active.friendNumber, activeProfileId]);
 
   // A cached chat is hydrated in the layout phase. Clear the previous chat's
@@ -2216,29 +2492,28 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
     const key = `${activeProfileId}:${active.id}`;
     const viewLeaseId = viewOwnerRef.current.leaseId;
     if (active.friendNumber !== undefined) setTransferPreviewChatActive(activeProfileId, active.friendNumber, displayedChatActiveRef.current);
-    const cached = displayedChatActiveRef.current && active.id ? historyCacheRef.current.open(key, Date.now()) : undefined;
-    if (cached && messageSnapshotChatRef.current !== active.id) {
+    const range = historyCacheRangesRef.current.get(key);
+    const cached = displayedChatActiveRef.current && active.id && range?.openingLimit === historyMessageLimit
+      ? historyCacheRef.current.open(key, Date.now()) : undefined;
+    if (cached && range && messageSnapshotChatRef.current !== active.id) {
       const restored = cached.map((message) => {
         const attachment = message.attachment;
-        if (platformCapabilities.nativeFilesystem || !attachment?.image || !attachment.path?.startsWith("browser-stream://")) return message;
+        if (nativeProfileFilesystem || !attachment?.image || !attachment.path?.startsWith("browser-stream://")) return message;
         const url = transferPreviewSource(attachment.path, activeProfileId, active.friendNumber!);
         return attachment.url === url ? message : { ...message, attachment: { ...attachment, url } };
       });
       messageSnapshotChatRef.current = active.id;
       messagesRef.current = restored;
       setMessages(restored);
-      const range = historyCacheRangesRef.current.get(key);
-      if (range) {
-        historyCacheRangesRef.current.delete(key);
-        historyCacheRangesRef.current.set(key, range);
-        setLoadedHistoryLimit(range.limit);
-        setHistoryWindowStart(range.start);
-        setHistoryTotal(range.total);
-        setHistoryHasMore(range.start > 0);
-        setHistoryHasAfter(range.start + restored.length < range.total);
-        historySnapshotAtTailRef.current = range.start + restored.length >= range.total;
-        setHistoryRequest({ rangeOffset: range.start });
-      }
+      historyCacheRangesRef.current.delete(key);
+      historyCacheRangesRef.current.set(key, range);
+      setLoadedHistoryLimit(range.limit);
+      setHistoryWindowStart(range.start);
+      setHistoryTotal(range.total);
+      setHistoryHasMore(range.start > 0);
+      setHistoryHasAfter(range.start + restored.length < range.total);
+      historySnapshotAtTailRef.current = range.start + restored.length >= range.total;
+      setHistoryRequest({ rangeOffset: range.start });
     } else if (!cached) {
       if (displayedChatActiveRef.current) {
         delete scrollAnchorsRef.current[active.id];
@@ -2318,19 +2593,22 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
     if (screen !== "chat" || !active.id) return;
     const container = messageScrollRef.current;
     if (!container) return;
+    const viewLeaseId = viewOwnerRef.current.leaseId;
     let activeObserver = true;
     const observer = new ResizeObserver(() => {
-      if (!activeObserver || messageSnapshotChatRef.current !== active.id || pendingScrollRestore.current || pendingNavigationRef.current) return;
+      if (!activeObserver || viewOwnerRef.current.leaseId !== viewLeaseId
+        || messageSnapshotChatRef.current !== active.id || pendingScrollRestore.current || pendingNavigationRef.current) return;
       try {
         measureMessageRows(container);
         const reading = readingLongIncomingRef.current;
         if (reading?.chatId === active.id && !reading.userScrolled) { maintainLongIncomingContext(reading); return; }
-        if (deferredIncomingScrollRef.current || deferredOutgoingScrollRef.current) return;
+        if (incomingOwnsScroll() || deferredOutgoingScrollRef.current?.chatId === active.id) return;
         const saved = scrollAnchorsRef.current[active.id];
         if (followLatestRef.current) {
           markAutomaticScroll();
           container.scrollTop = container.scrollHeight;
         } else if (saved) restoreViewAnchor(saved);
+        revealLoadedHistoryGap(container);
       } finally {
         markVisibleIncomingMessages();
         syncUnseenIndicator();
@@ -2340,7 +2618,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
     observer.observe(container);
     for (const row of container.querySelectorAll<HTMLElement>("[data-message-key]")) observer.observe(row);
     return () => { activeObserver = false; observer.disconnect(); };
-  }, [active.id, screen, messages, historyHasAfter, messageWindow.start, messageWindow.end]);
+  }, [viewKey, active.id, historyContactIncarnation, messages, historyHasAfter, messageWindow.start, messageWindow.end, profileSwitching, profileSwitchPending]);
 
   useLayoutEffect(() => {
     // App survives profile switches; old counts and peer rows must not paint in the new owner.
@@ -2366,15 +2644,16 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
     let friendsRefreshPending = false;
     const refresh = () => {
       if (!mounted || !currentProfileOwner(owner) || document.visibilityState !== "visible") return;
+      let friendsRequest: Promise<unknown> = Promise.resolve();
       if (!friendsRefreshPending) {
         friendsRefreshPending = true;
         const friendRevision = friendMutationRevisionRef.current;
-        void invoke<CoreFriend[]>("get_tox_friends", { profileId: owner.profileId }).then((friends) => {
+        friendsRequest = invoke<CoreFriend[]>("get_tox_friends", { profileId: owner.profileId }).then((friends) => {
           if (mounted && currentProfileOwner(owner) && friendRevision === friendMutationRevisionRef.current) setCoreFriends((current) => !mounted || !currentProfileOwner(owner) || friendRevision !== friendMutationRevisionRef.current || sameData(current, friends) ? current : friends);
         }).catch(() => {}).finally(() => { friendsRefreshPending = false; });
       }
       const requestRevision = incomingRequestActionRef.current.revision;
-      void invoke<IncomingFriendRequest[]>("get_incoming_friend_requests", { profileId: owner.profileId }).then((requests) => {
+      const requestsRequest = invoke<IncomingFriendRequest[]>("get_incoming_friend_requests", { profileId: owner.profileId }).then((requests) => {
         if (!mounted || !currentProfileOwner(owner) || requestRevision !== incomingRequestActionRef.current.revision) return;
         setIncomingFriendRequests((current) => !mounted || !currentProfileOwner(owner) || requestRevision !== incomingRequestActionRef.current.revision || sameData(current, requests) ? current : requests);
         if (incomingRequestsOpen) {
@@ -2392,14 +2671,12 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
           return sameData(current, next) ? current : next;
         });
       }).catch(() => {});
+      return Promise.all([friendsRequest, requestsRequest]);
     };
-    refresh();
-    const timer = window.setInterval(refresh, 5000);
-    const backendListener = listen<string>("profiles-changed", () => refresh());
+    const stop = watchProfileUpdates(owner.profileId, refresh, 5000);
     return () => {
       mounted = false;
-      window.clearInterval(timer);
-      void backendListener.then((unlisten) => unlisten());
+      stop();
     };
   }, [incomingRequestsOpen, activeProfileId, captureProfileOwner, currentProfileOwner]);
 
@@ -2424,7 +2701,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
       if (refreshPending) return;
       refreshPending = true;
       const mutationRevision = unreadMutationRevisionRef.current;
-      void invoke<UnreadState>("get_unread_state", { profileId: owner.profileId }).then((state) => {
+      return invoke<UnreadState>("get_unread_state", { profileId: owner.profileId }).then((state) => {
       if (!mounted || !currentProfileOwner(owner) || mutationRevision !== unreadMutationRevisionRef.current) return;
       const signature = JSON.stringify(state);
       if (signature === lastUnreadSnapshot.current) return;
@@ -2434,9 +2711,8 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
       window.dispatchEvent(new Event("profiles-changed"));
       }).catch(() => {}).finally(() => { refreshPending = false; });
     };
-    refresh();
-    const timer = window.setInterval(refresh, 3000);
-    return () => { mounted = false; window.clearInterval(timer); };
+    const stop = watchProfileUpdates(owner.profileId, refresh, 3000);
+    return () => { mounted = false; stop(); };
   }, [activeProfileId, captureProfileOwner, currentProfileOwner]);
 
   useEffect(() => {
@@ -2448,18 +2724,19 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
     const nextPoll = new Map<string, number>();
     const refresh = () => {
       if (document.visibilityState !== "visible") return;
+      const tasks: Promise<unknown>[] = [];
       for (const friend of coreFriends) {
         const key = pqContactKey(activeProfileId, friend.public_key);
-        if (pending.has(key) || (nextPoll.get(key) ?? 0) > Date.now()) continue;
+        if (pending.has(key) || (!isWebgateProfileId(activeProfileId) && (nextPoll.get(key) ?? 0) > Date.now())) continue;
         pending.add(key);
         nextPoll.set(key, Date.now() + (activeChatRef.current === toxChatId(friend.public_key) ? 1000 : 3000));
-        void refreshPqStatus(friend.number, friend.public_key).catch(() => {}).finally(() => pending.delete(key));
+        tasks.push(refreshPqStatus(friend.number, friend.public_key).catch(() => {}).finally(() => pending.delete(key)));
       }
+      return Promise.all(tasks);
     };
-    refresh();
-    const timer = window.setInterval(refresh, 1000);
+    const stop = watchProfileUpdates(activeProfileId, refresh, 1000);
     return () => {
-      window.clearInterval(timer);
+      stop();
       for (const key of pending) pqStatusRequestsRef.current[key] = ++pqStatusSequenceRef.current;
     };
   }, [activeProfileId, coreFriends, refreshPqStatus]);
@@ -2482,11 +2759,11 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
       if (refreshPending) return;
       refreshPending = true;
       const mutationRevision = historyMutationRevisionRef.current;
-      void invoke<CoreMessagesSnapshot>("get_tox_messages_snapshot", {
+      return invoke<CoreMessagesSnapshot>("get_tox_messages_snapshot", {
       profileId: activeProfileId,
       friendNumber: active.friendNumber,
       viewLeaseId,
-      limit: boundedHistoryRequestLimit(loadedHistoryLimit, activeUnreadCount),
+      limit: boundedHistoryRequestLimit(loadedHistoryLimit),
       knownRevision: historyRevisionRef.current,
       peerReactionAfter: reactionNoticeDurableCursorRef.current[active.id] ?? 0,
       ackPeerReactionThrough: reactionNoticeDurableCursorRef.current[active.id] ?? 0,
@@ -2497,13 +2774,14 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
         historyRevisionRef.current = snapshot.revision;
         const resumed = resumedHistoryAnchorRef.current?.chatId === active.id ? resumedHistoryAnchorRef.current : null;
         receivePeerReactionEvents(active.id, snapshot.peerReactionEvents ?? []);
+        setHistoryError(false);
         if (!snapshot.messages) return;
         const resumedAnchorIndex = resumed
           ? snapshot.messages.findIndex((message) => message.id === resumed.anchor.messageKey)
           : -1;
         const mayResumeLiveTail = !resumed || (resumedAnchorIndex >= 0
           && snapshot.windowStart + resumedAnchorIndex >= Math.max(0,
-            snapshot.total - boundedHistoryRequestLimit(loadedHistoryLimit, activeUnreadCount)));
+            snapshot.total - boundedHistoryRequestLimit(loadedHistoryLimit)));
         if (resumed && historyRequest.rangeOffset === undefined && !historyRequest.targetMessageId
           && resumedAnchorIndex < 0) {
           // A backend byte budget can shorten the requested tail. Keep the saved
@@ -2538,46 +2816,53 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
         latestHistoryMessageIdRef.current = snapshot.latestMessageId;
         if (snapshot.firstUnseenMessageId) setUnseenBoundary((boundary) => boundary ?? snapshot.firstUnseenMessageId!);
         const items = snapshot.messages;
-        setHistoryError(false);
+        const unavailableAttachments = new Set(snapshot.unavailableAttachmentIds);
         const terminalTransferIds = items.flatMap((item) =>
           item.id && isTerminalTransferState(item.attachment?.transfer_state)
             ? [item.id]
             : [],
         );
-        const nextMessages = items.map((item, index) => ({
-          id: item.timestamp * 1000 + index,
-          coreId: item.id,
-          text: item.quote ? plainText(item.text) : parseQtoxQuoteMessage(plainText(item.text))?.body ?? plainText(item.text),
-          mine: item.mine,
-          delivery: item.delivery === "queued" ? "pending" : item.delivery === "unknown_recovered" ? "unknown" : item.delivery || "sent",
-          deliveredAt: item.delivered_at,
-          event: item.event,
-          protocolVersion: item.protocol_version,
-          quote: item.quote ?? (parseQtoxQuoteMessage(plainText(item.text)) ? { author: "", text: parseQtoxQuoteMessage(plainText(item.text))!.quoteText, legacy: true } : undefined),
-          formatting: item.protocol_version === 1 && plainText(item.text) === item.text ? item.formatting : undefined,
-          reactions: item.reactions,
-          pqProtected: item.pq_protected,
-          timestamp: item.timestamp,
-          time: formatChatDate(new Date(item.timestamp * 1000), language, "time"),
-          attachment: item.attachment ? {
-            name: plainText(item.attachment.name), size: item.attachment.size, type: plainText(item.attachment.mime), path: item.attachment.path,
-            // A local sender can preview the original immediately. A received
-            // image is exposed only after its final chunk has been written.
-            url: item.attachment.image && (item.mine || item.attachment.completed !== false) && (item.mine || showReceivedImages || (item.id ? revealedImages.includes(item.id) : false)) ? chatImageSource(item.attachment.preview_source ?? item.attachment.path, activeProfileId, active.friendNumber) : undefined,
-            image: item.attachment.image,
-            transferred: item.attachment.transferred ?? item.attachment.size,
-            speed: item.attachment.speed_bytes_per_sec ?? 0,
-            eta: item.attachment.eta_seconds,
-            transferState: effectiveTransferState(
-              item.attachment.transfer_state ?? "complete",
-              item.id ? transferUiStateOverrides[item.id] : undefined,
-            ),
-            completed: item.attachment.completed ?? true,
-            completedAt: item.attachment.completed_at,
-            error: item.attachment.transfer_error ?? null,
-            retryCount: item.attachment.retry_count ?? 0,
-          } : undefined,
-        }));
+        const nextMessages = items.map((item, index) => {
+          const displayText = plainText(item.text);
+          const qtoxQuote = item.quote ? null : parseQtoxQuoteMessage(displayText);
+          const unavailableLocally = Boolean(item.id && unavailableAttachments.has(item.id));
+          return {
+            id: item.timestamp * 1000 + index,
+            coreId: item.id,
+            operationId: item.operation_id,
+            text: qtoxQuote?.body ?? displayText,
+            mine: item.mine,
+            delivery: item.delivery === "queued" ? "pending" : item.delivery === "unknown_recovered" ? "unknown" : item.delivery || "sent",
+            deliveredAt: item.delivered_at,
+            event: item.event,
+            protocolVersion: item.protocol_version,
+            quote: item.quote ?? (qtoxQuote ? { author: "", text: qtoxQuote.quoteText, legacy: true } : undefined),
+            formatting: item.protocol_version === 1 && displayText === item.text ? item.formatting : undefined,
+            reactions: item.reactions,
+            pqProtected: item.pq_protected,
+            timestamp: item.timestamp,
+            time: formatChatDate(new Date(item.timestamp * 1000), language, "time"),
+            attachment: item.attachment ? {
+              name: plainText(item.attachment.name), size: item.attachment.size, type: plainText(item.attachment.mime), path: item.attachment.path,
+              unavailableLocally,
+              // A local sender can preview the original immediately. A received
+              // image is exposed only after its final chunk has been written.
+              url: !unavailableLocally && item.attachment.image && (item.mine || item.attachment.completed !== false) && (item.mine || showReceivedImages || (item.id ? revealedImages.includes(item.id) : false)) ? chatImageSource(item.attachment.preview_source ?? item.attachment.path, activeProfileId, active.friendNumber) : undefined,
+              image: item.attachment.image,
+              transferred: item.attachment.transferred ?? item.attachment.size,
+              speed: item.attachment.speed_bytes_per_sec ?? 0,
+              eta: item.attachment.eta_seconds,
+              transferState: effectiveTransferState(
+                item.attachment.transfer_state ?? "complete",
+                item.id ? transferUiStateOverrides[item.id] : undefined,
+              ),
+              completed: item.attachment.completed ?? true,
+              completedAt: item.attachment.completed_at,
+              error: item.attachment.transfer_error ?? null,
+              retryCount: item.attachment.retry_count ?? 0,
+            } : undefined,
+          };
+        });
         const pendingIndex = pendingHistoryIndexRef.current;
         if (pendingIndex !== null && nextMessages.length) {
           const target = nextMessages[Math.max(0, Math.min(nextMessages.length - 1, pendingIndex - snapshot.windowStart))];
@@ -2618,6 +2903,10 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
           : 0;
         const changed = !sameMessages(previousMessages, nextMessages) || !sameChatSnapshot;
         const restoringHistory = !!resumed || pendingScrollRestore.current === active.id;
+        // A native touch pan can outlive the gesture bookkeeping. The actual
+        // reading position still owns the view when a later message arrives.
+        if (changed && sameChatSnapshot && !restoringHistory && newlyArrivedIncoming.length
+          && !isNearChatEnd(previousDistance)) followLatestRef.current = false;
         if (resumed && (newMessages.length || snapshot.total > (resumed.total ?? snapshot.total)) && !pendingNavigationRef.current) {
           // Messages received while this chat was closed must not move the
           // previous reading position, including a previously visible tail.
@@ -2627,10 +2916,13 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
           followLatestRef.current = false;
         } else if (changed && sameChatSnapshot && !restoringHistory && !pendingNavigationRef.current && (!newMessages.length || !followLatestRef.current)) pendingPreserveAnchorRef.current = captureCurrentAnchor();
         messageSnapshotChatRef.current = active.id;
-        messagesRef.current = nextMessages;
+        // Keep the rendered array identity for equal snapshots and restoration guards.
+        if (changed) messagesRef.current = nextMessages;
         historyCacheRef.current.retain(`${activeProfileId}:${active.id}`, nextMessages);
         historyCacheRangesRef.current.delete(`${activeProfileId}:${active.id}`);
-        historyCacheRangesRef.current.set(`${activeProfileId}:${active.id}`, { start: snapshot.windowStart, total: snapshot.total, limit: loadedHistoryLimit });
+        historyCacheRangesRef.current.set(`${activeProfileId}:${active.id}`, {
+          start: snapshot.windowStart, total: snapshot.total, limit: loadedHistoryLimit, openingLimit: historyMessageLimit,
+        });
         for (const key of historyCacheRangesRef.current.keys()) {
           if (historyCacheRef.current.has(key)) continue;
           historyCacheRangesRef.current.delete(key);
@@ -2669,15 +2961,17 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
       .finally(() => { refreshPending = false; if (ownsView()) setHistoryLoading(false); });
     };
     setHistoryLoading(true);
-    refresh();
-    const timer = window.setInterval(refresh, 1000);
-    return () => { mounted = false; window.clearInterval(timer); };
-  }, [active.friendNumber, activeUnreadCount, activeProfileId, loadedHistoryLimit, language, messageRefreshRequest, messageSearchOpen, revealedImages, screen, showReceivedImages, transferUiStateOverrides, incomingRequestsOpen, addContactOpen, historyRequest, viewKey]);
+    const stop = watchProfileUpdates(activeProfileId, refresh, 1000, () => {
+      historyRevisionRef.current = undefined;
+      historyMutationRevisionRef.current += 1;
+    });
+    return () => { mounted = false; stop(); };
+  }, [active.friendNumber, activeUnreadCount, activeProfileId, historyMessageLimit, loadedHistoryLimit, language, messageRefreshRequest, messageSearchOpen, revealedImages, screen, showReceivedImages, transferUiStateOverrides, incomingRequestsOpen, addContactOpen, historyRequest, viewKey]);
 
   useEffect(() => {
     const container = messageScrollRef.current;
     const friendNumber = active.friendNumber;
-    if (platformCapabilities.nativeFilesystem || friendNumber === undefined || !container || !displayedChatActiveRef.current) return;
+    if (nativeProfileFilesystem || friendNumber === undefined || !container || !displayedChatActiveRef.current) return;
     const generation = viewOwnerRef.current.generation;
     const candidates = new Map<Element, Message>();
     for (const message of messages.slice(messageWindow.start, messageWindow.end)) {
@@ -2693,7 +2987,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
     const recoverVisible = () => {
       if (disposed || generation !== viewOwnerRef.current.generation) return;
       const nearby = [...nearViewport].flatMap((element) => candidates.get(element) ?? []);
-      setTransferPreviewPins(activeProfileId, friendNumber, [...nearby.flatMap((message) => message.attachment?.path ?? []), ...(fullImage?.path ? [fullImage.path] : [])]);
+      setTransferPreviewPins(activeProfileId, friendNumber, [...nearby.flatMap((message) => message.attachment?.path ?? []), ...(fullMedia?.path ? [fullMedia.path] : [])]);
       for (const message of nearby) {
         if (recoveringIncomingFilesRef.current.size >= 2) break;
         const messageId = message.coreId!;
@@ -2730,7 +3024,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
       observer.disconnect();
       if (generation !== viewOwnerRef.current.generation) setTransferPreviewPins(activeProfileId, friendNumber, []);
     };
-  }, [active.id, active.friendNumber, activeProfileId, messages, messageWindow.start, messageWindow.end, showReceivedImages, revealedImages, viewKey, fullImage]);
+  }, [active.id, active.friendNumber, activeProfileId, messages, messageWindow.start, messageWindow.end, showReceivedImages, revealedImages, viewKey, fullMedia]);
 
   useLayoutEffect(() => {
     if (screen !== "chat" || !active.id) return;
@@ -2780,7 +3074,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
         : false;
       if (!maintained && deferredIncomingScrollRef.current?.chatId === active.id) positionPendingIncomingBeforePaint();
     }
-    if (followLatestRef.current && !navigation && !readingLongIncomingRef.current && !deferredIncomingScrollRef.current && !pendingScrollRestore.current) {
+    if (followLatestRef.current && !navigation && !incomingOwnsScroll() && !pendingScrollRestore.current) {
       const container = messageScrollRef.current;
       if (container) {
         markAutomaticScroll();
@@ -2811,13 +3105,15 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
     const container = messageScrollRef.current;
     if (screen !== "chat" || !active.id || !container || !followLatestRef.current) return;
     const keepLatestVisible = () => {
+      if (!followLatestRef.current || incomingOwnsScroll()
+        || pendingNavigationRef.current || pendingScrollRestore.current === active.id) return;
       markAutomaticScroll();
       container.scrollTop = container.scrollHeight;
     };
     keepLatestVisible();
     const frame = scheduleViewFrame(keepLatestVisible);
     return () => window.cancelAnimationFrame(frame);
-  }, [active.id, activePqComposerStage, screen]);
+  }, [active.id, activePqComposerStage, screen, viewportWidth, availableHeight, appearance.interfaceScale, compactChatOpen, heightMeasurementRevision]);
 
   useEffect(() => {
     if (active.friendNumber === undefined || !active.publicKey || !localViewAllowed() || localViewAckPendingRef.current?.generation === viewOwnerRef.current.generation || !locallySeenPendingRef.current.size) return;
@@ -2890,7 +3186,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
       window.removeEventListener("focus", dismissVisible);
       document.removeEventListener("visibilitychange", dismissVisible);
     };
-  }, [active.id, messageVisibilityRevision, messages, reactionNotices, messageWindow.start, messageWindow.end, scrollRestoreTick, historyLoading, screen, fullImage, pendingFiles.length, contactAction, groupAction, addContactOpen, incomingRequestsOpen]);
+  }, [active.id, messageVisibilityRevision, messages, reactionNotices, messageWindow.start, messageWindow.end, scrollRestoreTick, historyLoading, screen, fullMedia, pendingFiles.length, contactAction, groupAction, addContactOpen, incomingRequestsOpen]);
 
   useEffect(() => {
     const refreshView = () => { markVisibleIncomingMessages(); setMessageVisibilityRevision((value) => value + 1); };
@@ -2898,7 +3194,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
     document.addEventListener("visibilitychange", refreshView);
     refreshView();
     return () => { window.removeEventListener("focus", refreshView); document.removeEventListener("visibilitychange", refreshView); };
-  }, [active.id, screen, fullImage, pendingFiles.length, contactAction, groupAction, addContactOpen, incomingRequestsOpen]);
+  }, [active.id, screen, fullMedia, pendingFiles.length, contactAction, groupAction, addContactOpen, incomingRequestsOpen]);
 
   useLayoutEffect(() => {
     if (!displayedChatActiveRef.current || pendingScrollRestore.current !== active.id) return;
@@ -2941,15 +3237,17 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
 
   useLayoutEffect(() => {
     if (screen !== "chat" || !active.id) return;
+    const container = messageScrollRef.current;
+    if (container) revealLoadedHistoryGap(container);
     // Navigation follows laid-out content, independently of whether this window
     // has focus and may acknowledge the incoming messages as locally seen.
     syncUnseenIndicator();
     markVisibleIncomingMessages();
     syncReturnAnchor();
     dismissVisibleReactionsRef.current();
-  }, [active.id, appearance.interfaceScale, screen, messages, unreadFriendCounts, messageVisibilityRevision,
-    viewportWidth, historyLoading, historyHasAfter, messageWindow.start, messageWindow.end,
-    heightMeasurementRevision, scrollRestoreTick, activePqComposerStage]);
+  }, [viewKey, active.id, historyContactIncarnation, appearance.interfaceScale, screen, messages, unreadFriendCounts, messageVisibilityRevision,
+    viewportWidth, historyLoading, historyHasMore, historyHasAfter, historySpaceBefore, historySpaceAfter, messageWindow.start, messageWindow.end,
+    heightMeasurementRevision, scrollRestoreTick, activePqComposerStage, profileSwitching, profileSwitchPending]);
 
   useEffect(() => () => {
     if (deferredIncomingTimerRef.current !== undefined) window.clearTimeout(deferredIncomingTimerRef.current);
@@ -3004,7 +3302,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
       if (document.visibilityState !== "visible" || refreshPending) return;
       refreshPending = true;
       const revision = ownPresenceRevisionRef.current;
-      void invoke<NetworkStatus>("get_tox_network_status")
+      return invoke<NetworkStatus>("get_tox_network_status")
       .then((value) => {
         if (!mounted || revision !== ownPresenceRevisionRef.current) return;
         // Switching profiles only changes the visible data. Display the actual
@@ -3014,9 +3312,8 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
       })
       .catch(() => {}).finally(() => { refreshPending = false; });
     };
-    refresh();
-    const timer = window.setInterval(refresh, 1000);
-    return () => { mounted = false; window.clearInterval(timer); };
+    const stop = watchProfileUpdates(activeProfileId, refresh, 1000);
+    return () => { mounted = false; stop(); };
   }, []);
 
   useEffect(() => {
@@ -3043,7 +3340,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
       })
       .catch((error) => {
         if (mounted) setTorStatus((current) => {
-          const next: TorStatus = { ...current, state: "error", message: String(error), progress: 0 };
+          const next: TorStatus = { ...current, state: "error", message: String(error), progress: 0, retry: null };
           retainTorStatus(next);
           return sameData(current, next) ? current : next;
         });
@@ -3074,28 +3371,42 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
 
   useEffect(() => {
     if (!layoutHydrated) return;
-    const state = { appearance, chatListWidth, profileOrder, contactSort, hideOfflineContacts };
+    const state = { appearance, chatListWidth, profileOrder, hideOfflineContacts };
     retainPortableLayoutPatch(state);
     const timer = window.setTimeout(() => {
       void savePortableLayoutPatch(state, (sharedLayoutState) => invoke("save_layout_state", { state: sharedLayoutState }))
         .catch((error) => console.error("Не удалось сохранить общую компоновку интерфейса", error));
     }, 250);
     return () => window.clearTimeout(timer);
-  }, [appearance, chatListWidth, contactSort, hideOfflineContacts, layoutHydrated, profileOrder]);
+  }, [appearance, chatListWidth, hideOfflineContacts, layoutHydrated, profileOrder]);
 
   useEffect(() => {
     let mounted = true;
     if (!activeProfileId) {
-      setPersistenceReady(true);
+      setLoadedStateOwner(activeProfileId);
       return () => { mounted = false; };
     }
-    void invoke<LocalState | null>("load_local_state", { profileId: activeProfileId })
+    let retryDelay = 1000;
+    let retryTimer: number | undefined;
+    const loadState = () => void enqueueLocalStateOperation(() => invoke<LocalState | null>("load_local_state", { profileId: activeProfileId }))
       .then((saved) => {
         if (!mounted) return;
-        setContactGroups(normalizeContactGroups(saved?.contactGroups));
+        contactIncarnationsRef.current = { ...saved?.contactIncarnations };
+        publishContactGroups(normalizeContactGroups(saved?.contactGroups));
+        const spellcheck = {
+          spellcheckEnabled: saved?.spellcheckEnabled ?? true,
+          spellcheckRussian: saved?.spellcheckRussian ?? true,
+          spellcheckEnglish: saved?.spellcheckEnglish ?? false,
+        };
+        confirmedSpellcheckRef.current.set(activeProfileId, spellcheck);
+        setSpellcheckPreferences(spellcheck);
+        setNotifyMessages(typeof saved?.notifyMessages === "boolean" ? saved.notifyMessages : DEFAULT_NOTIFICATION_SETTINGS.messages);
+        setNotifyRequests(typeof saved?.notifyRequests === "boolean" ? saved.notifyRequests : DEFAULT_NOTIFICATION_SETTINGS.requests);
+        const soundSettings = normalizeNotificationSound(saved ?? {});
+        setNotifySound(soundSettings.notifySound);
+        setNotificationVolume(soundSettings.notificationVolume);
         if (!saved) {
-          setSpellcheckEnabled(true);
-          setSpellcheckRussian(true);
+          setLoadedStateOwner(activeProfileId);
           return;
         }
         if (saved.activeChat) setActiveChat(saved.activeChat);
@@ -3114,8 +3425,28 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
         if (hydrateHistory && saved.draftQuotes && typeof saved.draftQuotes === "object") draftQuotesRef.current = { ...saved.draftQuotes };
         historyClearEpochRef.current = Math.max(historyClearEpochRef.current, savedHistoryEpoch);
         if (saved.pendingSendOperations && typeof saved.pendingSendOperations === "object") {
-          pendingSendOperationsRef.current = { ...saved.pendingSendOperations };
-          setFailedSends(Object.values(saved.pendingSendOperations).filter((operation) => operation.profileId === activeProfileId));
+          if (platformCapabilities.browserAuthorization) {
+            for (const [id, operation] of Object.entries(saved.pendingSendOperations)) {
+              if (operation?.profileId === activeProfileId && operation.operationId === id
+                && !webFinishedSendIdsRef.current.has(id)) {
+                const restoredOperation: PendingSend = { ...operation, failureKind: operation.failureKind === "rejected" ? "rejected" : "unknown" };
+                const queuedAt = operation.webQueuedAt;
+                if (typeof queuedAt === "number" && Number.isSafeInteger(queuedAt)
+                  && queuedAt > 0 && queuedAt < 8.64e15) {
+                  webSendQueueTimeRef.current = Math.max(webSendQueueTimeRef.current, queuedAt);
+                  pendingSendOperationsRef.current[id] ??= restoredOperation;
+                } else {
+                  pendingSendOperationsRef.current[id] ??= { ...restoredOperation, webQueuedAt: undefined };
+                }
+              }
+            }
+            syncWebQueuedSends();
+          } else {
+            pendingSendOperationsRef.current = Object.fromEntries(Object.entries(saved.pendingSendOperations)
+              .map(([id, operation]) => [id, { ...operation, failureKind: "unknown" as const }]));
+          }
+          setFailedSends(Object.values(pendingSendOperationsRef.current)
+            .filter((operation) => operation.profileId === activeProfileId && operation.webQueuedAt === undefined));
         }
         if (hydrateHistory) {
           reactionNoticeStoreRef.current = restoreReactionNotices(saved.peerReactionNotices);
@@ -3123,19 +3454,20 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
           setReactionNotices(reactionNoticeStoreRef.current[saved.activeChat ?? activeChatRef.current]?.notices ?? []);
         }
         if (saved.historyMessageLimit !== undefined) setHistoryMessageLimit(normalizeHistoryMessageLimit(saved.historyMessageLimit));
-        if (typeof saved.notifyMessages === "boolean") setNotifyMessages(saved.notifyMessages);
-        if (typeof saved.notifyRequests === "boolean") setNotifyRequests(saved.notifyRequests);
-        const soundSettings = normalizeNotificationSound(saved);
-        setNotifySound(soundSettings.notifySound);
-        setNotificationVolume(soundSettings.notificationVolume);
-        setSpellcheckEnabled(saved.spellcheckEnabled ?? true);
-        setSpellcheckRussian(saved.spellcheckRussian ?? true);
-        setSpellcheckEnglish(saved.spellcheckEnglish ?? false);
+        setLoadedStateOwner(activeProfileId);
       })
-      .catch((error) => console.error("Не удалось загрузить локальные данные", error))
-      .finally(() => { if (mounted) setPersistenceReady(true); });
-    return () => { mounted = false; };
-  }, [activeProfileId]);
+      .catch((error) => {
+        if (!mounted) return;
+        if (retryTimer === undefined) console.error("Не удалось загрузить локальные данные", error);
+        retryTimer = window.setTimeout(loadState, retryDelay);
+        retryDelay = Math.min(30_000, retryDelay * 2);
+      });
+    loadState();
+    return () => {
+      mounted = false;
+      window.clearTimeout(retryTimer);
+    };
+  }, [activeProfileId, enqueueLocalStateOperation, publishContactGroups]);
 
   useEffect(() => {
     if (!persistenceReady) return;
@@ -3143,7 +3475,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
       void persistLocalState();
     }, 1000);
     return () => window.clearTimeout(timer);
-  }, [activeChat, autoDownloadImages, contactNames, contactGroups, historyMessageLimit, notifyMessages, notifyRequests, notifySound, notificationVolume, outgoingFriendRequests, persistenceReady, persistLocalState, saveChatHistory, sendOnEnter, spellcheckEnabled, spellcheckEnglish, spellcheckRussian]);
+  }, [activeChat, autoDownloadImages, contactNames, historyMessageLimit, notifySound, notificationVolume, outgoingFriendRequests, persistenceReady, persistLocalState, saveChatHistory, sendOnEnter]);
 
   useEffect(() => {
     return () => {
@@ -3153,9 +3485,9 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
   }, []);
 
   useEffect(() => {
-    if (!persistenceReady) return;
-    void invoke("set_chat_history_enabled", { enabled: saveChatHistory }).catch((error) => console.error("Не удалось применить настройку истории", error));
-  }, [persistenceReady, saveChatHistory]);
+    if (!persistenceReady || !activeProfileId) return;
+    void invoke("set_chat_history_enabled", { profileId: activeProfileId, enabled: saveChatHistory }).catch((error) => console.error("Не удалось применить настройку истории", error));
+  }, [activeProfileId, persistenceReady, saveChatHistory]);
 
   function saveOwnStatusMessage() {
     const value = normalizeOwnStatusMessage(ownStatusMessage);
@@ -3278,8 +3610,11 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
     void invoke("set_native_file_drop_target", {
       profileId: target?.profileId ?? null,
       friendNumber: target?.friendNumber ?? null,
+      expectedPublicKey: target?.expectedPublicKey ?? null,
+      expectedContactIncarnation: target?.expectedContactIncarnation ?? null,
+      viewLeaseId: target ? viewOwnerRef.current.leaseId : null,
     }).catch((error) => console.error("Не удалось обновить цель нативного drag-and-drop", error));
-  }, [activeFileTarget?.friendNumber, activeFileTarget?.profileId]);
+  }, [activeFileTarget?.friendNumber, activeFileTarget?.profileId, activeFileTarget?.expectedPublicKey, activeFileTarget?.expectedContactIncarnation, viewKey]);
 
   useEffect(() => {
     if (!platformCapabilities.nativeFilesystem) return;
@@ -3299,12 +3634,16 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
         const target = activeFileTargetRef.current;
         const matches = target !== null
           && target.profileId === event.payload.profileId
-          && target.friendNumber === event.payload.friendNumber;
+          && target.friendNumber === event.payload.friendNumber
+          && target.expectedPublicKey === event.payload.expectedPublicKey
+          && target.expectedContactIncarnation === event.payload.expectedContactIncarnation
+          && event.payload.viewLeaseId === viewOwnerRef.current.leaseId;
         if (disposed || !matches) {
           discardNativeSelections(event.payload.batch.accepted);
           return;
         }
-        stageNativeFileBatch(event.payload.batch, target);
+        if (isWebgateProfileId(target.profileId)) void stageRemoteNativeFiles(event.payload, target);
+        else stageNativeFileBatch(event.payload.batch, target);
       }),
       listen<string>("native-file-drop-error", (event) => {
         resetFileDrag();
@@ -3325,7 +3664,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
       disposed = true;
       for (const dispose of unlisten) dispose();
     };
-  }, [discardNativeSelections, keepFileDragReady, language, resetFileDrag, stageNativeFileBatch]);
+  }, [discardNativeSelections, keepFileDragReady, language, resetFileDrag, stageNativeFileBatch, stageRemoteNativeFiles]);
 
   useEffect(() => {
     nativeFilePickRevisionRef.current += 1;
@@ -3380,17 +3719,43 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
     scheduleDraftSave();
   }, [scheduleDraftSave]);
 
-  async function submitSendOperation(operation: PendingSend): Promise<boolean> {
+  function orderedWebQueuedSends() {
+    return Object.values(pendingSendOperationsRef.current)
+      .filter((operation): operation is WebQueuedSend => operation.webQueuedAt !== undefined)
+      .sort((a, b) => a.webQueuedAt - b.webQueuedAt);
+  }
+
+  function syncWebQueuedSends() {
+    setWebQueuedSends(orderedWebQueuedSends());
+  }
+
+  async function submitSendOperation(operation: PendingSend, retry = false): Promise<boolean> {
     const resolved = resolveOutgoingTarget(operation, activeProfileId, coreFriendsRef.current);
     let target: PqContactTarget;
     try {
       if (!resolved) throw new Error("CHAT_CONTACT_IDENTITY_CHANGED");
       target = capturePqTarget(resolved.friendNumber, resolved.expectedPublicKey);
+      if ((operation.expectedContactIncarnation ?? 0) !== target.expectedContactIncarnation) {
+        delete pendingSendOperationsRef.current[operation.operationId];
+        webSendRetryRef.current.delete(operation.operationId);
+        webFinishedSendIdsRef.current.add(operation.operationId);
+        syncWebQueuedSends();
+        setFailedSends((items) => items.filter((item) => item.operationId !== operation.operationId));
+        void persistLocalState();
+        return false;
+      }
     } catch {
       if (pqProfileOwnerRef.current.profileId === operation.profileId) showTransferNotice(language === "ru" ? "Контакт удалён или изменился. Повторная отправка остановлена." : "The contact was removed or changed. Retry stopped.");
       return false;
     }
     if (deletingContactKeysRef.current.has(target.statusKey)) return false;
+    const web = platformCapabilities.browserAuthorization;
+    const automatic = web && operation.webQueuedAt !== undefined;
+    const inFlightKey = web ? target.statusKey : `native:${operation.operationId}`;
+    if (sendInFlightRef.current.has(inFlightKey)
+      || (automatic && pendingSendOperationsRef.current[operation.operationId] !== operation)
+      || (!web && retry && pendingSendOperationsRef.current[operation.operationId] !== operation)) return false;
+    sendInFlightRef.current.add(inFlightKey);
     const existingRetry = !!pendingSendOperationsRef.current[operation.operationId];
     if (!existingRetry) {
       freshSendAdmissionsRef.current.add(operation.operationId);
@@ -3401,23 +3766,59 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
     const forgetOwnedOperation = () => {
       if (!currentProfileOwner(target)) return;
       const pending = pendingSendOperationsRef.current[operation.operationId];
-      if (pending?.profileId === target.profileId && pending.chatId === target.chatId) delete pendingSendOperationsRef.current[operation.operationId];
+      if (pending?.profileId === target.profileId && pending.chatId === target.chatId) {
+        delete pendingSendOperationsRef.current[operation.operationId];
+        if (web) webFinishedSendIdsRef.current.add(operation.operationId);
+      }
+      if (automatic) {
+        webSendRetryRef.current.delete(operation.operationId);
+        syncWebQueuedSends();
+      }
       setFailedSends((items) => !currentProfileOwner(target) ? items : items.filter((item) => item.profileId !== target.profileId || item.chatId !== target.chatId || item.operationId !== operation.operationId));
       void persistLocalState();
     };
-    if (ownsView()) resumedHistoryAnchorRef.current = null;
+    const sendContainer = messageScrollRef.current;
+    const followLiveTail = ownsView() && !historyHasAfter && sendContainer !== null
+      && shouldPrepaintOutgoing(sendContainer.scrollHeight - sendContainer.scrollTop - sendContainer.clientHeight, sendContainer.clientHeight);
+    // Admission does not change a reader's navigation intent. Only a view
+    // already at the live end follows the local queued row automatically.
+    if (followLiveTail) resumedHistoryAnchorRef.current = null;
+    let nativeSendAccepted = false;
+    if (!web) {
+      if (followLiveTail
+        && !nativePendingSends.some((item) => item.operation.operationId === operation.operationId)
+        && !(messageSnapshotChatRef.current === target.chatId && historyOperationIds.has(operation.operationId))) {
+        nativeSendFollowTailRef.current = { operationId: operation.operationId, profileId: target.profileId, chatId: target.chatId, generation };
+      }
+      // This view is local only: preserve the exact wire operation and retain it
+      // until its durable history row takes over, even if history wins the race.
+      setNativePendingSends((items) => items.some((item) => item.operation.operationId === operation.operationId)
+        ? items : [...items, { operation, queuedAt: Date.now(), delivery: "pending" }]);
+    }
     try {
-      const { chatId: _chatId, ...args } = resolved!;
+      const { chatId: _chatId, webQueuedAt: _webQueuedAt, failureKind: _failureKind, ...args } = resolved!;
       const result = await invoke<SendResult>("send_tox_message", args);
+      if (automatic && !result?.messageId) throw new SyntaxError("Invalid send response");
       if (!result?.messageId || result.delivery === "cancelled" || result.delivery === "unknown_recovered") {
         forgetOwnedOperation();
         return false;
       }
+      if (!web) {
+        nativeSendAccepted = true;
+        setNativePendingSends((items) => items.map((item) => item.operation.operationId === operation.operationId
+          && item.operation.profileId === target.profileId && item.operation.chatId === target.chatId
+          ? { ...item, messageId: result.messageId, delivery: result.delivery } : item));
+      }
       // A renumbered/deleted peer must not strand an already accepted fresh
       // request as a retry. Remove only its exact owner-bound operation record.
+      if (automatic && operation.webQueuedAt !== undefined && currentProfileOwner(target)
+        && pendingSendOperationsRef.current[operation.operationId] === operation) {
+        const acceptedOperation = { ...operation, webQueuedAt: operation.webQueuedAt };
+        setWebAcceptedSends((items) => [...items, { operation: acceptedOperation, messageId: result.messageId, delivery: result.delivery }]);
+      }
       forgetOwnedOperation();
       if (!currentPqTarget(target)) return true;
-      if (ownsView()) {
+      if (ownsView() || (automatic && activeChatRef.current === target.chatId)) {
         setPromotedActivityId(target.chatId);
         setMessageRefreshRequest((current) => current + 1);
         void refreshPqStatus(target.friendNumber, target.expectedPublicKey).catch(() => {});
@@ -3425,7 +3826,21 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
       return true;
     } catch (error) {
       freshSendAdmissionsRef.current.delete(operation.operationId);
-      if (/PQ_SHUTDOWN_IN_PROGRESS|PQ_SHUTDOWN_RECOVERY_WAIT/.test(String(error))) {
+      if (pqErrorCode(error) === "CHAT_CONTACT_INCARNATION_CHANGED") {
+        forgetOwnedOperation();
+        // Refresh the contact only after discarding this rejected intent. Old
+        // operation bytes never receive the new incarnation token.
+        try {
+          const saved = await invoke<LocalState | null>("load_local_state", { profileId: target.profileId });
+          if ((contactIncarnationsRef.current[target.expectedPublicKey] ?? 0) === target.expectedContactIncarnation) {
+            adoptContactIncarnation(target, target.expectedPublicKey, saved);
+            void persistLocalState();
+          }
+        } catch { /* Keep the stale token fenced until a successful reload. */ }
+        if (currentProfileOwner(target)) showTransferNotice(language === "ru" ? "Контакт был удалён и добавлен заново. Старая отправка отменена." : "The contact was removed and added again. The old send was cancelled.");
+        return false;
+      }
+      if (!web && /PQ_SHUTDOWN_IN_PROGRESS|PQ_SHUTDOWN_RECOVERY_WAIT/.test(String(error))) {
         // Handle explicit non-admission even if the numeric route changed while
         // IPC was pending. It must never leak into a later plaintext retry.
         if (!existingRetry) forgetOwnedOperation();
@@ -3435,29 +3850,148 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
         }, language));
         return false;
       }
-      if (!currentPqTarget(target) || deletingContactKeysRef.current.has(target.statusKey)
+      if (!(automatic ? currentProfileOwner(target) : currentPqTarget(target))
+        || deletingContactKeysRef.current.has(target.statusKey)
         || !pendingSendOperationsRef.current[operation.operationId]) {
         if (!existingRetry) forgetOwnedOperation();
         return false;
       }
-      // Only an unconfirmed failure may create a retry, still under its owner/key.
-      setFailedSends((items) => !currentPqTarget(target) ? items : items.some((item) => item.operationId === operation.operationId) ? items : [...items, operation]);
+      const pending = pendingSendOperationsRef.current[operation.operationId];
+      if (pending.profileId !== target.profileId || pending.chatId !== target.chatId) return false;
+      const rejectionCode = pqErrorCode(error);
+      // Only these typed responses prove non-admission. Other failures stay unknown.
+      let retryOperation: PendingSend = { ...operation, failureKind: web
+        && (rejectionCode === "PQ_SHUTDOWN_IN_PROGRESS" || rejectionCode === "PQ_SHUTDOWN_RECOVERY_WAIT")
+        ? "rejected" : "unknown" };
+      if (automatic) {
+        // These failures leave backend admission uncertain. Replay the same
+        // operation and payload; an explicit application rejection stays manual.
+        const transportFailure = error instanceof TypeError || error instanceof SyntaxError
+          || (error instanceof DOMException && error.name === "TimeoutError")
+          || (error instanceof Error && /^HTTP_(?:408|425|429|50[234])$/.test(error.message));
+        if (transportFailure) {
+          const attempts = (webSendRetryRef.current.get(operation.operationId)?.attempts ?? 0) + 1;
+          webSendRetryRef.current.set(operation.operationId, {
+            attempts,
+            retryAt: performance.now() + Math.min(30_000, 1_000 * 2 ** Math.min(attempts - 1, 5)),
+          });
+          return false;
+        }
+        retryOperation = { ...retryOperation, webQueuedAt: undefined };
+        webSendRetryRef.current.delete(operation.operationId);
+      }
+      pendingSendOperationsRef.current[operation.operationId] = retryOperation;
+      if (automatic) syncWebQueuedSends();
+      setFailedSends((items) => {
+        if (!(automatic ? currentProfileOwner(target) : currentPqTarget(target))) return items;
+        const matches = (item: PendingSend) => item.profileId === target.profileId
+          && item.chatId === target.chatId && item.operationId === operation.operationId;
+        return items.some(matches) ? items.map((item) => matches(item) ? retryOperation : item) : [...items, retryOperation];
+      });
       void persistLocalState();
       if (ownsView()) showTransferNotice(formatPqUserFacingError(error, { ru: "Не удалось отправить сообщение", en: "Could not send the message" }, language));
       return false;
     } finally {
+      if (!web && !nativeSendAccepted) {
+        setNativePendingSends((items) => items.filter((item) => item.operation.operationId !== operation.operationId
+          || item.operation.profileId !== target.profileId || item.operation.chatId !== target.chatId));
+      }
       freshSendAdmissionsRef.current.delete(operation.operationId);
+      sendInFlightRef.current.delete(inFlightKey);
+      if (web) {
+        drainWebSendsRef.current();
+      }
     }
   }
+
+  drainWebSendsRef.current = (reconnected = false) => {
+    if (!appOwnerMountedRef.current || navigator.onLine === false
+      || profileSwitchRequestRef.current || profileSwitching) return;
+    const visited = new Set<string>();
+    for (const operation of orderedWebQueuedSends()) {
+      if (operation.profileId !== activeProfileId || visited.has(operation.chatId)) continue;
+      visited.add(operation.chatId);
+      const retry = webSendRetryRef.current.get(operation.operationId);
+      if ((!reconnected && retry && retry.retryAt > performance.now())
+        || !resolveOutgoingTarget(operation, activeProfileId, coreFriendsRef.current)) continue;
+      void submitSendOperation(operation);
+    }
+  };
+  useEffect(() => {
+    if (!platformCapabilities.browserAuthorization || !webQueuedSends.length) return;
+    const drain = () => drainWebSendsRef.current();
+    const reconnect = () => drainWebSendsRef.current(true);
+    const timer = window.setInterval(drain, 1_000);
+    window.addEventListener("online", reconnect);
+    window.addEventListener("kaigen:web-connection-ready", reconnect);
+    drain();
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener("online", reconnect);
+      window.removeEventListener("kaigen:web-connection-ready", reconnect);
+    };
+  }, [activeProfileId, webQueuedSends.length]);
+
+  const historyOperationIds = useMemo(() => new Set(messages.map((message) => message.operationId)), [messages]);
+  const historyMessageIds = useMemo(() => new Set(messages.map((message) => message.coreId)), [messages]);
+  useEffect(() => {
+    if (!webAcceptedSends.length || messageSnapshotChatRef.current !== active.id) return;
+    const remaining = webAcceptedSends.filter(({ operation, messageId }) =>
+      operation.profileId !== activeProfileId || operation.chatId !== active.id
+      || (!historyMessageIds.has(messageId) && !historyOperationIds.has(operation.operationId)));
+    if (remaining.length !== webAcceptedSends.length) setWebAcceptedSends(remaining);
+  }, [active.id, activeProfileId, webAcceptedSends, historyMessageIds, historyOperationIds]);
+
+  useEffect(() => {
+    if (!nativePendingSends.length || messageSnapshotChatRef.current !== active.id) return;
+    const remaining = nativePendingSends.filter(({ operation, messageId }) =>
+      operation.profileId !== activeProfileId || operation.chatId !== active.id
+      || (!historyOperationIds.has(operation.operationId) && !(messageId && historyMessageIds.has(messageId))));
+    if (remaining.length !== nativePendingSends.length) setNativePendingSends(remaining);
+  }, [active.id, activeProfileId, nativePendingSends, historyMessageIds, historyOperationIds]);
+
+  useLayoutEffect(() => {
+    const follow = nativeSendFollowTailRef.current;
+    if (!follow) return;
+    // Consume the admission once. An unrelated RPC result or history update
+    // must not replay a previous send's scroll after the user reads above.
+    nativeSendFollowTailRef.current = null;
+    if (follow.profileId !== activeProfileId || follow.chatId !== active.id
+      || follow.generation !== viewOwnerRef.current.generation
+      || !nativePendingSends.some((item) => item.operation.operationId === follow.operationId
+        && item.operation.profileId === follow.profileId && item.operation.chatId === follow.chatId)) return;
+    pendingPreserveAnchorRef.current = null;
+    scrollToBottomGuaranteed();
+  }, [active.id, activeProfileId, nativePendingSends]);
+
+  useLayoutEffect(() => {
+    const follow = webSendFollowTailRef.current;
+    const container = messageScrollRef.current;
+    webSendFollowTailRef.current = null;
+    if (!container || follow?.profileId !== activeProfileId || follow.chatId !== active.id) return;
+    markAutomaticScroll();
+    container.scrollTop = container.scrollHeight;
+  }, [active.id, activeProfileId, webQueuedSends]);
 
   async function sendMessage(text: string, formatting?: readonly ChatFormattingSpan[], reply?: ChatQuote | null): Promise<boolean> {
     if (!text.trim() || active.friendNumber === undefined || !activeProfileId || !active.publicKey) return false;
     let target: PqContactTarget;
     try { target = capturePqTarget(active.friendNumber, active.publicKey); } catch { return false; }
     if (deletingContactKeysRef.current.has(target.statusKey)) return false;
-    const operation: PendingSend = { operationId: crypto.randomUUID(), profileId: target.profileId, friendNumber: target.friendNumber, expectedPublicKey: target.expectedPublicKey, chatId: target.chatId, text, formatting: chatCapabilities.formatting ? formatting : [], quote: reply ?? replyQuote ?? undefined };
+    const operation: PendingSend = { operationId: crypto.randomUUID(), profileId: target.profileId, friendNumber: target.friendNumber, expectedPublicKey: target.expectedPublicKey, expectedContactIncarnation: target.expectedContactIncarnation, chatId: target.chatId, text, formatting: chatCapabilities.formatting ? formatting : [], quote: reply ?? replyQuote ?? undefined };
     // The composer owns clearing text/format/reply after accepted=true and its
     // unchanged owner/revision checks. Do not change its props before that guard.
+    if (platformCapabilities.browserAuthorization) {
+      const container = messageScrollRef.current;
+      if (container && !historyHasAfter && container.scrollHeight - container.scrollTop - container.clientHeight <= 16) {
+        webSendFollowTailRef.current = { profileId: target.profileId, chatId: target.chatId };
+      }
+      operation.webQueuedAt = webSendQueueTimeRef.current = Math.max(Date.now(), webSendQueueTimeRef.current + 1);
+      pendingSendOperationsRef.current[operation.operationId] = operation;
+      syncWebQueuedSends();
+      // The composer's draft update saves the queue and cleared draft together.
+      return true;
+    }
     return submitSendOperation(operation);
   }
   sendMessageRef.current = sendMessage;
@@ -3492,15 +4026,19 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
     const target = activeFileTargetRef.current;
     if (!target) return;
     const revision = ++nativeFilePickRevisionRef.current;
-    void invoke<NativeFileBatchSelection>("pick_tox_files", { friendNumber: target.friendNumber }).then((batch) => {
+    void invoke<NativeFileBatchSelection>("pick_tox_files", { friendNumber: target.friendNumber, expectedPublicKey: target.expectedPublicKey, expectedContactIncarnation: target.expectedContactIncarnation }).then((batch) => {
       if (!batch.selectedCount) return;
       if (revision !== nativeFilePickRevisionRef.current || !sameChatFileTarget(activeFileTargetRef.current, target)) {
         discardNativeSelections(batch.accepted);
         return;
       }
       stageNativeFileBatch(batch, target);
-    }).catch((error) => {
+    }).catch(async (error) => {
       if (revision !== nativeFilePickRevisionRef.current || !sameChatFileTarget(activeFileTargetRef.current, target)) return;
+      if (pqErrorCode(error) === "CHAT_CONTACT_INCARNATION_CHANGED") {
+        await refreshContactIncarnation(target.profileId, target.expectedPublicKey);
+        return;
+      }
       showTransferNotice(formatUserFacingError(error, { ru: "Не удалось подготовить файл", en: "Could not prepare the file" }, language));
     });
   }, [discardNativeSelections, language, stageNativeFileBatch]);
@@ -3541,7 +4079,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
     if (attachment.transferState === "awaiting_confirmation") return mine ? "Файл отправлен, ожидается подтверждение получателя" : "Файл ожидает вашего подтверждения";
     if (attachment.transferState === "paused") return mine ? "Передача приостановлена" : "Получение приостановлено";
     if (attachment.transferState === "cancelled") return mine ? "Передача отменена" : "Получение отменено";
-    if (attachment.transferState === "failed") return formatUserFacingError(attachment.error, { ru: "Передача не завершена", en: "File transfer failed" }, language);
+    if (attachment.transferState === "failed") return formatUserFacingError(attachment.error, { ru: "Передача не завершена", en: "File transfer failed" }, language, false);
     const action = t(mine ? "Отправка" : "Получение");
     const speed = attachment.speed ?? 0;
     return speed
@@ -3557,13 +4095,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
     if (attachment.transferState === "queued") return mine ? "Ожидает отправки" : "Ожидает получения";
     if (attachment.transferState === "awaiting_confirmation") return "Ожидание подтверждения";
     if (attachment.transferState === "paused") return mine ? "Передача приостановлена" : "Получение приостановлено";
-    if (attachment.transferState === "cancelled") {
-      return attachment.error
-        ? formatUserFacingError(attachment.error, mine
-          ? { ru: "Передача отменена получателем", en: "The recipient cancelled the transfer" }
-          : { ru: "Передача отменена отправителем", en: "The sender cancelled the transfer" }, language)
-        : (mine ? "Передача отменена" : "Получение отменено");
-    }
+    if (attachment.transferState === "cancelled") return t(mine ? "Передача отменена" : "Получение отменено");
     if (attachment.transferState === "failed") return "Ошибка передачи";
     return mine ? "Отправка файла" : "Получение файла";
   }
@@ -3580,6 +4112,27 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
     });
   }
 
+  function hasLocalWebgateAttachment(message: Message): boolean {
+    const path = message.attachment?.path;
+    return platformCapabilities.nativeFilesystem && isWebgateProfileId(activeProfileId) && !!message.coreId
+      && !!path?.startsWith("browser-stream://")
+      && localWebgateDownloads.has(JSON.stringify([message.coreId, path.slice("browser-stream://".length)]));
+  }
+
+  function localWebgateAttachmentAction(message: Message, action: "open" | "reveal" | "copy", image = false) {
+    const path = message.attachment?.path;
+    if (!message.coreId || !path?.startsWith("browser-stream://")) return Promise.reject(new Error("WEBGATE_LOCAL_DOWNLOAD_UNAVAILABLE"));
+    return invoke<void>("webgate_local_download_action", { profileId: activeProfileId,
+      messageId: message.coreId, transferId: path.slice("browser-stream://".length), action, image });
+  }
+
+  function runLocalWebgateAttachmentAction(message: Message, action: "open" | "reveal" | "copy", image = false) {
+    void localWebgateAttachmentAction(message, action, image).then(() => setGeneralContext(null)).catch((error) => {
+      setLocalWebgateDownloadRevision((revision) => revision + 1);
+      showTransferNotice(formatUserFacingError(error, { ru: "Локальный файл недоступен", en: "Local file is unavailable" }, language));
+    });
+  }
+
   function downloadWebAttachment(message: Message) {
     if (!message.coreId || !message.attachment?.path || active.friendNumber === undefined) return;
     const messageId = message.coreId;
@@ -3591,8 +4144,56 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
       { ru: "Не удалось скачать файл", en: "Could not download file" }, language)));
   }
 
+  function attachmentFileRequest(message: Message, allowOutgoing = false): AttachmentFileRequest | null {
+    if ((!allowOutgoing && message.mine) || !message.coreId || !message.attachment?.completed
+      || message.attachment.unavailableLocally || !message.attachment.path || active.friendNumber === undefined) return null;
+    return { profileId: activeProfileId, friendNumber: active.friendNumber,
+      messageId: message.coreId, path: message.attachment.path, name: message.attachment.name };
+  }
+
+  function saveReceivedFileCopy(message: Message) {
+    const request = attachmentFileRequest(message);
+    if (!request || fileCopyAbortRef.current) return;
+    const controller = new AbortController();
+    fileCopyAbortRef.current = controller;
+    setSavingFileKey(request.messageId);
+    setGeneralContext(null);
+    void saveAttachmentCopy(request, language === "ru" ? "Сохранить копию файла — выберите папку" : "Save a file copy — choose a folder", controller.signal, language)
+      .then((result) => {
+        if (controller.signal.aborted || result === "cancelled") return;
+        showTransferNotice(result === "shared"
+          ? language === "ru" ? "Файл передан в системное меню" : "File sent to the system menu"
+          : result === "downloaded"
+          ? language === "ru" ? "Копия передана в загрузки браузера. Выбор папки зависит от настроек браузера." : "The copy was sent to browser downloads. Folder selection depends on browser settings."
+          : language === "ru" ? "Копия файла сохранена" : "File copy saved");
+      }).catch((error) => {
+        if (!controller.signal.aborted) showTransferNotice(formatUserFacingError(error,
+          { ru: "Не удалось сохранить копию файла", en: "Could not save the file copy" }, language));
+      }).finally(() => {
+        if (fileCopyAbortRef.current === controller) { fileCopyAbortRef.current = null; setSavingFileKey(null); }
+      });
+  }
+
+  function revealReceivedFile(message: Message) {
+    const request = attachmentFileRequest(message);
+    if (!request) return;
+    if (nativeProfileFilesystem) { showAttachmentInFolder(request.path); return; }
+    if (!platformCapabilities.nativeFilesystem) { saveReceivedFileCopy(message); return; }
+    const target = activeFileTargetRef.current;
+    const args = { profileId: request.profileId, messageId: request.messageId,
+      transferId: request.path.slice("browser-stream://".length), action: "reveal" };
+    void invoke("webgate_local_download_action", args).catch(async (error) => {
+      if (!String(error).includes("WEBGATE_LOCAL_DOWNLOAD_UNAVAILABLE")) throw error;
+      await invoke("download_web_transfer", request);
+      if (target && sameChatFileTarget(activeFileTargetRef.current, target)) await invoke("webgate_local_download_action", args);
+    }).catch((error) => {
+      if (target && sameChatFileTarget(activeFileTargetRef.current, target)) showTransferNotice(formatUserFacingError(error,
+        { ru: "Не удалось показать файл в папке", en: "Could not show the file in its folder" }, language));
+    });
+  }
+
   function revealAttachmentImage(message: Message) {
-    if (!message.coreId || !message.attachment) return;
+    if (!message.coreId || !message.attachment || message.attachment.unavailableLocally) return;
     setRevealedImages((current) => current.includes(message.coreId!) ? current : [...current, message.coreId!]);
     const attachmentPath = message.attachment.path;
     if (attachmentPath?.startsWith("browser-stream://")) {
@@ -3683,6 +4284,22 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
     }).then(() => clearTransferError(message.coreId!)).catch((error) => setTransferError(message.coreId!, error));
   }
 
+  function renderAttachmentTransferControls(message: Message, header = false) {
+    const attachment = message.attachment;
+    if (!attachment || attachment.completed) return null;
+    if (isTerminalTransferState(attachment.transferState)) {
+      if (!platformCapabilities.outgoingTransferRetry || !message.mine || attachment.transferState !== "failed") return null;
+      return <div className="attachment-transfer-actions"><button type="button" className="transfer-control transfer-retry" aria-label={t("Повторить передачу")} title={t("Повторить передачу")} onClick={() => retryAttachmentTransfer(message)}>↻</button></div>;
+    }
+    const paused = attachment.transferState === "paused";
+    const pauseLabel = t(paused ? "Продолжить передачу" : "Приостановить передачу");
+    return <div className={`attachment-transfer-actions${header ? " attachment-transfer-actions-header" : ""}`}>
+      {!message.mine && attachment.transferState === "awaiting_confirmation" && <button type="button" className="transfer-control transfer-retry transfer-accept" disabled={!canAcceptIncomingFile(message.mine, attachment)} aria-label={t("Принять файл")} title={t("Принять файл")} onClick={() => controlAttachmentTransfer(message, "resume")}><svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false"><path d="m3.5 8 3 3 6-6" /></svg></button>}
+      {attachment.transferState !== "queued" && attachment.transferState !== "awaiting_confirmation" && <button type="button" className={`transfer-control ${paused ? "transfer-resume" : "transfer-pause"}`} aria-label={pauseLabel} title={pauseLabel} onClick={() => controlAttachmentTransfer(message, paused ? "resume" : "pause")}>{paused ? "▶" : "Ⅱ"}</button>}
+      <button type="button" className="transfer-control transfer-cancel" aria-label={t("Отменить передачу")} title={t("Отменить передачу")} onClick={() => controlAttachmentTransfer(message, "cancel")}>×</button>
+    </div>;
+  }
+
   async function confirmFileSend() {
     if (!pendingFiles.length || fileSendBusyRef.current) return;
     if (!activeFileTarget || !pendingFiles.every((file) => sameChatFileTarget(activeFileTarget, file))) {
@@ -3699,9 +4316,21 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
       let queued = 0;
       for (const selection of pendingFiles) {
         try {
-          await sendFile(selection.profileId, selection.friendNumber, selection.file, selection.grantToken);
+          await sendFile(selection.profileId, selection.friendNumber, selection.file, selection.expectedPublicKey, selection.grantToken, selection.expectedContactIncarnation);
           queued += 1;
         } catch (error) {
+          if (pqErrorCode(error) === "CHAT_CONTACT_INCARNATION_CHANGED") {
+            if (selection.grantToken) discardNativeSelections([{ grantToken: selection.grantToken, name: selection.file.name, mime: selection.file.type, size: selection.size }]);
+            try {
+              const owner = captureProfileOwner();
+              const saved = await invoke<LocalState | null>("load_local_state", { profileId: selection.profileId });
+              if (owner.profileId === selection.profileId) adoptContactIncarnation(owner, selection.expectedPublicKey, saved);
+            } catch { /* The rejected selection remains discarded. */ }
+            const notice = language === "ru" ? "Контакт был удалён и добавлен заново. Выберите файл повторно." : "The contact was removed and added again. Select the file again.";
+            failureNotices.push(notice);
+            showTransferNotice(notice);
+            continue;
+          }
           failed.push(selection);
           failureNotices.push(`${selection.file.name}: ${formatUserFacingError(error, { ru: "не удалось добавить файл в очередь", en: "could not queue the file" }, language)}`);
         }
@@ -3760,7 +4389,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
   function copyAttachmentToClipboard(path: string | undefined, image: boolean) {
     if (!path) return;
     const operation = image
-      ? !platformCapabilities.nativeFilesystem
+      ? !nativeProfileFilesystem
         ? copyDecodedImage(path)
         : copyDecodedImage(path).catch(() => invoke("copy_attachment_to_clipboard", { path, image: true }))
       : invoke("copy_attachment_to_clipboard", { path, image: false });
@@ -3787,16 +4416,25 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
 
   function openAddContact() {
     setContactToxId("");
-    // Browser clipboard reads can open a permission menu and steal the input's focus.
-    // Web contacts use the browser's normal paste gesture; desktop keeps its prefill.
-    if (!platformCapabilities.browserAuthorization) {
+    // Browser clipboard reads can open a permission menu and steal focus,
+    // including in the native macOS WebView. Let the contact field take normal Paste there.
+    if (!platformCapabilities.browserAuthorization && !/^Mac/iu.test(navigator.platform)) {
       contactClipboardRef.current.begin(() => navigator.clipboard.readText(), setContactToxId);
     }
     setScreen("chat");
     setActiveChat("");
+    setCompactChatOpen(false);
     setIncomingRequestsOpen(false);
     setAddContactOpen(true);
     setAddContactStatus(null);
+  }
+
+  function openFriendRequests() {
+    setProfileDrawerOpen(false);
+    setCompactChatOpen(false);
+    setAddContactOpen(false);
+    setScreen("chat");
+    setIncomingRequestsOpen(true);
   }
 
   function openProfileSettings() {
@@ -3823,13 +4461,13 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
       .catch((error) => showTransferNotice(formatUserFacingError(error, { ru: "Не удалось открыть папку downloads", en: "Could not open the downloads folder" }, language)));
   }
 
-  function updatePqStatus(command: "request_pq_session" | "withdraw_pq_session" | "accept_pq_session" | "reject_pq_session" | "request_pq_shutdown" | "cancel_pq_shutdown", allowLegacy = false) {
+  function updatePqStatus(command: "request_pq_session" | "withdraw_pq_session" | "accept_pq_session" | "reject_pq_session" | "request_pq_shutdown" | "cancel_pq_shutdown") {
     if (active.friendNumber === undefined || !active.publicKey || deletingContactKeysRef.current.has(pqContactKey(activeProfileId, active.publicKey))) return;
     let target: PqContactTarget;
     try { target = capturePqTarget(active.friendNumber, active.publicKey); }
     catch { showTransferNotice(language === "ru" ? "Контакт изменился. Откройте его чат заново." : "The contact changed. Open its chat again."); return; }
     const revision = beginPqStatusRequest(target);
-    void invoke<PqStatus>(command, { ...pqContactArgs(target), ...(command === "request_pq_session" ? { allowLegacy } : {}) })
+    void invoke<PqStatus>(command, pqContactArgs(target))
       .then((status) => {
         if (!currentPqTarget(target, revision)) return;
         applyPqStatus(target, status, revision);
@@ -3867,7 +4505,10 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
       const row = element.getBoundingClientRect();
       return { key: element.dataset.messageKey!, top: row.top, bottom: row.bottom };
     });
-    return captureChatAnchor(rows, box.top, box.height, container.scrollHeight - container.scrollTop - container.clientHeight);
+    const anchor = captureChatAnchor(rows, box.top, box.height, container.scrollHeight - container.scrollTop - container.clientHeight);
+    // Geometry near the end does not opt a reader back into live following.
+    // Automatic scroll events also persist anchors through this helper.
+    return anchor && !followLatestRef.current ? { ...anchor, atBottom: false } : anchor;
   }
 
   function restoreViewAnchor(anchor: ChatViewAnchor): boolean {
@@ -3991,6 +4632,47 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
     return document.hasFocus() && chatViewportAvailable();
   }
 
+  useEffect(() => {
+    if (platformCapabilities.nativeFilesystem) return;
+    const dispatch = (detail: { profileId: string; target: string } | null) => {
+      window.dispatchEvent(new CustomEvent(NOTIFICATION_VIEW_EVENT, { detail }));
+    };
+    const clear = () => dispatch(null);
+    const publish = () => {
+      if (!activeProfileId || !persistenceReady || profileSwitching || profileSwitchPending
+        || document.visibilityState !== "visible" || !document.hasFocus()) {
+        clear();
+        return;
+      }
+      if (localViewAllowed() && /^[0-9a-f]{64}$/iu.test(active.publicKey ?? "")) {
+        dispatch({ profileId: activeProfileId, target: `friend-key:${active.publicKey!.toUpperCase()}` });
+        return;
+      }
+      const requestsVisible = screen === "chat" && incomingRequestsOpen && !addContactOpen
+        && !profileDrawerOpen && !ownActionsOpen && !fullMedia && !expandedMediaKey
+        && pendingFiles.length === 0 && !contactAction && !groupAction
+        && !contactContext && !generalContext && !groupContext;
+      dispatch(requestsVisible ? { profileId: activeProfileId, target: "requests" } : null);
+    };
+    publish();
+    window.addEventListener(NOTIFICATION_VIEW_QUERY_EVENT, publish);
+    window.addEventListener("focus", publish);
+    window.addEventListener("blur", clear);
+    window.addEventListener("pagehide", clear);
+    document.addEventListener("visibilitychange", publish);
+    return () => {
+      window.removeEventListener(NOTIFICATION_VIEW_QUERY_EVENT, publish);
+      window.removeEventListener("focus", publish);
+      window.removeEventListener("blur", clear);
+      window.removeEventListener("pagehide", clear);
+      document.removeEventListener("visibilitychange", publish);
+      clear();
+    };
+  }, [activeProfileId, active.id, active.publicKey, persistenceReady, profileSwitching, profileSwitchPending,
+    screen, compactMode, compactChatOpen, incomingRequestsOpen, addContactOpen, profileDrawerOpen,
+    ownActionsOpen, fullMedia, expandedMediaKey, pendingFiles.length, contactAction, groupAction,
+    contactContext, generalContext, groupContext, messages]);
+
   function chatGeometryScale(container: HTMLElement): number {
     return elementGeometryScale(container);
   }
@@ -4038,14 +4720,34 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
     setShowJumpToLatest(mode === "jump");
   }
 
+  function incomingOwnsScroll() {
+    const reading = readingLongIncomingRef.current;
+    const pending = deferredIncomingScrollRef.current;
+    return (reading?.chatId === active.id && !reading.userScrolled)
+      || (pending?.chatId === active.id && !pending.userScrolled);
+  }
+
   function markVisibleIncomingMessages() {
     const container = messageScrollRef.current;
     if (!container || unseenIncomingKeysRef.current.size === 0 || !localViewAllowed()) return;
     const containerBox = container.getBoundingClientRect();
     const reading = readingLongIncomingRef.current;
     if (reading?.chatId === active.id && !reading.userScrolled) return;
+    // Do not acknowledge a new batch from a transient bottom-aligned frame
+    // before its real height has selected short-follow or long-read context.
+    // Earlier unread rows remain eligible, and a real user scroll releases it.
+    const pending = deferredIncomingScrollRef.current;
+    const waiting = pending?.chatId === active.id && !pending.userScrolled ? pending : null;
+    const first = waiting ? messagesRef.current.findIndex((message) => (message.coreId ?? String(message.id)) === waiting.messageKey) : -1;
+    const last = waiting ? messagesRef.current.findIndex((message) => (message.coreId ?? String(message.id)) === waiting.boundaryMessageKey) : -1;
+    const waitingKeys = new Set(waiting
+      ? first >= 0 && last >= first
+        ? messagesRef.current.slice(first, last + 1).map((message) => message.coreId ?? String(message.id))
+        : [waiting.messageKey, waiting.boundaryMessageKey]
+      : []);
     let changed = false;
     for (const key of [...unseenIncomingKeysRef.current]) {
+      if (waitingKeys.has(key)) continue;
       const element = messageElement(container, key);
       if (!element) continue;
       const box = element.getBoundingClientRect();
@@ -4084,7 +4786,14 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
     if (!container) return;
     if (messageKey) lastAutoScrollIntentRef.current = { chatId: active.id, messageKey, boundaryMessageKey: messageKey, intent: "outgoing" };
     setShowJumpToLatest(false);
+    const incomingAtRequest = deferredIncomingScrollRef.current;
+    const readingAtRequest = readingLongIncomingRef.current;
     const apply = () => {
+      if (!followLatestRef.current) return;
+      // The immediate explicit send/jump keeps its intent. Only later incoming
+      // context supersedes a queued tail RAF from this earlier request.
+      if (incomingOwnsScroll() && (deferredIncomingScrollRef.current !== incomingAtRequest
+        || readingLongIncomingRef.current !== readingAtRequest)) return;
       markAutomaticScroll();
       container.scrollTop = container.scrollHeight;
       const anchor = captureCurrentAnchor();
@@ -4355,7 +5064,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
       settleUntil: Math.min(existing?.settleUntil ?? Number.POSITIVE_INFINITY, Date.now() + batch.settleMs),
       userScrolled: existing?.userScrolled ?? (
         !followLatestRef.current || messageSearchOpen
-        || (previousDistance > 10 && (userScrollActiveRef.current || userScrollBlockedUntilRef.current > Date.now()))
+        || !isNearChatEnd(previousDistance)
       ),
     };
     const reading = readingLongIncomingRef.current;
@@ -4485,6 +5194,44 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
     });
   }
 
+  function canFillVirtualHistoryGap(container: HTMLDivElement): boolean {
+    const currentWindow = messageWindowRef.current;
+    return container === messageScrollRef.current && container.clientHeight > 0
+      && displayedChatActiveRef.current && viewOwnerRef.current.key === viewKey
+      && active.friendNumber !== undefined && !profileSwitching && !profileSwitchPending && !profileSwitchRequestRef.current
+      && (contactIncarnationsRef.current[historyContactKey] ?? 0) === historyContactIncarnation
+      && messageSnapshotChatRef.current === active.id && messages === messagesRef.current && messages.length > 0
+      && currentWindow.start === messageWindow.start && currentWindow.end === messageWindow.end
+      && !pendingScrollRestore.current && !pendingNavigationRef.current && pendingHistoryIndexRef.current === null
+      && !pendingPreserveAnchorRef.current && !deferredOutgoingScrollRef.current && !incomingOwnsScroll();
+  }
+
+  function estimatedHistoryViewport(container: HTMLDivElement) {
+    const scale = chatGeometryScale(container);
+    const firstRow = container.querySelector<HTMLElement>("[data-message-key]");
+    const dataOrigin = firstRow
+      ? (firstRow.getBoundingClientRect().top - container.getBoundingClientRect().top) / scale + container.scrollTop - historyOffsets[messageWindow.start]
+      : Math.max(0, historyWindowStart - accessibleHistoryStart) * 64;
+    const localOffset = container.scrollTop - dataOrigin;
+    const dataHeight = historyOffsets[messages.length];
+    // The viewport can start in the leading padding and still overlap the history.
+    const index = messages.length && localOffset < dataHeight && localOffset + container.clientHeight > 0
+      ? historyIndexAtOffset(historyOffsets, Math.max(0, localOffset)) : -1;
+    const anchor: ChatViewAnchor | null = index >= 0 && localOffset >= 0
+      ? { messageKey: messageKeys[index], offset: (historyOffsets[index] - localOffset) * scale, atBottom: false }
+      : null;
+    return { index, localOffset, dataHeight, anchor };
+  }
+
+  function revealLoadedHistoryGap(container: HTMLDivElement) {
+    if ((messageWindow.start === 0 && messageWindow.end === messages.length) || !canFillVirtualHistoryGap(container)) return;
+    const { index, anchor } = estimatedHistoryViewport(container);
+    if (index < 0 || (index >= messageWindow.start && index < messageWindow.end)
+      || messageKeys[index] === windowAnchorKey || captureCurrentAnchor()) return;
+    if (!followLatestRef.current) pendingPreserveAnchorRef.current = anchor;
+    setWindowAnchorKey(messageKeys[index]);
+  }
+
   function updateLatestButton() {
     const container = messageScrollRef.current;
     if (!container) return;
@@ -4497,13 +5244,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
       }
     }
     if (pendingScrollRestore.current === active.id) return;
-    const anchor = captureCurrentAnchor();
-    if (active.id && anchor) scrollAnchorsRef.current[active.id] = anchor;
-    markVisibleIncomingMessages();
-    syncReturnAnchor();
     const distance = Math.max(0, container.scrollHeight - container.scrollTop - container.clientHeight);
-    historyFarFromLatestRef.current = distance > container.clientHeight * 2;
-    const hasUnseen = unseenIncomingKeysRef.current.size > 0;
     const now = Date.now();
     const userInitiated = shouldPublishNavigationForScroll(
       now,
@@ -4511,32 +5252,38 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
       userScrollActiveRef.current,
       userScrollUiUntilRef.current,
     );
-    const fillVirtualGap = !anchor && messages.length > 0 && !pendingNavigationRef.current;
+    // A deliberate move above the end owns its reading position, including
+    // the small near-end band used for navigation hints.
+    if (userInitiated) followLatestRef.current = distance <= 10;
+    const anchor = captureCurrentAnchor();
+    if (active.id && anchor) scrollAnchorsRef.current[active.id] = anchor;
+    markVisibleIncomingMessages();
+    syncReturnAnchor();
+    historyFarFromLatestRef.current = distance > container.clientHeight * 2;
+    const hasUnseen = unseenIncomingKeysRef.current.size > 0;
+    const fillVirtualGap = !anchor && canFillVirtualHistoryGap(container);
     if (userInitiated || fillVirtualGap) {
-      if (userInitiated) followLatestRef.current = distance <= 10;
       let visibleIndex = anchor ? messageKeys.indexOf(anchor.messageKey) : -1;
       let scrollAnchor = anchor;
-      const firstRow = container.querySelector<HTMLElement>("[data-message-key]");
-      const dataOrigin = firstRow
-        ? (firstRow.getBoundingClientRect().top - container.getBoundingClientRect().top) / chatGeometryScale(container) + container.scrollTop - historyOffsets[messageWindow.start]
-        : Math.max(0, historyWindowStart - accessibleHistoryStart) * 64;
-      const localOffset = container.scrollTop - dataOrigin;
-      const dataHeight = historyOffsets[messages.length];
-      if (visibleIndex < 0 && localOffset >= 0 && localOffset < dataHeight) {
-        visibleIndex = historyIndexAtOffset(historyOffsets, localOffset);
-        scrollAnchor = { messageKey: messageKeys[visibleIndex], offset: (historyOffsets[visibleIndex] - localOffset) * chatGeometryScale(container), atBottom: false };
+      const viewport = estimatedHistoryViewport(container);
+      const { localOffset, dataHeight } = viewport;
+      if (visibleIndex < 0 && fillVirtualGap) {
+        visibleIndex = viewport.index;
+        scrollAnchor = viewport.anchor;
       }
       const globalIndex = visibleIndex >= 0 ? historyWindowStart + visibleIndex
         : Math.max(0, Math.min(historyTotal - 1, localOffset < 0 ? historyWindowStart + Math.floor(localOffset / 64) : historyWindowStart + messages.length + Math.floor((localOffset - dataHeight) / 64)));
-      if (followLatestRef.current && distance <= 10) {
+      if (followLatestRef.current && isNearChatEnd(distance)) {
         setWindowAnchorKey(null);
         if (historyHasAfter) { pendingHistoryIndexRef.current = Math.max(0, historyTotal - 1); setHistoryRequest({}); }
       } else {
-        if (visibleIndex >= 0 && (visibleIndex < messageWindow.start + 12 || visibleIndex > messageWindow.end - 40)) {
+        // A no-op window update has no layout pass to consume its reading anchor.
+        if (visibleIndex >= 0 && messageKeys[visibleIndex] !== windowAnchorKey
+          && (visibleIndex < messageWindow.start + 12 || visibleIndex > messageWindow.end - 40)) {
           pendingPreserveAnchorRef.current = scrollAnchor;
           setWindowAnchorKey(messageKeys[visibleIndex]);
         }
-        prefetchHistoryAround(globalIndex, scrollAnchor);
+        if (visibleIndex < 0 || scrollAnchor) prefetchHistoryAround(globalIndex, scrollAnchor);
       }
       if (container.scrollTop <= 32) loadOlderHistory();
     }
@@ -4555,6 +5302,9 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
     cancelPendingMessageNavigation();
     pendingPreserveAnchorRef.current = null;
     followLatestRef.current = true;
+    // This explicit navigation resumes live following, not the earlier wheel
+    // gesture's cooldown. A still-active/new gesture keeps its existing guard.
+    userScrollBlockedUntilRef.current = 0;
     const reading = readingLongIncomingRef.current;
     if (reading?.chatId === active.id) {
       reading.userScrolled = true;
@@ -4875,54 +5625,102 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
     setContactMenuOpen(false);
   }
 
+  async function removeContactForTarget(target: PqContactTarget, command: "delete_tox_friend" | "reject_incoming_friend_request") {
+    if (!appOwnerMountedRef.current) throw new Error("PROFILE_OWNER_CHANGED");
+    const args = command === "reject_incoming_friend_request"
+      ? { profileId: target.profileId, publicKey: target.expectedPublicKey, expectedContactIncarnation: target.expectedContactIncarnation }
+      : { ...pqContactArgs(target), expectedContactIncarnation: target.expectedContactIncarnation };
+    try {
+      for (let attempt = 0; ; attempt += 1) {
+        try {
+          await invoke(command, args);
+          break;
+        } catch (error) {
+          if (pqErrorCode(error) !== "TRANSFER_STORAGE_BUSY" || attempt >= 8) throw error;
+          // The previous RPC may have admitted an asynchronous purge. Poll the
+          // same contact identity only after giving the store worker time to finish.
+          await new Promise<void>((resolve) => window.setTimeout(resolve, transferRetryDelay(attempt)));
+          if (!currentPqTarget(target)) throw new Error("CHAT_CONTACT_IDENTITY_CHANGED");
+        }
+      }
+      if (command === "reject_incoming_friend_request") {
+        const remaining = await invoke<CoreFriend[]>("get_tox_friends", { profileId: target.profileId });
+        // Authorization can cross the reject RPC; that existing contact must survive.
+        if (remaining.some((friend) => friend.public_key.toUpperCase() === target.expectedPublicKey)) return;
+      }
+    } catch (error) {
+      if (pqErrorCode(error) === "CHAT_CONTACT_INCARNATION_CHANGED" && currentProfileOwner(target)) {
+        const saved = await invoke<LocalState | null>("load_local_state", { profileId: target.profileId });
+        adoptContactIncarnation(target, target.expectedPublicKey, saved);
+        showTransferNotice(language === "ru" ? "Контакт изменился. Старое действие отменено; выберите действие заново." : "The contact changed. The old action was cancelled; choose the action again.");
+      }
+      throw error;
+    }
+    // Invalidate saves captured while this RPC was pending, before re-add can run.
+    contactMutationRevisionsRef.current[target.statusKey] = (contactMutationRevisionsRef.current[target.statusKey] ?? 0) + 1;
+    if (!currentProfileOwner(target)) return;
+    const current = coreFriendsRef.current.find((friend) => friend.public_key.toUpperCase() === target.expectedPublicKey);
+    if (current && current.number !== target.friendNumber) return;
+    const numericOwner = coreFriendsRef.current.find((friend) => friend.number === target.friendNumber);
+    const ownsNumericSlot = numericOwner?.public_key.toUpperCase() === target.expectedPublicKey;
+    friendMutationRevisionRef.current += 1;
+    unreadMutationRevisionRef.current += 1;
+    pqStatusRequestsRef.current[target.statusKey] = ++pqStatusSequenceRef.current;
+    const friends = coreFriendsRef.current.filter((friend) => friend.public_key.toUpperCase() !== target.expectedPublicKey);
+    coreFriendsRef.current = friends;
+    setCoreFriends((items) => currentProfileOwner(target) ? friends : items);
+    setPqStatuses((statuses) => { if (!currentProfileOwner(target)) return statuses; const next = { ...statuses }; delete next[target.statusKey]; return next; });
+    const requests = (localStateSnapshotRef.current?.outgoingFriendRequests ?? outgoingFriendRequests)
+      .filter((request) => !outgoingRequestMatchesPeer(request.toxId, target.expectedPublicKey));
+    setOutgoingFriendRequests((items) => currentProfileOwner(target) ? requests : items);
+    for (const [id, operation] of Object.entries(pendingSendOperationsRef.current)) {
+      if (operation.profileId === target.profileId && (operation.chatId === target.chatId || operation.expectedPublicKey?.toUpperCase() === target.expectedPublicKey)) {
+        delete pendingSendOperationsRef.current[id];
+        if (platformCapabilities.browserAuthorization) {
+          webSendRetryRef.current.delete(id);
+          webFinishedSendIdsRef.current.add(id);
+        }
+      }
+    }
+    if (platformCapabilities.browserAuthorization) {
+      syncWebQueuedSends();
+      setWebAcceptedSends((items) => items.filter(({ operation }) =>
+        operation.profileId !== target.profileId || operation.chatId !== target.chatId));
+    }
+    setNativePendingSends((items) => items.filter(({ operation }) =>
+      operation.profileId !== target.profileId || operation.chatId !== target.chatId));
+    setFailedSends((items) => !currentProfileOwner(target) ? items : items.filter((operation) => !!pendingSendOperationsRef.current[operation.operationId]));
+    delete draftsRef.current[target.chatId];
+    delete draftFormattingRef.current[target.chatId];
+    delete draftQuotesRef.current[target.chatId];
+    const names = { ...(localStateSnapshotRef.current?.contactNames ?? contactNames) };
+    delete names[target.chatId];
+    setContactNames((items) => currentProfileOwner(target) ? names : items);
+    const remainingGroups = removeContactFromGroups(localStateSnapshotRef.current?.contactGroups ?? contactGroups, target.expectedPublicKey);
+    publishContactGroups(remainingGroups);
+    if (localStateSnapshotRef.current) {
+      localStateSnapshotRef.current.outgoingFriendRequests = requests;
+      localStateSnapshotRef.current.pendingSendOperations = pendingSendOperationsRef.current;
+      localStateSnapshotRef.current.contactNames = names;
+    }
+    discardCachedChatHistory(target.chatId, ownsNumericSlot ? target.friendNumber : undefined, target);
+    setUnreadFriendCounts((counts) => { if (!currentProfileOwner(target)) return counts; const next = { ...counts }; delete next[friendUnreadTarget(target.expectedPublicKey)]; return next; });
+    if (target.chatId === activeChatRef.current) {
+      setReplyQuote(null);
+      setCompactChatOpen(false);
+      setActiveChat("");
+      if (localStateSnapshotRef.current) localStateSnapshotRef.current.activeChat = "";
+    }
+    void persistLocalState();
+  }
+
   async function removeContact(chat: { id: string; friendNumber: number; publicKey: string }) {
     const target = capturePqTarget(chat.friendNumber, chat.publicKey);
     if (target.chatId !== chat.id || deletingContactKeysRef.current.has(target.statusKey)) return;
     deletingContactKeysRef.current.add(target.statusKey);
-    const mutation = ++friendMutationRevisionRef.current;
+    friendMutationRevisionRef.current += 1;
     try {
-      await invoke("delete_tox_friend", pqContactArgs(target));
-      if (!currentProfileOwner(target) || friendMutationRevisionRef.current !== mutation) return;
-      const current = coreFriendsRef.current.find((friend) => friend.public_key.toUpperCase() === target.expectedPublicKey);
-      if (current && current.number !== target.friendNumber) return;
-      const numericOwner = coreFriendsRef.current.find((friend) => friend.number === target.friendNumber);
-      const ownsNumericSlot = numericOwner?.public_key.toUpperCase() === target.expectedPublicKey;
-      friendMutationRevisionRef.current += 1;
-      unreadMutationRevisionRef.current += 1;
-      pqStatusRequestsRef.current[target.statusKey] = ++pqStatusSequenceRef.current;
-      const friends = coreFriendsRef.current.filter((friend) => friend.public_key.toUpperCase() !== target.expectedPublicKey);
-      coreFriendsRef.current = friends;
-      setCoreFriends((items) => currentProfileOwner(target) ? friends : items);
-      setPqStatuses((statuses) => { if (!currentProfileOwner(target)) return statuses; const next = { ...statuses }; delete next[target.statusKey]; return next; });
-      const requests = (localStateSnapshotRef.current?.outgoingFriendRequests ?? outgoingFriendRequests)
-        .filter((request) => !outgoingRequestMatchesPeer(request.toxId, target.expectedPublicKey));
-      setOutgoingFriendRequests((items) => currentProfileOwner(target) ? requests : items);
-      for (const [id, operation] of Object.entries(pendingSendOperationsRef.current)) {
-        if (operation.profileId === target.profileId && (operation.chatId === target.chatId || operation.expectedPublicKey?.toUpperCase() === target.expectedPublicKey)) delete pendingSendOperationsRef.current[id];
-      }
-      setFailedSends((items) => !currentProfileOwner(target) ? items : items.filter((operation) => !!pendingSendOperationsRef.current[operation.operationId]));
-      delete draftsRef.current[target.chatId];
-      delete draftFormattingRef.current[target.chatId];
-      delete draftQuotesRef.current[target.chatId];
-      const names = { ...(localStateSnapshotRef.current?.contactNames ?? contactNames) };
-      delete names[target.chatId];
-      setContactNames((items) => currentProfileOwner(target) ? names : items);
-      const remainingGroups = removeContactFromGroups(localStateSnapshotRef.current?.contactGroups ?? contactGroups, target.expectedPublicKey);
-      setContactGroups((items) => currentProfileOwner(target) ? remainingGroups : items);
-      if (localStateSnapshotRef.current) {
-        localStateSnapshotRef.current.contactGroups = remainingGroups;
-        localStateSnapshotRef.current.outgoingFriendRequests = requests;
-        localStateSnapshotRef.current.pendingSendOperations = pendingSendOperationsRef.current;
-        localStateSnapshotRef.current.contactNames = names;
-      }
-      discardCachedChatHistory(target.chatId, ownsNumericSlot ? target.friendNumber : undefined, target);
-      setUnreadFriendCounts((counts) => { if (!currentProfileOwner(target)) return counts; const next = { ...counts }; delete next[friendUnreadTarget(target.expectedPublicKey)]; return next; });
-      if (target.chatId === activeChatRef.current) {
-        setReplyQuote(null);
-        setActiveChat("");
-        if (localStateSnapshotRef.current) localStateSnapshotRef.current.activeChat = "";
-      }
-      void persistLocalState();
+      await enqueueLocalStateOperation(() => removeContactForTarget(target, "delete_tox_friend"));
     } finally {
       deletingContactKeysRef.current.delete(target.statusKey);
     }
@@ -4940,7 +5738,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
     setContactActionOwner(null);
   }
 
-  function discardCachedChatHistory(chatId: string | null, friendNumber?: number, owner: ProfileOwnerLease = { profileId: activeProfileId, generation: pqProfileOwnerRef.current.generation }) {
+  function discardCachedChatHistory(chatId: string | null, friendNumber?: number, owner: ProfileOwnerLease = { profileId: activeProfileId, generation: pqProfileOwnerRef.current.generation }, persist = true) {
     if (!currentProfileOwner(owner)) return;
     if (chatId === null) {
       historyCacheRef.current.clear();
@@ -4963,7 +5761,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
       localStateSnapshotRef.current.peerReactionNotices = reactionNoticeStoreRef.current;
       localStateSnapshotRef.current.draftQuotes = draftQuotesRef.current;
       localStateSnapshotRef.current.historyClearEpoch = historyClearEpochRef.current;
-      localStateSnapshotRef.current.scrollAnchors = {};
+      localStateSnapshotRef.current.scrollAnchors = scrollAnchorsRef.current;
     }
     if (chatId === null || activeChatRef.current === chatId) {
       historyMutationRevisionRef.current += 1;
@@ -4989,7 +5787,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
       setHistoryRequest({});
       setMessageRefreshRequest((value) => value + 1);
     }
-    void persistLocalState();
+    if (persist) void persistLocalState();
   }
 
   function clearContactHistory() {
@@ -5032,7 +5830,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
     const message = messageKey
       ? messagesRef.current.find((item) => (item.coreId ?? String(item.id)) === messageKey)
       : undefined;
-    if (message?.attachment?.path) {
+    if (message?.attachment?.path && !message.attachment.unavailableLocally) {
       setGeneralContext({
         x,
         y,
@@ -5053,7 +5851,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
       setGeneralContext(null);
       return;
     }
-    setGeneralContext({ x, y, anchorX: x, anchorY: y, kind: "copy", messageKey, linkUrl, copyValue: selection || message?.text, preserveEditorFocus });
+    setGeneralContext({ x, y, anchorX: x, anchorY: y, kind: "copy", messageKey, linkUrl, copyValue: selection || message?.text || message?.attachment?.name, preserveEditorFocus });
   }
 
   function openContactContextAt(chat: Chat, x: number, y: number) {
@@ -5096,6 +5894,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
   }
 
   function beginGroupAction(action: NonNullable<typeof groupAction>) {
+    if (groupActionSaveRef.current) return;
     if (profileSwitchRequestRef.current || profileSwitching || !persistenceReadyRef.current) return;
     setGroupNameDraft(action.kind === "rename" ? contactGroups.groups.find((group) => group.id === action.id)?.name ?? "" : "");
     setGroupNameNotice(null);
@@ -5103,8 +5902,8 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
     dismissContextMenus();
   }
 
-  function saveGroupAction() {
-    if (profileSwitchRequestRef.current || profileSwitching || !persistenceReadyRef.current) return;
+  async function saveGroupAction() {
+    if (groupActionSaveRef.current || profileSwitchRequestRef.current || profileSwitching || !persistenceReadyRef.current) return;
     const action = groupAction;
     if (!action) return;
     const error = groupNameError(contactGroups, groupNameDraft, action.kind === "rename" ? action.id : undefined);
@@ -5112,15 +5911,29 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
       setGroupNameNotice(t(error === "empty" ? "Введите имя группы" : error === "reserved" ? "Это имя системной группы" : "Группа с таким именем уже существует"));
       return;
     }
-    if (action.kind === "create") {
-      const key = action.chat.publicKey;
-      if (!key || !coreFriendsRef.current.some((friend) => friend.public_key.toUpperCase() === key.toUpperCase())) { setGroupAction(null); return; }
-      const id = crypto.randomUUID();
-      changeContactGroups((current) => createContactGroup(current, key, id, groupNameDraft));
-    } else {
-      changeContactGroups((current) => renameContactGroup(current, action.id, groupNameDraft));
+    let owner: ProfileOwnerLease;
+    try { owner = captureProfileOwner(); }
+    catch { return; }
+    groupActionSaveRef.current = true;
+    setGroupActionSaving(true);
+    setGroupNameNotice(null);
+    try {
+      let saved: boolean;
+      if (action.kind === "create") {
+        const key = action.chat.publicKey;
+        if (!key || !coreFriendsRef.current.some((friend) => friend.public_key.toUpperCase() === key.toUpperCase())) { setGroupAction(null); return; }
+        const id = crypto.randomUUID();
+        saved = await changeContactGroups((current) => createContactGroup(current, key, id, groupNameDraft), key);
+      } else {
+        saved = await changeContactGroups((current) => renameContactGroup(current, action.id, groupNameDraft));
+      }
+      if (!currentProfileOwner(owner)) return;
+      if (saved) setGroupAction((current) => current === action ? null : current);
+      else setGroupNameNotice(t("Не удалось сохранить локальные данные"));
+    } finally {
+      groupActionSaveRef.current = false;
+      setGroupActionSaving(false);
     }
-    setGroupAction(null);
   }
 
   const quoteTouchedMessageRef = useRef<(node: Element) => boolean>(() => false);
@@ -5143,13 +5956,33 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
     if (incomingRequestActionRef.current.pending || profileSwitching || profileSwitchPending) return;
     let owner: ProfileOwnerLease;
     try { owner = captureProfileOwner(); } catch { return; }
+    const requestIncarnation = contactIncarnationsRef.current[publicKey.toUpperCase()] ?? 0;
     const operation = incomingRequestActionRef.current;
     operation.pending = true;
     const revision = ++operation.revision;
     setIncomingRequestBusy(publicKey);
     setIncomingRequestError(null);
     try {
-      await invoke(`${decision}_incoming_friend_request`, { profileId: owner.profileId, publicKey });
+      await enqueueLocalStateOperation(async () => {
+        if (!appOwnerMountedRef.current) throw new Error("PROFILE_OWNER_CHANGED");
+        // Resolve after earlier queued additions, against the captured profile owner.
+        const friends = decision === "reject" ? await invoke<CoreFriend[]>("get_tox_friends", { profileId: owner.profileId }) : [];
+        const pendingFriend = friends.find((friend) => friend.public_key.toUpperCase() === publicKey.toUpperCase() && friend.authorized === false);
+        if (pendingFriend) {
+          const expectedPublicKey = pendingFriend.public_key.toUpperCase();
+          const target: PqContactTarget = { ...owner, friendNumber: pendingFriend.number, expectedPublicKey, expectedContactIncarnation: requestIncarnation, chatId: toxChatId(expectedPublicKey), statusKey: pqContactKey(owner.profileId, expectedPublicKey) };
+          deletingContactKeysRef.current.add(target.statusKey);
+          friendMutationRevisionRef.current += 1;
+          try { await removeContactForTarget(target, "reject_incoming_friend_request"); }
+          finally { deletingContactKeysRef.current.delete(target.statusKey); }
+        } else {
+          await invoke(`${decision}_incoming_friend_request`, { profileId: owner.profileId, publicKey, expectedContactIncarnation: requestIncarnation });
+          if (decision === "accept") {
+            const saved = await invoke<LocalState | null>("load_local_state", { profileId: owner.profileId });
+            adoptContactIncarnation(owner, publicKey.toUpperCase(), saved);
+          }
+        }
+      });
       if (!currentProfileOwner(owner) || incomingRequestActionRef.current !== operation || operation.revision !== revision) return;
       // Invalidate an overlapping request poll before it can revive the resolved row.
       operation.revision += 1;
@@ -5160,6 +5993,11 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
       setUnreadIncomingRequestKeys((keys) => currentProfileOwner(owner) && incomingRequestActionRef.current === operation && operation.revision === completedRevision ? keys.filter((key) => key !== publicKey) : keys);
     } catch (error) {
       if (!currentProfileOwner(owner) || incomingRequestActionRef.current !== operation || operation.revision !== revision) return;
+      if (pqErrorCode(error) === "CHAT_CONTACT_INCARNATION_CHANGED") {
+        const saved = await invoke<LocalState | null>("load_local_state", { profileId: owner.profileId });
+        adoptContactIncarnation(owner, publicKey.toUpperCase(), saved);
+        showTransferNotice(language === "ru" ? "Контакт изменился. Старый отказ отменён; выберите действие заново." : "The contact changed. The old rejection was cancelled; choose the action again.");
+      }
       setIncomingRequestError((current) => !currentProfileOwner(owner) || incomingRequestActionRef.current !== operation || operation.revision !== revision ? current : { key: publicKey, text: formatUserFacingError(error, {
         ru: decision === "reject" ? "Не удалось отклонить запрос" : "Не удалось принять запрос",
         en: decision === "reject" ? "Could not reject the request" : "Could not accept the request",
@@ -5193,16 +6031,136 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
     removeFromRequests();
   }
 
+  async function refreshContactIncarnation(profileId: string, publicKey: string) {
+    try {
+      const owner = captureProfileOwner();
+      if (owner.profileId !== profileId) return;
+      const saved = await invoke<LocalState | null>("load_local_state", { profileId });
+      if (!currentProfileOwner(owner)) return;
+      adoptContactIncarnation(owner, publicKey, saved);
+      showTransferNotice(language === "ru" ? "Контакт был удалён или добавлен заново. Повторите действие с обновлённым контактом." : "The contact was removed or added again. Start a new action with the updated contact.");
+    } catch { setLocalPersistenceError(true); }
+  }
+
+  function adoptContactIncarnation(owner: ProfileOwnerLease, publicKey: string, saved: LocalState | null) {
+    if (!currentProfileOwner(owner)) return;
+    const incarnation = saved?.contactIncarnations?.[publicKey] ?? 0;
+    if ((contactIncarnationsRef.current[publicKey] ?? 0) !== incarnation) {
+      const statusKey = pqContactKey(owner.profileId, publicKey);
+      contactMutationRevisionsRef.current[statusKey] = (contactMutationRevisionsRef.current[statusKey] ?? 0) + 1;
+      const chatId = toxChatId(publicKey);
+      for (const [id, operation] of Object.entries(pendingSendOperationsRef.current)) {
+        if (operation.profileId === owner.profileId && operation.chatId === chatId) {
+          delete pendingSendOperationsRef.current[id];
+          webSendRetryRef.current.delete(id);
+          webFinishedSendIdsRef.current.add(id);
+        }
+      }
+      for (const [id, operation] of Object.entries(saved?.pendingSendOperations ?? {})) {
+        if (operation.profileId === owner.profileId && operation.chatId === chatId
+          && (operation.expectedContactIncarnation ?? 0) === incarnation) pendingSendOperationsRef.current[id] = operation;
+      }
+      discardCachedChatHistory(chatId, undefined, owner, false);
+      nativeFilePickRevisionRef.current += 1;
+      setPendingFiles((files) => {
+        const stale = files.filter((file) => file.profileId === owner.profileId && file.chatId === chatId);
+        discardNativeSelections(stale.filter((file) => file.grantToken !== null).map((file) => ({
+          grantToken: file.grantToken!, name: file.file.name, mime: file.file.type, size: file.size,
+        })));
+        return files.filter((file) => file.profileId !== owner.profileId || file.chatId !== chatId);
+      });
+      delete draftsRef.current[chatId];
+      delete draftFormattingRef.current[chatId];
+      delete draftQuotesRef.current[chatId];
+      if (saved?.drafts?.[chatId] !== undefined) draftsRef.current[chatId] = saved.drafts[chatId];
+      if (saved?.draftFormatting?.[chatId] !== undefined) draftFormattingRef.current[chatId] = saved.draftFormatting[chatId];
+      if (saved?.draftQuotes?.[chatId] !== undefined) draftQuotesRef.current[chatId] = saved.draftQuotes[chatId];
+      if (saved?.scrollAnchors?.[chatId] !== undefined) scrollAnchorsRef.current[chatId] = saved.scrollAnchors[chatId];
+      const notices = restoreReactionNotices(saved?.peerReactionNotices);
+      if (notices[chatId]) {
+        reactionNoticeStoreRef.current[chatId] = notices[chatId];
+        reactionNoticeDurableCursorRef.current[chatId] = notices[chatId].through;
+      }
+      if (activeChatRef.current === chatId) {
+        setReplyQuote(draftQuotesRef.current[chatId] ?? null);
+        setReactionNotices(notices[chatId]?.notices ?? []);
+      }
+      const names = { ...(localStateSnapshotRef.current?.contactNames ?? contactNames) };
+      delete names[chatId];
+      if (saved?.contactNames?.[chatId] !== undefined) names[chatId] = saved.contactNames[chatId];
+      setContactNames(names);
+      let groups = removeContactFromGroups(localStateSnapshotRef.current?.contactGroups ?? contactGroups, publicKey);
+      const savedGroups = normalizeContactGroups(saved?.contactGroups);
+      const groupId = savedGroups.assignments[publicKey];
+      const savedGroup = savedGroups.groups.find((group) => group.id === groupId);
+      if (savedGroup) {
+        groups = { ...groups,
+          groups: groups.groups.some((group) => group.id === groupId) ? groups.groups : [...groups.groups, savedGroup],
+          assignments: { ...groups.assignments, [publicKey]: groupId },
+          order: groups.order.includes(groupId) ? groups.order : [...groups.order, groupId],
+        };
+      }
+      publishContactGroups(groups);
+      if (localStateSnapshotRef.current) {
+        localStateSnapshotRef.current.contactNames = names;
+      }
+      syncWebQueuedSends();
+      setFailedSends(Object.values(pendingSendOperationsRef.current).filter((operation) => operation.profileId === owner.profileId && operation.webQueuedAt === undefined));
+      setNativePendingSends((items) => items.filter(({ operation }) => operation.profileId !== owner.profileId || operation.chatId !== chatId));
+      setWebAcceptedSends((items) => items.filter(({ operation }) => operation.profileId !== owner.profileId || operation.chatId !== chatId));
+    }
+    contactIncarnationsRef.current = { ...contactIncarnationsRef.current, [publicKey]: incarnation };
+    if (localStateSnapshotRef.current) localStateSnapshotRef.current.contactIncarnations = contactIncarnationsRef.current;
+  }
+
   function submitFriendRequest(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    const owner = captureProfileOwner();
+    const formGeneration = addContactFormGenerationRef.current;
+    const toxId = contactToxId.trim().toUpperCase();
+    const message = friendRequestMessage;
+    const statusKey = pqContactKey(owner.profileId, toxId.slice(0, 64));
+    friendMutationRevisionRef.current += 1;
     setAddContactStatus(null);
-    void invoke<number>("add_tox_friend", { toxId: contactToxId, message: friendRequestMessage })
-      .then(() => {
-        setAddContactStatus(t("Запрос авторизации отправлен. Контакт появится после ответа."));
-        setOutgoingFriendRequests((requests) => [...requests.filter((request) => request.toxId !== contactToxId), { toxId: contactToxId, message: friendRequestMessage }]);
+    void enqueueLocalStateOperation(async () => {
+        if (!appOwnerMountedRef.current) throw new Error("PROFILE_OWNER_CHANGED");
+        const number = await invoke<number>("add_tox_friend", { profileId: owner.profileId, toxId, message });
+        // A re-add is a new contact incarnation. Load its backend-issued token
+        // before creating new intent; never stamp old queued payloads with it.
+        const saved = await invoke<LocalState | null>("load_local_state", { profileId: owner.profileId });
+        contactMutationRevisionsRef.current[statusKey] = (contactMutationRevisionsRef.current[statusKey] ?? 0) + 1;
+        if (!currentProfileOwner(owner)) return;
+        friendMutationRevisionRef.current += 1;
+        const publicKey = toxId.slice(0, 64);
+        adoptContactIncarnation(owner, publicKey, saved);
+        const existing = coreFriendsRef.current.find((friend) => friend.public_key.toUpperCase() === publicKey);
+        const friend: CoreFriend = existing ?? {
+          number, public_key: publicKey, tox_id: toxId, authorized: false,
+          connection: "offline", name: "", status: "offline", status_message: "", addedAt: Date.now(),
+        };
+        const friends = [...coreFriendsRef.current.filter((item) => item.public_key.toUpperCase() !== publicKey), friend];
+        coreFriendsRef.current = friends;
+        setCoreFriends(friends);
+        const requests = (localStateSnapshotRef.current?.outgoingFriendRequests ?? outgoingFriendRequests)
+          .filter((request) => !outgoingRequestMatchesPeer(request.toxId, publicKey));
+        if (!friend.authorized) requests.push({ toxId, message });
+        setOutgoingFriendRequests(requests);
+        if (localStateSnapshotRef.current) localStateSnapshotRef.current.outgoingFriendRequests = requests;
+        void persistLocalState();
+        if (addContactFormGenerationRef.current !== formGeneration) return;
         setContactToxId("");
+        const route = history.state?.kaigenCompact;
+        if (platformCapabilities.browserAuthorization && route?.session === compactNavigationSession.current && route.add) {
+          history.replaceState({ ...history.state, kaigenCompact: { ...route, add: false } }, "");
+        }
+        setAddContactOpen(false);
+        pendingContactFocusRef.current = { owner, formGeneration: addContactFormGenerationRef.current, publicKey };
       })
-      .catch((error) => setAddContactStatus(formatUserFacingError(error, { ru: "Не удалось отправить запрос на переписку", en: "Could not send the chat request" }, language)));
+      .catch((error) => {
+        if (currentProfileOwner(owner) && addContactFormGenerationRef.current === formGeneration) {
+          setAddContactStatus(formatUserFacingError(error, { ru: "Не удалось отправить запрос на переписку", en: "Could not send the chat request" }, language));
+        }
+      });
   }
 
   const ownAvatarState: ProfileAvatarState = networkStatus === "connecting" || networkStatus === "connecting-tor"
@@ -5237,14 +6195,14 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
         </div>;
   const renderContactRow = (chat: Chat) => (
           <div className="contact-row" key={chat.id}>
-            <button className={`chat-item ${activeChat === chat.id ? "selected" : ""}`} data-kaigen-ui-entity-key={opaqueUiEntityKey("contact", chat.publicKey ?? chat.id)} key={chat.id} onKeyDown={(event) => { if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) { event.preventDefault(); event.stopPropagation(); const bounds = event.currentTarget.getBoundingClientRect(); openContactContextAt(chat, bounds.left + 16, bounds.top + 16); } }} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); openContactContextAt(chat, event.clientX, event.clientY); }} onClick={(event) => { if (event.ctrlKey && /Mac/i.test(navigator.platform)) { event.preventDefault(); event.stopPropagation(); openContactContextAt(chat, event.clientX, event.clientY); return; } setIncomingRequestsOpen(false); setAddContactOpen(false); setActiveChat(chat.id); setCompactChatOpen(true); }}>
+            <button className={`chat-item ${activeChat === chat.id ? "selected" : ""}`} title={chat.status === "pending" ? `${displayName(chat)} · ${t(contactStatusText(chat.status))}` : undefined} aria-label={chat.status === "pending" ? `${displayName(chat)} · ${t(contactStatusText(chat.status))}` : undefined} data-kaigen-ui-entity-key={opaqueUiEntityKey("contact", chat.publicKey ?? chat.id)} key={chat.id} onKeyDown={(event) => { if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) { event.preventDefault(); event.stopPropagation(); const bounds = event.currentTarget.getBoundingClientRect(); openContactContextAt(chat, bounds.left + 16, bounds.top + 16); } }} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); openContactContextAt(chat, event.clientX, event.clientY); }} onClick={(event) => { if (event.ctrlKey && /Mac/i.test(navigator.platform)) { event.preventDefault(); event.stopPropagation(); openContactContextAt(chat, event.clientX, event.clientY); return; } setIncomingRequestsOpen(false); setAddContactOpen(false); setActiveChat(chat.id); setCompactChatOpen(true); }}>
               <span className={`avatar ${chat.color} contact-status-${chat.status}`}>
                 <AvatarImage path={chat.avatarPath} initial={chat.initial} />
                 {chat.publicKey && (unreadFriendCounts[friendUnreadTarget(chat.publicKey)] ?? 0) > 0 && <b className="contact-avatar-unread" title={t("Новые непрочитанные сообщения")} aria-label={formatUnreadMessagesLabel(unreadFriendCounts[friendUnreadTarget(chat.publicKey)], language)}>{unreadFriendCounts[friendUnreadTarget(chat.publicKey)]}</b>}
               </span>
               <span className="chat-copy">
-                <span className="chat-name" data-i18n-ignore translate="no">{highlightContactName(displayName(chat))}{compactMode && <span className={`compact-presence ${chat.status}`}> · {t(chat.status === "online" ? "Онлайн" : chat.status === "away" ? "Отошёл" : chat.status === "busy" ? "Занят" : "Отключен").toLocaleLowerCase(language)}</span>}</span>
-                <span hidden={compactMode} className={`chat-status ${chat.status}`}><span className="contact-status-dot-leading"><PresenceDot status={chat.status} className="contact-status-dot" /></span>{t(chat.status === "online" ? "Онлайн" : chat.status === "away" ? "Отошёл" : chat.status === "busy" ? "Занят" : "Отключен")}</span>
+                <span className="chat-name" data-i18n-ignore translate="no">{highlightContactName(displayName(chat))}{compactMode && <span className={`compact-presence ${chat.status}`}> · {t(contactStatusText(chat.status)).toLocaleLowerCase(language)}</span>}</span>
+                <span hidden={compactMode} className={`chat-status ${chat.status}`} title={t(contactStatusText(chat.status))}><span className="contact-status-dot-leading"><PresenceDot status={chat.status} className="contact-status-dot" /></span>{t(contactStatusText(chat.status))}</span>
                 <span className="contact-status-message" data-i18n-ignore translate="no">{chat.preview}</span>
               </span>
               <span className="chat-time"><span>{chat.time}</span>{chat.publicKey && (unreadFriendCounts[friendUnreadTarget(chat.publicKey)] ?? 0) > 0 && <b className="contact-unread-count" title={t("Новые непрочитанные сообщения")} aria-label={formatUnreadMessagesLabel(unreadFriendCounts[friendUnreadTarget(chat.publicKey)], language)}>{unreadFriendCounts[friendUnreadTarget(chat.publicKey)]}</b>}</span>
@@ -5377,14 +6335,22 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
     if (compactHistoryApplying.current) { compactHistoryApplying.current = false; return; }
     const previous = history.state?.kaigenCompact;
     const next = {...history.state, kaigenCompact: route};
-    if (!previous || previous.session !== route.session) history.replaceState(next, "");
-    else if (JSON.stringify(previous) !== JSON.stringify(route)) history.pushState(next, "");
+    if (!previous || previous.session !== route.session) {
+      const startsInDetail = route.chat || route.add || route.screen === "settings";
+      // A detail opened on desktop can already be active when compact mode starts.
+      // Give Back an in-app list entry instead of leaving the workspace.
+      const initialRoute = startsInDetail
+        ? { ...route, screen: "chat", chat: false, requests: false, add: false, drawer: false }
+        : route;
+      history.replaceState({ ...next, kaigenCompact: initialRoute }, "");
+      if (startsInDetail) history.pushState(next, "");
+    } else if (JSON.stringify(previous) !== JSON.stringify(route)) history.pushState(next, "");
   }, [compactMode, screen, activeChat, compactChatOpen, incomingRequestsOpen, addContactOpen, profileDrawerOpen]);
   useEffect(() => {
     if (!compactMode) return;
     const back = (event: KeyboardEvent) => {
       if (event.key !== "Escape" || event.defaultPrevented) return;
-      if (fullImage || pendingFiles.length || contactAction || groupAction || contactContext || generalContext || groupContext || profileDrawerOpen || ownActionsOpen) return;
+      if (fullMedia || pendingFiles.length || contactAction || groupAction || contactContext || generalContext || groupContext || profileDrawerOpen || ownActionsOpen) return;
       if (messageSearchOpen) { closeMessageSearch(); event.preventDefault(); return; }
       if (contactMenuOpen) { setContactMenuOpen(false); event.preventDefault(); return; }
       if (screen === "settings") { returnFromCompactSettings(); event.preventDefault(); return; }
@@ -5426,7 +6392,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
       </header>}
       {compactMode && screen === "settings" && <header className="compact-secondary-header" onClick={(event) => event.stopPropagation()}><button type="button" className="compact-action" onClick={returnFromCompactSettings} aria-label={t("Назад")}>←</button><h2>{t("Настройки")}</h2></header>}
       {compactNavigationVisible && <nav className="compact-bottom-nav" aria-label={language === "ru" ? "Основные разделы" : "Main sections"} onClick={(event) => event.stopPropagation()}><button type="button" className="compact-nav-item chats" onClick={() => { setProfileDrawerOpen(false); setCompactChatOpen(false); setAddContactOpen(false); setScreen("chat"); setIncomingRequestsOpen(false); }} aria-current={screen === "chat" && !incomingRequestsOpen ? "page" : undefined} data-i18n-ignore translate="no"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.5h11A2.5 2.5 0 0 1 21.5 8v7a2.5 2.5 0 0 1-2.5 2.5h-8l-5.5 4V8A2.5 2.5 0 0 1 8 5.5Z" /></svg><span>{language === "ru" ? "Чаты" : "Chats"}</span>{Object.values(unreadFriendCounts).reduce((sum, value) => sum + value, 0) > 0 && <b className="rail-badge">{Object.values(unreadFriendCounts).reduce((sum, value) => sum + value, 0)}</b>}</button>
-<button type="button" className="compact-nav-item requests" onClick={() => { setProfileDrawerOpen(false); setCompactChatOpen(false); setAddContactOpen(false); setScreen("chat"); setIncomingRequestsOpen(true); }} aria-current={screen === "chat" && incomingRequestsOpen ? "page" : undefined} data-i18n-ignore translate="no"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 20v-2a5 5 0 0 1 10 0v2M8 3a3 3 0 1 0 0 6 3 3 0 0 0 0-6M18 10v8M14 14h8" /></svg><span>{language === "ru" ? "Запросы" : "Requests"}</span>{unreadIncomingRequestKeys.length > 0 && <b className="rail-badge">{unreadIncomingRequestKeys.length}</b>}</button>
+<button type="button" className="compact-nav-item requests" onClick={openFriendRequests} aria-current={screen === "chat" && incomingRequestsOpen ? "page" : undefined} data-i18n-ignore translate="no"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 20v-2a5 5 0 0 1 10 0v2M8 3a3 3 0 1 0 0 6 3 3 0 0 0 0-6M18 10v8M14 14h8" /></svg><span>{language === "ru" ? "Запросы" : "Requests"}</span>{unreadIncomingRequestKeys.length > 0 && <b className="rail-badge">{unreadIncomingRequestKeys.length}</b>}</button>
 <button type="button" className="compact-nav-item groups" disabled  data-i18n-ignore translate="no"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 18v-2a4 4 0 0 1 8 0v2M14 18v-2a4 4 0 0 1 6 0v2M8 4a3 3 0 1 0 0 6 3 3 0 0 0 0-6M17 5a2 2 0 1 0 0 4 2 2 0 0 0 0-4" /></svg><span>{language === "ru" ? "Группы" : "Groups"}</span></button>
 <button type="button" className="compact-nav-item publications" disabled  data-i18n-ignore translate="no"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3h12v18H6zM9 7h6M9 11h6M9 15h4" /></svg><span>{language === "ru" ? "Публикации" : "Publications"}</span></button></nav>}
       {compactMode && ownActionsOpen && <CompactModal label={language === "ru" ? "Действия профиля" : "Profile actions"} onClose={() => setOwnActionsOpen(false)}>
@@ -5447,23 +6413,23 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
         {contactGroups.order.filter((id) => id !== UNGROUPED_ID).map((id) => {
           const group = contactGroups.groups.find((item) => item.id === id)!;
           const assigned = contactGroupFor(contactContext.chat) === id;
-          return <button key={id} data-kaigen-ui-id={APP_UI_IDS.main_contacts_family_group_option} data-kaigen-ui-entity-key={opaqueUiEntityKey("contact-group", id)} role="menuitemradio" aria-checked={assigned} data-i18n-ignore translate="no" onClick={() => { const key = contactContext.chat.publicKey!; changeContactGroups((current) => assignContactGroup(current, key, id)); setContactContext(null); }}>{assigned ? "✓ " : ""}{group.name}</button>;
+          return <button key={id} data-kaigen-ui-id={APP_UI_IDS.main_contacts_family_group_option} data-kaigen-ui-entity-key={opaqueUiEntityKey("contact-group", id)} role="menuitemradio" aria-checked={assigned} data-i18n-ignore translate="no" onClick={() => { const key = contactContext.chat.publicKey!; void changeContactGroups((current) => assignContactGroup(current, key, id), key); setContactContext(null); }}>{assigned ? "✓ " : ""}{group.name}</button>;
         })}
-        {contactContext.chat.publicKey && contactGroupFor(contactContext.chat) !== UNGROUPED_ID && <button data-kaigen-ui-id={APP_UI_IDS.main_contacts_element_remove_from_group} role="menuitem" onClick={() => { const key = contactContext.chat.publicKey!; changeContactGroups((current) => assignContactGroup(current, key, null)); setContactContext(null); setGroupSubmenu(null); }}>{t("Убрать из группы")}</button>}
+        {contactContext.chat.publicKey && contactGroupFor(contactContext.chat) !== UNGROUPED_ID && <button data-kaigen-ui-id={APP_UI_IDS.main_contacts_element_remove_from_group} role="menuitem" onClick={() => { const key = contactContext.chat.publicKey!; void changeContactGroups((current) => assignContactGroup(current, key, null), key); setContactContext(null); setGroupSubmenu(null); }}>{t("Убрать из группы")}</button>}
         <button data-kaigen-ui-id={APP_UI_IDS.main_contacts_element_create_group} role="menuitem" onClick={() => beginGroupAction({ kind: "create", chat: contactContext.chat })}>{t("Создать группу…")}</button>
       </div></CompactMenu>}
       {groupContext && <CompactMenu compact={compactMode} label={t("Группа")} onClose={() => setGroupContext(null)}><div ref={groupContextMenuRef} className="contact-context-menu contact-group-context-menu" role="menu" aria-label={t("Группа")} style={{ left: groupContext.x, top: groupContext.y, maxHeight: `${Math.max(1, (window.innerHeight - 16) / (appearance.interfaceScale / 100))}px` }} onClick={(event) => event.stopPropagation()} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); }}>
-        {compactMode && ([-1, 1] as const).map((direction) => <button key={direction} role="menuitem" onClick={() => { const id = groupContext.id; changeContactGroups((current) => { const target = current.order[current.order.indexOf(id) + direction]; return target ? {...current, order: moveProfileOrder(current.order, current.order, id, target, direction < 0 ? "before" : "after")} : current; }); setGroupContext(null); }}>{language === "ru" ? direction < 0 ? "Выше" : "Ниже" : direction < 0 ? "Move up" : "Move down"}</button>)}
+        {compactMode && ([-1, 1] as const).map((direction) => <button key={direction} role="menuitem" onClick={() => { const id = groupContext.id; changeContactGroups((current) => { const target = current.order[current.order.indexOf(id) + direction]; return target ? reorderContactGroup(current, id, target, direction < 0 ? "before" : "after") : current; }); setGroupContext(null); }}>{language === "ru" ? direction < 0 ? "Выше" : "Ниже" : direction < 0 ? "Move up" : "Move down"}</button>)}
         <button data-kaigen-ui-id={APP_UI_IDS.main_contacts_element_rename_group} role="menuitem" onClick={() => beginGroupAction({ kind: "rename", id: groupContext.id })}>{t("Переименовать группу…")}</button>
         <button data-kaigen-ui-id={APP_UI_IDS.main_contacts_element_delete_group} role="menuitem" className="danger-menu" onClick={() => { const id = groupContext.id; changeContactGroups((current) => deleteContactGroup(current, id)); setGroupContext(null); }}>{t("Удалить группу")}</button>
       </div></CompactMenu>}
       {groupAction && <div className="file-confirm-overlay" role="dialog" aria-modal="true" aria-labelledby="contact-group-dialog-title" onPointerDown={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()}>
-        <form className="file-confirm-card" autoComplete="off" onSubmit={(event) => { event.preventDefault(); saveGroupAction(); }}>
+        <form className="file-confirm-card" autoComplete="off" aria-busy={groupActionSaving} onSubmit={(event) => { event.preventDefault(); void saveGroupAction(); }}>
           <b id="contact-group-dialog-title">{t(groupAction.kind === "create" ? "Новая группа" : "Переименовать группу")}</b>
           <label htmlFor="contact-group-name-input">{t("Имя группы")}</label>
-          <input data-kaigen-ui-id={APP_UI_IDS.main_contacts_element_group_name} id="contact-group-name-input" type="text" inputMode="text" name="contactGroupTitle" autoComplete="off" data-lpignore="true" data-1p-ignore="true" data-bwignore="true" autoFocus value={groupNameDraft} onChange={(event) => { setGroupNameDraft(event.target.value); setGroupNameNotice(null); }} />
+          <input data-kaigen-ui-id={APP_UI_IDS.main_contacts_element_group_name} id="contact-group-name-input" type="text" inputMode="text" name="contactGroupTitle" autoComplete="off" data-lpignore="true" data-1p-ignore="true" data-bwignore="true" autoFocus disabled={groupActionSaving} value={groupNameDraft} onChange={(event) => { setGroupNameDraft(event.target.value); setGroupNameNotice(null); }} />
           {groupNameNotice && <small className="file-confirm-error" role="alert">{groupNameNotice}</small>}
-          <div><button data-kaigen-ui-id={APP_UI_IDS.main_contacts_element_group_cancel} type="button" className="text-button" onClick={() => setGroupAction(null)}>{t("Отмена")}</button><button data-kaigen-ui-id={APP_UI_IDS.main_contacts_element_group_save} type="submit" className="send-file-button">{t(groupAction.kind === "create" ? "Создать и переместить" : "Сохранить")}</button></div>
+          <div><button data-kaigen-ui-id={APP_UI_IDS.main_contacts_element_group_cancel} type="button" className="text-button" disabled={groupActionSaving} onClick={() => setGroupAction(null)}>{t("Отмена")}</button><button data-kaigen-ui-id={APP_UI_IDS.main_contacts_element_group_save} type="submit" className="send-file-button" disabled={groupActionSaving}>{t(groupAction.kind === "create" ? "Создать и переместить" : "Сохранить")}</button></div>
         </form>
       </div>}
       {generalContext && <CompactMenu compact={false} label={t("Меню")} onClose={() => setGeneralContext(null)}><div ref={generalContextMenuRef} className={`contact-context-menu restricted-context-menu${compactMode ? " compact-context-popup" : ""}`} role="menu" aria-label={t("Меню")} onKeyDown={navigateCompactContextMenu} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); }} onPointerDown={(event) => {
@@ -5472,10 +6438,12 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
       }} style={{ left: generalContext.x, top: generalContext.y, ...(compactMode ? { maxWidth: `${Math.max(1, (contextViewport.width - 16) / (appearance.interfaceScale / 100))}px`, maxHeight: `${Math.max(1, (contextViewport.height - 16) / (appearance.interfaceScale / 100))}px` } : {}) }} onClick={(event) => event.stopPropagation()}>
         {contextMessage && !contextMessage.event && <button role="menuitem" data-kaigen-ui-id={APP_UI_IDS.main_message_menu_element_quote} onClick={() => quoteMessage(contextMessage)}>{language === "ru" ? "Цитировать" : "Quote"}</button>}
         {contextMessage && canCancelQueuedMessage(contextMessage) && <button role="menuitem" data-kaigen-ui-id={APP_UI_IDS.main_message_menu_element_cancel_send} onClick={() => void cancelQueuedMessage(contextMessage)}>{language === "ru" ? "Отменить отправку" : "Cancel sending"}</button>}
-        {generalContext.kind === "image" && <button role="menuitem" onClick={() => copyAttachmentToClipboard(generalContext.previewPath ?? generalContext.path, true)}>Скопировать изображение</button>}
-        {generalContext.kind === "file" && platformCapabilities.nativeFilesystem && <button role="menuitem" onClick={() => copyAttachmentToClipboard(generalContext.path, false)}>Скопировать файл</button>}
-        {!platformCapabilities.nativeFilesystem && contextMessage?.attachment?.completed && contextMessage.attachment.path?.startsWith("browser-stream://") && <button role="menuitem" onClick={() => downloadWebAttachment(contextMessage)}>{language === "ru" ? "Скачать файл" : "Download file"}</button>}
-        {generalContext.showInFolder && platformCapabilities.nativeFilesystem && <button role="menuitem" onClick={() => showAttachmentInFolder(generalContext.path)}>Показать в папке</button>}
+        {contextMessage && attachmentFileRequest(contextMessage) && <button role="menuitem" disabled={savingFileKey !== null} onClick={() => saveReceivedFileCopy(contextMessage)}>{language === "ru" ? "Сохранить копию файла" : "Save a file copy"}</button>}
+        {contextMessage && hasLocalWebgateAttachment(contextMessage) && <button role="menuitem" onClick={() => runLocalWebgateAttachmentAction(contextMessage, "open")}>{language === "ru" ? "Открыть файл" : "Open file"}</button>}
+        {contextAttachmentAvailable && generalContext.kind === "image" && <button role="menuitem" onClick={() => contextMessage && hasLocalWebgateAttachment(contextMessage) ? runLocalWebgateAttachmentAction(contextMessage, "copy", true) : copyAttachmentToClipboard(generalContext.previewPath ?? generalContext.path, true)}>Скопировать изображение</button>}
+        {contextAttachmentAvailable && generalContext.kind === "file" && (nativeProfileFilesystem || (contextMessage && hasLocalWebgateAttachment(contextMessage))) && <button role="menuitem" onClick={() => contextMessage && hasLocalWebgateAttachment(contextMessage) ? runLocalWebgateAttachmentAction(contextMessage, "copy") : copyAttachmentToClipboard(generalContext.path, false)}>Скопировать файл</button>}
+        {!nativeProfileFilesystem && contextMessage?.attachment?.completed && contextMessage.attachment.path?.startsWith("browser-stream://") && !hasLocalWebgateAttachment(contextMessage) && <button role="menuitem" onClick={() => downloadWebAttachment(contextMessage)}>{language === "ru" ? "Скачать файл" : "Download file"}</button>}
+        {contextAttachmentAvailable && ((generalContext.showInFolder && nativeProfileFilesystem) || (contextMessage && hasLocalWebgateAttachment(contextMessage))) && <button role="menuitem" onClick={() => contextMessage && hasLocalWebgateAttachment(contextMessage) ? runLocalWebgateAttachmentAction(contextMessage, "reveal") : showAttachmentInFolder(generalContext.path)}>Показать в папке</button>}
         {generalContext.kind === "copy" && <button role="menuitem" onClick={() => { copyText(generalContext.copyValue ?? ""); setGeneralContext(null); }}>Скопировать</button>}
         {generalContext.linkUrl && <button role="menuitem" data-kaigen-ui-id={APP_UI_IDS.main_message_menu_element_copy_link} onClick={() => { copyText(generalContext.linkUrl!); setGeneralContext(null); }}>{t("Скопировать ссылку")}</button>}
         {contextMessage?.coreId && active.friendNumber !== undefined && <button role="menuitem" className="danger-menu" onClick={() => void deleteMessage(contextMessage)}>{language === "ru" ? "Удалить сообщение" : "Delete message"}</button>}
@@ -5487,14 +6455,14 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
         <div className="status-control"><button type="button" className="rail-profile-button" onClick={openProfileSettings} title="Открыть настройки профиля" aria-label="Открыть настройки профиля"><ProfileAvatar src={profileAvatar} initial={profileInitial} state={ownAvatarState} connecting={ownAvatarState === "connecting"} className="rail-profile-avatar" alt="Ваш аватар" /></button><button className={`rail-status-label ${networkStatus === "online" ? userStatus : "offline"} ${statusAttention && networkStatus === "offline" ? "status-attention" : ""}`} onAnimationEnd={onStatusAttentionComplete} onClick={() => { onStatusAttentionComplete?.(); const next = !statusMenuOpen; dismissContextMenus(); setStatusMenuOpen(next); }} title={networkStatus === "online" ? statusText : networkStatus === "offline" ? "Отключено от сети Tox" : networkStatus === "connecting-tor" ? "Подключение к Tor…" : "Подключение к сети Tox…"} aria-label={`Статус: ${networkStatus === "online" ? statusText : networkStatus === "offline" ? "Отключено от сети Tox" : networkStatus === "connecting-tor" ? "Подключение к Tor…" : "Подключение к сети Tox…"}`} aria-expanded={statusMenuOpen}>{networkStatus === "connecting-tor" ? "Подключение к Tor…" : networkStatus === "connecting" ? "Подключение…" : networkStatus === "offline" ? "Отключен" : userStatus === "online" ? "Онлайн" : userStatus === "away" ? "Отошёл" : userStatus === "busy" ? "Занят" : "Отключен"}</button>{statusMenuOpen && <div className="status-menu" role="menu"><button onClick={() => changeUserStatus("online")} role="menuitem"><PresenceDot status="online" />Онлайн</button><button onClick={() => changeUserStatus("away")} role="menuitem"><PresenceDot status="away" />Отошёл</button><button onClick={() => changeUserStatus("busy")} role="menuitem"><PresenceDot status="busy" />Занят</button><button onClick={() => changeUserStatus("offline")} role="menuitem"><PresenceDot status="offline" />Отключиться от сети</button></div>}</div>
         <nav className="rail-navigation" aria-label="Основные разделы">
           <button className={`rail-button chats-button ${screen === "chat" && !incomingRequestsOpen && !addContactOpen ? "active" : ""}`} onClick={() => { setScreen("chat"); setIncomingRequestsOpen(false); setAddContactOpen(false); }} title="Чаты и контакты" aria-label="Чаты и контакты"><svg className="rail-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.5h11A2.5 2.5 0 0 1 21.5 8v7a2.5 2.5 0 0 1-2.5 2.5h-8l-5.5 4V8A2.5 2.5 0 0 1 8 5.5Z" /></svg>{Object.values(unreadFriendCounts).reduce((sum, value) => sum + value, 0) > 0 && <span className="rail-badge">{Object.values(unreadFriendCounts).reduce((sum, value) => sum + value, 0)}</span>}</button>
-          <button className={`rail-button requests-button ${incomingRequestsOpen ? "active" : ""}`} onClick={() => { setScreen("chat"); setActiveChat(""); setAddContactOpen(false); setIncomingRequestsOpen(true); }} title="Ожидающие авторизации" aria-label="Ожидающие авторизации"><svg className="rail-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="8.3" cy="6.8" r="3" /><path d="M3.4 18.5v-.8a5.1 5.1 0 0 1 5.1-5.1c1 0 2 .3 2.8.8" /><circle cx="16.6" cy="16.5" r="4.2" /><path d="M16.6 14v2.6l1.8 1" /><path className="rail-icon-accent" d="m18.9 5.1 1.25 1.25-1.25 1.25-1.25-1.25Z" /></svg>{unreadIncomingRequestKeys.length > 0 && <span className="rail-badge">{unreadIncomingRequestKeys.length}</span>}</button>
+          <button className={`rail-button requests-button ${incomingRequestsOpen ? "active" : ""}`} onClick={() => { setActiveChat(""); openFriendRequests(); }} title="Ожидающие авторизации" aria-label="Ожидающие авторизации"><svg className="rail-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="8.3" cy="6.8" r="3" /><path d="M3.4 18.5v-.8a5.1 5.1 0 0 1 5.1-5.1c1 0 2 .3 2.8.8" /><circle cx="16.6" cy="16.5" r="4.2" /><path d="M16.6 14v2.6l1.8 1" /><path className="rail-icon-accent" d="m18.9 5.1 1.25 1.25-1.25 1.25-1.25-1.25Z" /></svg>{unreadIncomingRequestKeys.length > 0 && <span className="rail-badge">{unreadIncomingRequestKeys.length}</span>}</button>
           {platformCapabilities.nativeFilesystem && <button className="rail-button downloads-button" onClick={openDownloadsFolder} title="Открыть папку загрузок" aria-label="Открыть папку загрузок"><DownloadIcon className="rail-icon" /></button>}
           <button type="button" className="rail-button group-chat-button" data-kaigen-ui-id={APP_UI_IDS.main_element_navigation_group_chat} disabled title={t("Групповой чат — скоро")} aria-label={t("Групповой чат")}><svg className="rail-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 3.5h14a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2h-8l-5 3v-3H5a2 2 0 0 1-2-2v-11a2 2 0 0 1 2-2Z" /><circle cx="9" cy="8.5" r="1.8" /><path d="M5.9 14.7v-.5a3.1 3.1 0 0 1 6.2 0v.5M14.2 6.8a1.8 1.8 0 0 1 0 3.5M14.5 11.2a3.1 3.1 0 0 1 3.6 3v.5" /></svg></button>
           <button type="button" className="rail-button publications-button" disabled title={language === "ru" ? "Публикации — скоро" : "Publications — coming soon"} aria-label={language === "ru" ? "Публикации" : "Publications"} data-i18n-ignore translate="no"><svg className="rail-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3.5h12a2 2 0 0 1 2 2v13a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2v-13a2 2 0 0 1 2-2Z" /><path d="M8 7.5h8M8 11.5h8M8 15.5h5" /></svg></button>
         </nav>
         <div className="rail-footer">
           {!compactMode && torIndicator}
-          <div className="theme-switch" role="group" aria-label="Переключение темы оформления">
+          <DesktopUpdateNotice><div className="theme-switch" role="group" aria-label="Переключение темы оформления">
             <button
               type="button"
               className={`theme-switch-button ${theme === "current" ? "active" : ""}`}
@@ -5520,7 +6488,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
                 <path d="M8.8 15.1c.8 1.4 1.9 2.1 3.3 2.1 1.2 0 2.3-.5 3.2-1.5" />
               </svg>
             </button>
-          </div>
+          </div></DesktopUpdateNotice>
         </div>
       </aside>
 
@@ -5537,10 +6505,10 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
             <button type="button" data-kaigen-ui-id={APP_UI_IDS.main_contacts_element_toggle_groups} className={`contact-list-control contact-groups-toggle ${contactGroups.enabled ? "active" : ""}`} disabled={!persistenceReady || profileSwitchPending || profileSwitching} onClick={() => changeContactGroups((current) => ({ ...current, enabled: !current.enabled }))} aria-pressed={contactGroups.enabled} aria-label={t(contactGroups.enabled ? "Скрыть группы" : "Показать группы")} data-control-tooltip={t(contactGroups.enabled ? "Скрыть группы" : "Показать группы")}>
               <svg className="contact-list-control-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7V5h7l2 2h9v13H3Zm0 3h18" /></svg>
             </button>
-            <button type="button" className={`contact-list-control ${contactSort.mode === "activity" ? "active" : ""}`} onClick={() => setContactSort((current) => toggleContactSort(current, "activity"))} aria-pressed={contactSort.mode === "activity"} aria-label={activitySortLabel} data-control-tooltip={activitySortLabel} data-kaigen-ui-id={APP_UI_IDS.main_contacts_element_sort_activity}>
+            <button type="button" className={`contact-list-control ${contactSort.mode === "activity" ? "active" : ""}`} disabled={!layoutHydrated || contactSortSaving} onClick={() => void changeContactSort("activity")} aria-pressed={contactSort.mode === "activity"} aria-label={activitySortLabel} data-control-tooltip={activitySortLabel} data-kaigen-ui-id={APP_UI_IDS.main_contacts_element_sort_activity}>
               <ActivitySortIcon direction={contactSort.mode === "activity" ? contactSort.direction : "forward"} />
             </button>
-            <button type="button" className={`contact-list-control ${contactSort.mode === "status" ? "active" : ""}`} onClick={() => setContactSort((current) => toggleContactSort(current, "status"))} aria-pressed={contactSort.mode === "status"} aria-label={statusSortLabel} data-control-tooltip={statusSortLabel} data-kaigen-ui-id={APP_UI_IDS.main_contacts_element_sort_status}>
+            <button type="button" className={`contact-list-control ${contactSort.mode === "status" ? "active" : ""}`} disabled={!layoutHydrated || contactSortSaving} onClick={() => void changeContactSort("status")} aria-pressed={contactSort.mode === "status"} aria-label={statusSortLabel} data-control-tooltip={statusSortLabel} data-kaigen-ui-id={APP_UI_IDS.main_contacts_element_sort_status}>
               <StatusSortIcon direction={contactSort.mode === "status" ? contactSort.direction : "forward"} />
             </button>
             <button type="button" className={`contact-list-control ${hideOfflineContacts ? "active" : ""}`} onClick={() => setHideOfflineContacts((current) => !current)} aria-pressed={hideOfflineContacts} aria-label={offlineVisibilityLabel} data-control-tooltip={offlineVisibilityLabel} data-kaigen-ui-id={APP_UI_IDS.main_contacts_element_toggle_offline}>
@@ -5554,8 +6522,8 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
             <div className="compact-group-heading"><ContactGroupHeader disabled={!persistenceReady || profileSwitchPending || profileSwitching} uiId={APP_UI_IDS.main_contacts_family_group_header} entityKey={opaqueUiEntityKey("contact-group", section.id)} id={section.id} name={section.name} collapsed={contactGroups.collapsed.includes(section.id)} unread={section.unread}
               onToggle={() => changeContactGroups((current) => toggleContactGroup(current, section.id))}
               onDragChange={(dragging, target) => setContactGroupDrag(dragging ? { id: section.id, target } : null)}
-              onReorder={(targetId, edge) => changeContactGroups((current) => ({ ...current, order: moveProfileOrder(current.order, current.order, section.id, targetId, edge) }))}
-              onMove={(direction) => changeContactGroups((current) => { const target = current.order[current.order.indexOf(section.id) + direction]; return target ? { ...current, order: moveProfileOrder(current.order, current.order, section.id, target, direction < 0 ? "before" : "after") } : current; })}
+              onReorder={(targetId, edge) => changeContactGroups((current) => reorderContactGroup(current, section.id, targetId, edge))}
+              onMove={(direction) => changeContactGroups((current) => { const target = current.order[current.order.indexOf(section.id) + direction]; return target ? reorderContactGroup(current, section.id, target, direction < 0 ? "before" : "after") : current; })}
               onContext={(x, y) => openGroupContextAt(section.id, x, y)} />{compactMode && section.id !== UNGROUPED_ID && <button type="button" className="compact-action" aria-label={language === "ru" ? `Меню группы ${section.name}` : `Menu for ${section.name}`} onClick={(event) => { event.stopPropagation(); const r = event.currentTarget.getBoundingClientRect(); openGroupContextAt(section.id, r.left, r.bottom); }}>⋮</button>}</div>
             {!contactGroups.collapsed.includes(section.id) && section.contacts.map(renderContactRow)}
           </div>) : visibleChats.map(renderContactRow)}
@@ -5565,23 +6533,23 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
       <div className="chat-list-splitter" role="separator" aria-label={screen === "settings" ? "Изменить ширину меню настроек" : "Изменить ширину списка контактов"} aria-orientation="vertical" onPointerDown={(event) => { event.preventDefault(); event.currentTarget.setPointerCapture(event.pointerId); isResizingListRef.current = true; setIsResizingList(true); resizeChatList(event.clientX); }} onPointerMove={(event) => { if (isResizingListRef.current) resizeChatList(event.clientX); }} onPointerUp={(event) => { if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId); finishChatListResize(); }} onPointerCancel={finishChatListResize} onLostPointerCapture={finishChatListResize} />
 
       {screen === "chat" ? <section className="conversation" hidden={compactMode && !compactChatOpen && !addContactOpen && !incomingRequestsOpen} onDragEnter={(event) => {
-        if (platformCapabilities.nativeFilesystem || !hasFileDragType(event.dataTransfer.types)) return;
+        if (nativeProfileFilesystem || !hasFileDragType(event.dataTransfer.types)) return;
         event.preventDefault();
         event.stopPropagation();
         dragDepthRef.current += 1;
         if (canStageFileForActiveChat) keepFileDragReady();
       }} onDragOver={(event) => {
-        if (platformCapabilities.nativeFilesystem || !hasFileDragType(event.dataTransfer.types)) return;
+        if (nativeProfileFilesystem || !hasFileDragType(event.dataTransfer.types)) return;
         event.preventDefault();
         event.stopPropagation();
         if (canStageFileForActiveChat) keepFileDragReady();
       }} onDragLeave={(event) => {
-        if (platformCapabilities.nativeFilesystem) return;
+        if (nativeProfileFilesystem) return;
         event.stopPropagation();
         dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
         if (dragDepthRef.current === 0 || event.currentTarget === event.target) resetFileDrag();
       }} onDrop={(event) => {
-        if (platformCapabilities.nativeFilesystem || !hasFileDragType(event.dataTransfer.types)) return;
+        if (nativeProfileFilesystem || !hasFileDragType(event.dataTransfer.types)) return;
         event.preventDefault();
         event.stopPropagation();
         resetFileDrag();
@@ -5590,13 +6558,13 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
         {active.id && !incomingRequestsOpen && <header className="conversation-header">
           {compactMode && <button type="button" className="compact-action compact-chat-back" onClick={returnToCompactList} aria-label={t("Назад")}>←</button>}
           <span className={`avatar ${active.color} contact-status-${active.status}`}><AvatarImage path={active.avatarPath} initial={active.initial} /></span>
-          <span className="header-copy"><strong className={activePqProtected && !activePqIdentityChanged ? "pq-name" : ""} data-i18n-ignore translate="no">{activeName}{compactMode && <span className={`compact-presence ${active.status}`}><span className="compact-presence-separator" aria-hidden="true"> · </span>{t(active.status === "online" ? "Онлайн" : active.status === "away" ? "Отошёл" : active.status === "busy" ? "Занят" : "Отключен").toLocaleLowerCase(language)}</span>}</strong><small><span className={`header-meta ${activePqProtected && !activePqIdentityChanged ? "pq-active" : ""}`} role={activePqIdentityChanged ? "alert" : undefined} title={activePqIdentityChanged ? activePqIdentityWarning : undefined} aria-label={activePqIdentityChanged ? activePqIdentityWarning : undefined} data-kaigen-pq-identity-warning={activePqIdentityChanged ? "true" : undefined} style={activePqIdentityChanged ? { color: "var(--kaigen-theme-app-pq-history-message-em-color-14srbwu)", fontWeight: 700 } : undefined}>{activePqIdentityChanged ? (language === "ru" ? "PQ-ключ изменился — не принят" : "PQ key changed — not trusted") : activePqProtected ? t("Защищено пост-квантовым шифрованием") : t("защищённый чат E2EE")}</span></small></span>
-          <div className="header-actions" onClick={(event) => event.stopPropagation()}>{messageSearchOpen ? <div className="message-search"><input aria-label="Поиск в чате" autoFocus value={messageSearch} onChange={(event) => setMessageSearch(event.target.value)} placeholder="Поиск в чате" /><span className="message-search-count" aria-live="polite">{messageSearchBusy ? "…" : messageSearch.trim() ? messageSearchMatches.length ? `${searchPage.offset + messageSearchIndex + 1}/${searchPage.offset + messageSearchMatches.length}${searchNextCursor ? "+" : ""}` : "0/0" : ""}</span><button disabled={!messageSearchMatches.length} onClick={() => moveSearchResult(-1)} aria-label="Предыдущее совпадение" title="Предыдущее совпадение">‹</button><button disabled={!messageSearchMatches.length} onClick={() => moveSearchResult(1)} aria-label="Следующее совпадение" title="Следующее совпадение">›</button><button onClick={closeMessageSearch} aria-label="Закрыть поиск" title="Закрыть поиск">×</button></div> : <button onClick={() => setMessageSearchOpen(true)} aria-label="Поиск">⌕</button>}<span className="more-actions"><button onClick={() => { const next = !contactMenuOpen; dismissContextMenus(); setContactMenuOpen(next); }} aria-label="Меню">⋮</button>{contactMenuOpen && <div className="contact-menu"><button onClick={() => { openContactAction("rename", active); }}>Переименовать контакт</button><button onClick={exportHistory}>Экспорт истории чата</button><button onClick={clearContactHistory}>Очистить историю чата</button><PqSessionControl key={pqContactKey(activeProfileId, active.publicKey ?? active.id)} status={activePq} onCommand={(command, allowLegacy) => { updatePqStatus(command, allowLegacy); setContactMenuOpen(false); }} /><button className="danger-menu" onClick={() => { openContactAction("delete", active); }}>Удалить контакт</button></div>}</span></div>
+          <span className="header-copy"><strong className={activePqProtected && !activePqIdentityChanged ? "pq-name" : ""} data-i18n-ignore translate="no">{activeName}{compactMode && <span className={`compact-presence ${active.status}`}><span className="compact-presence-separator" aria-hidden="true"> · </span>{t(contactStatusText(active.status)).toLocaleLowerCase(language)}</span>}</strong><small><span className={`header-meta ${activePqProtected && !activePqIdentityChanged ? "pq-active" : ""}`} role={activePqIdentityChanged ? "alert" : undefined} title={activePqIdentityChanged ? activePqIdentityWarning : undefined} aria-label={activePqIdentityChanged ? activePqIdentityWarning : undefined} data-kaigen-pq-identity-warning={activePqIdentityChanged ? "true" : undefined} style={activePqIdentityChanged ? { color: "var(--kaigen-theme-app-pq-history-message-em-color-14srbwu)", fontWeight: 700 } : undefined}>{activePqIdentityChanged ? (language === "ru" ? "PQ-ключ изменился — не принят" : "PQ key changed — not trusted") : activePqProtected ? t("Защищено пост-квантовым шифрованием") : t("защищённый чат E2EE")}</span></small></span>
+          <div className="header-actions" onClick={(event) => event.stopPropagation()}>{messageSearchOpen ? <div className="message-search"><input aria-label="Поиск в чате" autoFocus value={messageSearch} onChange={(event) => setMessageSearch(event.target.value)} placeholder="Поиск в чате" /><span className="message-search-count" aria-live="polite">{messageSearchBusy ? "…" : messageSearch.trim() ? messageSearchMatches.length ? `${searchPage.offset + messageSearchIndex + 1}/${searchPage.offset + messageSearchMatches.length}${searchNextCursor ? "+" : ""}` : "0/0" : ""}</span><button disabled={!messageSearchMatches.length} onClick={() => moveSearchResult(-1)} aria-label="Предыдущее совпадение" title="Предыдущее совпадение">‹</button><button disabled={!messageSearchMatches.length} onClick={() => moveSearchResult(1)} aria-label="Следующее совпадение" title="Следующее совпадение">›</button><button onClick={closeMessageSearch} aria-label="Закрыть поиск" title="Закрыть поиск">×</button></div> : <button onClick={() => setMessageSearchOpen(true)} aria-label="Поиск">⌕</button>}<span className="more-actions"><button onClick={() => { const next = !contactMenuOpen; dismissContextMenus(); setContactMenuOpen(next); }} aria-label="Меню">⋮</button>{contactMenuOpen && <div className="contact-menu"><button onClick={() => { openContactAction("rename", active); }}>Переименовать контакт</button><button onClick={exportHistory}>Экспорт истории чата</button><button onClick={clearContactHistory}>Очистить историю чата</button><PqSessionControl key={pqContactKey(activeProfileId, active.publicKey ?? active.id)} status={activePq} onCommand={(command) => { updatePqStatus(command); setContactMenuOpen(false); }} /><button className="danger-menu" onClick={() => { openContactAction("delete", active); }}>Удалить контакт</button></div>}</span></div>
         </header>}
 
             {addContactOpen && <section className="friend-requests-view add-contact-view" data-kaigen-native-text-menu={platformCapabilities.browserAuthorization ? "true" : undefined}>
           <header>{compactMode && <button type="button" className="compact-action" onClick={returnToCompactList} aria-label={t("Назад")}>←</button>}<h2>Отправить запрос на переписку</h2></header>
-          <div className="add-contact-content"><form className="add-contact-card" onSubmit={submitFriendRequest}><label>Tox ID<input value={contactToxId} onChange={(event) => { contactClipboardRef.current.cancel(); setContactToxId(event.target.value); }} placeholder="76 символов" autoFocus required /></label><label>Сообщение для авторизации<textarea value={friendRequestMessage} onChange={(event) => { friendRequestCustomized.current = true; setFriendRequestMessage(event.target.value); }} data-i18n-ignore translate="no" required /></label>{addContactStatus && <p className="add-contact-status">{addContactStatus} <button type="button" className="request-status-link" onClick={() => { setAddContactOpen(false); setIncomingRequestsOpen(true); }}>Исходящие запросы доступны в разделе «Запросы на переписку».</button></p>}<div><button type="button" className="text-button" onClick={() => setAddContactOpen(false)}>Отмена</button><button className="send-file-button" type="submit">Отправить запрос</button></div></form></div>
+          <div className="add-contact-content"><form className="add-contact-card" onSubmit={submitFriendRequest}><label>Tox ID<input value={contactToxId} onChange={(event) => { contactClipboardRef.current.cancel(); setContactToxId(event.target.value); }} placeholder="76 символов" autoFocus required /></label><label>Сообщение для авторизации<textarea value={friendRequestMessage} onChange={(event) => { friendRequestCustomized.current = true; setFriendRequestMessage(event.target.value); }} data-i18n-ignore translate="no" required /></label>{addContactStatus && <p className="add-contact-status">{addContactStatus} <button type="button" className="request-status-link" onClick={openFriendRequests}>Исходящие запросы доступны в разделе «Запросы на переписку».</button></p>}<div><button type="button" className="text-button" onClick={() => setAddContactOpen(false)}>Отмена</button><button className="send-file-button" type="submit">Отправить запрос</button></div></form></div>
         </section>}
 
         {incomingRequestsOpen && <section className="friend-requests-view">
@@ -5609,7 +6577,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
 
         {canStageFileForActiveChat && isDraggingFile && <div className="file-drop-overlay" aria-hidden="true">Отпустите файл, чтобы отправить его в чат</div>}
         {pendingFileMatchesActiveTarget && pendingFiles.length > 0 && <div className="file-confirm-overlay" role="dialog" aria-modal="true" aria-label={t("Подтверждение отправки файлов")}><div className="file-confirm-card"><b>{pendingFiles.length === 1 ? t("Отправить файл?") : `${t("Отправить файлы")} (${pendingFiles.length})?`}</b><div className="file-confirm-list">{pendingFiles.map((selection, index) => <span data-i18n-ignore translate="no" key={`${selection.file.name}-${selection.size}-${index}`}>{selection.file.name} · {formatFileSize(selection.size)}</span>)}</div>{fileSendError && <small className="file-confirm-error">{fileSendError}</small>}<div><button className="text-button" disabled={fileSendBusy} onClick={clearPendingFile}>{t("Отмена")}</button><button className="send-file-button" disabled={fileSendBusy} onClick={() => void confirmFileSend()}>{fileSendBusy ? "…" : t("Отправить")}</button></div></div></div>}
-        {fullImage?.url && <ChatImageViewer url={fullImage.url} name={fullImage.name} onClose={() => setFullImage(null)} />}
+        {fullMedia?.url && <ChatImageViewer video={fullMedia.videoPreview} url={fullMedia.url} name={fullMedia.name} onClose={() => setFullMedia(null)} />}
 
         <div className={`message-scroll ${messageScrollActive ? "scroll-active" : ""}`} ref={messageScrollRef} tabIndex={0} onWheel={noteUserScrollActivity} onPointerDown={startDirectScroll} onPointerMove={moveDirectScroll} onPointerUp={finishDirectScroll} onPointerCancel={finishDirectScroll} onKeyDown={noteScrollKey} onScroll={updateLatestButton}>
           {!active.id && <p className="empty-conversation">Выберите контакт из списка или добавьте новый по Tox ID.</p>}
@@ -5619,39 +6587,80 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
           {renderedMessages.length > 0 && historySpaceBefore > 0 && <div className="history-space" aria-hidden="true" style={{ height: Math.max(0, historySpaceBefore - 8) }} />}
           {renderedMessages.map((message, windowIndex) => {
             const index = messageWindow.start + windowIndex;
+            const unavailableAttachment = message.attachment?.unavailableLocally === true;
+            const mediaKind = !unavailableAttachment && message.attachment?.path && message.attachment.completed && !message.attachment.image
+              ? chatMediaKind(message.attachment.name) : undefined;
+            const fileActionLabel = unavailableAttachment ? t("Файл отсутствует в папке загрузок")
+              : platformCapabilities.nativeFilesystem ? t("Показать в папке") : t("Сохранить файл");
+            const mediaKey = JSON.stringify([viewKey, message.coreId ?? message.id, message.attachment?.path]);
             return (
             <Fragment key={message.coreId ?? message.id}>
             {(index === 0 || messageDayModelKey(messages[index - 1].timestamp) !== messageDayModelKey(message.timestamp)) && <span className="date-chip" data-kaigen-ui-entity-key={opaqueUiEntityKey("message-day", messageDayModelKey(message.timestamp))}>{formatMessageDay(message.timestamp, language)}</span>}
             {unseenBoundary === (message.coreId ?? String(message.id)) && <span className="chat-unseen-divider">{language === "ru" ? "Новые сообщения" : "New messages"}</span>}
-            {message.event?.kind === "pq" ? <PqHistoryCard event={message.event} mine={!!message.mine} time={message.time} messageKey={message.coreId ?? String(message.id)} contactName={activeName} onWithdraw={() => updatePqStatus("withdraw_pq_session")} onReject={() => updatePqStatus("reject_pq_session")} onAccept={() => updatePqStatus("accept_pq_session")} /> : <article tabIndex={0} data-message-key={message.coreId ?? String(message.id)} data-kaigen-ui-entity-key={opaqueUiEntityKey("chat-message", message.coreId ?? String(message.id))} className={`message ${message.mine ? "mine" : ""} ${message.attachment?.url ? "has-image" : ""} ${message.attachment && !message.attachment.url ? "has-file" : ""}`}>
+            {message.event?.kind === "pq" ? <PqHistoryCard event={message.event} mine={!!message.mine} time={message.time} messageKey={message.coreId ?? String(message.id)} contactName={activeName} onWithdraw={() => updatePqStatus("withdraw_pq_session")} onReject={() => updatePqStatus("reject_pq_session")} onAccept={() => updatePqStatus("accept_pq_session")} /> : <article tabIndex={0} data-message-key={message.coreId ?? String(message.id)} data-kaigen-ui-entity-key={opaqueUiEntityKey("chat-message", message.coreId ?? String(message.id))} className={`message ${message.mine ? "mine" : ""} ${message.attachment?.url ? "has-image" : ""} ${message.attachment && !message.attachment.url ? "has-file" : ""} ${mediaKind ? "has-media" : ""}`}>
               {message.quote && <MessageQuotePreview quote={quoteForDisplay(message)} onActivate={(messageId) => jumpToMessageKey(messageId)} />}
               {message.attachment && <>
-                {message.attachment.url && <div className="image-attachment"><button onClick={() => message.attachment?.completed && setFullImage(message.attachment)} title={message.attachment.completed ? "Открыть изображение" : "Изображение ещё передаётся"}><ChatImagePreview src={message.attachment.url} name={message.attachment.name} onGeometryChange={() => correctScrollAfterMediaLoad(message.coreId ?? String(message.id))} /></button>{isTerminalTransferState(message.attachment.transferState) && !message.attachment.completed && <span className="image-transfer-terminal">{attachmentTransferTitle(message.attachment, !!message.mine)}</span>}</div>}
+                {message.attachment.url && <div className="image-attachment"><button onClick={() => { if (message.attachment?.completed) { stopChatMediaPlayback(); videoPreviewRequestRef.current += 1; setFullMedia(message.attachment); } }} title={message.attachment.completed ? "Открыть изображение" : "Изображение ещё передаётся"}><ChatImagePreview src={message.attachment.url} name={message.attachment.name} onGeometryChange={() => correctScrollAfterMediaLoad(message.coreId ?? String(message.id))} /></button>{isTerminalTransferState(message.attachment.transferState) && !message.attachment.completed && <span className="image-transfer-terminal">{attachmentTransferTitle(message.attachment, !!message.mine)}</span>}{renderAttachmentTransferControls(message)}</div>}
                 {message.attachment.url && !shouldShowTransferActivity(message.attachment.completed, message.attachment.transferState) && <time className="image-attachment-time">{message.time}{renderDeliveryState(message)}</time>}
-                {!message.attachment.url && message.attachment.image && message.attachment.completed && <button className="hidden-image-card" onClick={() => revealAttachmentImage(message)}><span>{t(showReceivedImages || revealedImages.includes(message.coreId ?? "") ? "Восстановление изображения…" : "Изображение скрыто настройками приватности")}</span><small data-i18n-ignore translate="no">{renderSearchValue(message, message.attachment.name, "attachment")} · {formatFileSize(message.attachment.size)}</small><b>{t(showReceivedImages || revealedImages.includes(message.coreId ?? "") ? "Повторить показ" : "Показать")}</b></button>}
-                {!message.attachment.url && !(message.attachment.image && message.attachment.completed) && <div className="file-attachment">
-                  <span className="file-attachment-icon" aria-hidden="true"><svg viewBox="0 0 16 16"><path d="M3.5 1.5h5.25l3.75 3.75v9.25h-9z" /><path d="M8.75 1.5v3.75h3.75" /><path d="M5.75 8.25h4.5M5.75 10.75h4.5" /></svg></span><span data-i18n-ignore translate="no">{renderSearchValue(message, message.attachment.name, "attachment")}</span>
-                  {message.attachment.completed || isTerminalTransferState(message.attachment.transferState) ? <small className="file-static-meta">{isTerminalTransferState(message.attachment.transferState) ? attachmentTransferTitle(message.attachment, !!message.mine) : formatFileSize(message.attachment.size)}{platformCapabilities.outgoingTransferRetry && message.mine && message.attachment.transferState === "failed" && <button className="transfer-control transfer-retry" aria-label="Повторить передачу" title="Повторить передачу" onClick={() => retryAttachmentTransfer(message)}>↻</button>}<time>{message.time}{message.mine && <span className="delivery-state">{shouldShowPendingDelivery(message.delivery, message.attachment.transferState) ? <i className="delivery-spinner" title="Ожидает отправки" aria-label="Ожидает отправки" /> : message.delivery === "delivered" ? <span title={deliveryReceiptTitle(message)} aria-label={deliveryReceiptTitle(message)}>✓</span> : null}</span>}</time></small> : <div className="attachment-transfer-actions attachment-transfer-actions-header">
-                    {!message.mine && message.attachment.transferState === "awaiting_confirmation" && <button type="button" className="transfer-control transfer-retry transfer-accept" disabled={!canAcceptIncomingFile(message.mine, message.attachment)} aria-label={t("Принять файл")} title={t("Принять файл")} onClick={() => controlAttachmentTransfer(message, "resume")}><svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false"><path d="m3.5 8 3 3 6-6" /></svg></button>}
-                    {message.attachment.transferState !== "queued" && message.attachment.transferState !== "awaiting_confirmation" && <button className={`transfer-control ${message.attachment.transferState === "paused" ? "transfer-resume" : "transfer-pause"}`} aria-label={message.attachment.transferState === "paused" ? "Продолжить передачу" : "Приостановить передачу"} title={message.attachment.transferState === "paused" ? "Продолжить передачу" : "Приостановить передачу"} onClick={() => controlAttachmentTransfer(message, message.attachment?.transferState === "paused" ? "resume" : "pause")}>{message.attachment.transferState === "paused" ? "▶" : "Ⅱ"}</button>}
-                    <button className="transfer-control transfer-cancel" aria-label="Отменить передачу" title="Отменить передачу" onClick={() => controlAttachmentTransfer(message, "cancel")}>×</button>
-                  </div>}
+                {!unavailableAttachment && !message.attachment.url && message.attachment.image && message.attachment.completed && <button className="hidden-image-card" onClick={() => revealAttachmentImage(message)}><span>{t(showReceivedImages || revealedImages.includes(message.coreId ?? "") ? "Восстановление изображения…" : "Изображение скрыто настройками приватности")}</span><small data-i18n-ignore translate="no">{renderSearchValue(message, message.attachment.name, "attachment")} · {formatFileSize(message.attachment.size)}</small><b>{t(showReceivedImages || revealedImages.includes(message.coreId ?? "") ? "Повторить показ" : "Показать")}</b></button>}
+                {mediaKind && <>
+                  <ChatMediaCard key={mediaKey} sourceKey={mediaKey} kind={mediaKind} name={message.attachment.name}
+                    loadSource={(signal) => {
+                      const request = attachmentFileRequest(message, true);
+                      if (!request) return Promise.reject(new Error("TRANSFER_WORKSPACE_BOUNDARY"));
+                      return loadAttachmentMedia(request, signal, message.mine ? "outgoing" : "incoming");
+                    }}
+                    onOpenOriginal={message.mine ? undefined : () => revealReceivedFile(message)}
+                    onGeometryChange={() => correctScrollAfterMediaLoad(message.coreId ?? String(message.id))}
+                    onExpandedChange={(expanded) => {
+                      if (expanded) setWindowAnchorKey(message.coreId ?? String(message.id));
+                      setExpandedMediaKey((current) => expanded ? mediaKey : current === mediaKey ? null : current);
+                    }} />
+                  <small className="chat-file-card-meta"><span>{formatFileSize(message.attachment.size)}</span><time>{message.time}{renderDeliveryState(message)}</time></small>
+                </>}
+                {!message.attachment.url && !mediaKind && (unavailableAttachment || !(message.attachment.image && message.attachment.completed)) && <div className="file-attachment standard-file-attachment">
+                  <button type="button" className="file-card-primary" disabled={unavailableAttachment || message.mine || !message.attachment.completed || !message.attachment.path || savingFileKey === message.coreId}
+                    onClick={() => revealReceivedFile(message)} aria-label={`${message.attachment.name} — ${fileActionLabel}`}>
+                    <span className="file-card-icon" aria-hidden="true"><svg viewBox="0 0 32 40" fill="none" stroke="currentColor" strokeWidth="1.6"><path d="M5 2h14l8 8v28H5z" /><path d="M19 2v9h8M10 20h12M10 26h12" /></svg></span>
+                    <span className="file-card-name" data-i18n-ignore translate="no">{renderSearchValue(message, message.attachment.name, "attachment")}</span>
+                    {!message.mine && message.attachment.completed && <span className="file-card-hint">{fileActionLabel}</span>}
+                  </button>
+                  {message.attachment.completed || isTerminalTransferState(message.attachment.transferState) ? <small className="file-static-meta">{isTerminalTransferState(message.attachment.transferState) ? attachmentTransferTitle(message.attachment, !!message.mine) : formatFileSize(message.attachment.size)}{platformCapabilities.outgoingTransferRetry && message.mine && message.attachment.transferState === "failed" && <button className="transfer-control transfer-retry" aria-label="Повторить передачу" title="Повторить передачу" onClick={() => retryAttachmentTransfer(message)}>↻</button>}<time>{message.time}{message.mine && <span className="delivery-state">{shouldShowPendingDelivery(message.delivery, message.attachment.transferState) ? <i className="delivery-spinner" title="Ожидает отправки" aria-label="Ожидает отправки" /> : message.delivery === "delivered" ? <span title={deliveryReceiptTitle(message)} aria-label={deliveryReceiptTitle(message)}>✓</span> : null}</span>}</time></small> : renderAttachmentTransferControls(message, true)}
                 </div>}
                 {shouldShowTransferActivity(message.attachment.completed, message.attachment.transferState) && <div className={`attachment-transfer ${message.attachment.url ? "attachment-transfer-image" : "attachment-transfer-file"}`} aria-label={attachmentTransferText(message.attachment, !!message.mine)}>
                   <div className="attachment-transfer-head"><b>{attachmentTransferTitle(message.attachment, !!message.mine)}</b>{message.attachment.url && <span>{attachmentProgress(message.attachment)}%</span>}</div>
                   <div className="attachment-progress"><i style={{ width: `${attachmentProgress(message.attachment)}%` }} /></div>
-                  <small>{attachmentTransferText(message.attachment, !!message.mine)}</small>
-                  {(message.attachment.error || (message.coreId && transferErrors[message.coreId])) && <small className="attachment-transfer-error">{formatUserFacingError(message.coreId && transferErrors[message.coreId] ? transferErrors[message.coreId] : message.attachment.error, { ru: "Передача файла завершилась ошибкой", en: "File transfer failed" }, language)}</small>}
+                  {(!message.attachment.url || attachmentTransferText(message.attachment, !!message.mine) !== attachmentTransferTitle(message.attachment, !!message.mine)) && <small>{attachmentTransferText(message.attachment, !!message.mine)}</small>}
+                  {!message.attachment.completed && !["complete", "cancelled"].includes(message.attachment.transferState ?? "")
+                    && (message.attachment.error || (message.coreId && transferErrors[message.coreId])) && <small className="attachment-transfer-error">{formatUserFacingError(message.coreId && transferErrors[message.coreId] ? transferErrors[message.coreId] : message.attachment.error, { ru: "Передача файла завершилась ошибкой", en: "File transfer failed" }, language, false)}</small>}
                   <small className="file-transfer-meta">{message.attachment.url ? formatFileSize(message.attachment.size) : <span className="file-transfer-percent">{attachmentProgress(message.attachment)}%</span>}<time>{message.time}{message.mine && <span className="delivery-state">{shouldShowPendingDelivery(message.delivery, message.attachment.transferState) ? <i className="delivery-spinner" title="Ожидает отправки" aria-label="Ожидает отправки" /> : message.delivery === "delivered" ? <span title={deliveryReceiptTitle(message)} aria-label={deliveryReceiptTitle(message)}>✓</span> : null}</span>}</time></small>
                 </div>}
               </>}
               {message.text ? <p><span className="message-text" data-i18n-ignore translate="no">{renderMessageText(message)}</span>{!message.attachment && <time>{message.time}{renderDeliveryState(message)}</time>}</p> : !message.attachment && <div className="attachment-message-meta"><time>{message.time}{renderDeliveryState(message)}</time></div>}
-              {message.attachment && isTerminalTransferState(message.attachment.transferState) && (message.attachment.error || (message.coreId && transferErrors[message.coreId])) && <small className="attachment-transfer-error">{formatUserFacingError(message.coreId && transferErrors[message.coreId] ? transferErrors[message.coreId] : message.attachment.error, { ru: "Передача файла завершилась ошибкой", en: "File transfer failed" }, language)}</small>}
+              {message.attachment && message.attachment.transferState === "failed" && (message.attachment.error || (message.coreId && transferErrors[message.coreId])) && <small className="attachment-transfer-error">{formatUserFacingError(message.coreId && transferErrors[message.coreId] ? transferErrors[message.coreId] : message.attachment.error, { ru: "Передача файла завершилась ошибкой", en: "File transfer failed" }, language, false)}</small>}
               <ReactionBar reactions={message.reactions} statusMessage={reactionErrors[message.coreId ?? ""]} />
             </article>}
             </Fragment>
           ); })}
           {renderedMessages.length > 0 && historySpaceAfter > 0 && <div className="history-space" aria-hidden="true" style={{ height: Math.max(0, historySpaceAfter - 8) }} />}
+          {[...webAcceptedSends, ...webQueuedSends.map((operation) => ({ operation, messageId: undefined, delivery: "pending" as const })),
+            ...nativePendingSends.map(({ operation, queuedAt, messageId, delivery }) => ({ operation: { ...operation, webQueuedAt: queuedAt }, messageId, delivery }))]
+            .filter(({ operation, messageId }) => operation.profileId === activeProfileId && operation.chatId === active.id
+              && !(messageSnapshotChatRef.current === active.id
+                && (historyOperationIds.has(operation.operationId) || (messageId && historyMessageIds.has(messageId)))))
+            .sort((a, b) => a.operation.webQueuedAt - b.operation.webQueuedAt)
+            .map(({ operation, delivery }) => {
+            const message: Message = {
+              id: 0, timestamp: operation.webQueuedAt / 1000,
+              time: formatChatDate(new Date(operation.webQueuedAt), language, "time"),
+              text: operation.text, mine: true, delivery: delivery === "queued" ? "pending" : delivery,
+              quote: operation.quote, formatting: operation.formatting, protocolVersion: 1,
+            };
+            return <article key={operation.operationId} className="message mine">
+              {message.quote && <MessageQuotePreview quote={quoteForDisplay(message)} onActivate={jumpToMessageKey} />}
+              <p><span className="message-text" data-i18n-ignore translate="no">{renderMessageText(message)}</span><time>{message.time}{renderDeliveryState(message)}</time></p>
+            </article>;
+          })}
           {messageSearchOpen && messageSearch.trim() && !messageSearchBusy && messageSearchMatches.length === 0 && <p className="empty-search">Совпадений не найдено</p>}
         </div>
 
@@ -5666,11 +6675,13 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
         {(!compactMode || compactChatOpen) && active.friendNumber !== undefined && active.publicKey && activePq?.identity_needs_entropy && activePq.identity_waiting && <PqEntropy key={`${pqContactKey(activeProfileId, active.publicKey)}:entropy`} identityKey={pqContactKey(activeProfileId, active.publicKey)} publicKey={active.publicKey} friendNumber={active.friendNumber} onBegin={beginPqEntropy} onComplete={completePqIdentity} />}
         {pqEntropySuccess?.profileId === activeProfileId && pqEntropySuccess.chatId === active.id && pqEntropySuccess.friendNumber === active.friendNumber && <div className="pq-entropy-success" role="status">{t("Дополнительная случайность собрана")}</div>}
         {reactionNotices.length > 0 && <div className="chat-service-notices">{reactionNotices.map((notice) => <OffscreenReactionNotice key={`${notice.messageKey}:${notice.revision}`} reaction={notice.reaction} removed={notice.removed} onNavigate={() => navigateReactionNotice(notice.messageKey)} />)}</div>}
-        {failedSends.filter((operation) => operation.profileId === activeProfileId && operation.chatId === active.id).map((operation) => <button key={operation.operationId} className="chat-send-retry" onClick={() => void submitSendOperation(operation)}><span data-i18n-ignore translate="no">{operation.text.slice(0, 160)}</span><b>{language === "ru" ? "Отправка не подтверждена · проверить и повторить" : "Send not confirmed · check and retry"}</b></button>)}
+        {failedSends.filter((operation) => operation.profileId === activeProfileId && operation.chatId === active.id).map((operation) => <button key={operation.operationId} className="chat-send-retry" disabled={!platformCapabilities.browserAuthorization && sendInFlightRef.current.has(`native:${operation.operationId}`)} onClick={() => void submitSendOperation(operation, true)}><span data-i18n-ignore translate="no">{operation.text.slice(0, 160)}</span><b>{platformCapabilities.browserAuthorization && operation.failureKind === "rejected"
+          ? language === "ru" ? "Сообщение не отправлено · повторить" : "Message not sent · retry"
+          : language === "ru" ? "Отправка не подтверждена · проверить и повторить" : "Send not confirmed · check and retry"}</b></button>)}
         {returnAnchor && <button className="chat-return-anchor" onClick={returnToReadingPosition}>{language === "ru" ? "Вернуться к месту чтения" : "Return to previous position"}</button>}
         {localPersistenceError && <button className="chat-save-error" onClick={() => void persistLocalState()}>{language === "ru" ? "Не удалось сохранить локальные данные · повторить" : "Local data could not be saved · retry"}</button>}
         <MessageComposer
-          key={`${pqContactKey(activeProfileId, active.publicKey ?? active.id)}:composer`}
+          key={`${pqContactKey(activeProfileId, active.publicKey ?? active.id)}:composer:${contactIncarnationsRef.current[active.publicKey?.toUpperCase() ?? ""] ?? 0}`}
           ownerKey={pqContactKey(activeProfileId, active.publicKey ?? active.id)}
           chatId={activeChat}
           autoFocusOnChatChange={!platformCapabilities.browserAuthorization || !compactMode || activePqComposerStage !== "entropy"}
@@ -5688,12 +6699,16 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
           onDraftChange={updateDraft}
           onSend={stableSendMessage}
           onStageFiles={stageFiles}
+          onCaptureFileSelection={() => {
+            const target = activeFileTargetRef.current;
+            return (files) => { stageFiles(files, target); };
+          }}
           onPasteFiles={stagePastedFiles}
-          onPickFile={platformCapabilities.nativeFilesystem ? pickNativeFile : undefined}
+          onPickFile={nativeProfileFilesystem ? pickNativeFile : undefined}
           fileActionsEnabled={canStageFileForActiveChat}
         />
         </div>
-      </section> : <Settings onDisableProfile={disableProfileAfterDraftSave} profileId={activeProfileId} compact={compactSidebar} singlePane={compactMode} compactSectionOpen={compactSettingsSectionOpen} onCompactSectionOpen={() => setCompactSettingsSectionOpen(true)} sidebarHeader={compactMode ? undefined : profileSidebarHeader} avatarState={ownAvatarState} openRequest={settingsOpenRequest} appearance={appearance} onAppearanceApply={setAppearance} avatarUrl={profileAvatar} onAvatarChange={updateProfileAvatar} nickname={profileName} nicknameLoadState={nicknameLoadState} onNicknameRetry={refreshProfileName} onNicknameChange={updateProfileName} sendOnEnter={sendOnEnter} onSendOnEnterChange={setSendOnEnter} historyMessageLimit={historyMessageLimit} onHistoryMessageLimitChange={setHistoryMessageLimit} onAutoDownloadImagesChange={setAutoDownloadImages} saveChatHistory={saveChatHistory} onSaveChatHistoryChange={setSaveChatHistory} notifyMessages={notifyMessages} onNotifyMessagesChange={setNotifyMessages} notifyRequests={notifyRequests} onNotifyRequestsChange={setNotifyRequests} notifySound={notifySound} onNotifySoundChange={setNotifySound} notificationVolume={notificationVolume} onNotificationVolumeChange={setNotificationVolume} spellcheckEnabled={spellcheckEnabled} onSpellcheckEnabledChange={setSpellcheckEnabled} spellcheckRussian={spellcheckRussian} onSpellcheckRussianChange={setSpellcheckRussian} spellcheckEnglish={spellcheckEnglish} onSpellcheckEnglishChange={setSpellcheckEnglish} toxId={ownToxId} />}
+      </section> : <Settings onDisableProfile={disableProfileAfterDraftSave} profileId={activeProfileId} compact={compactSidebar} singlePane={compactMode} compactSectionOpen={compactSettingsSectionOpen} onCompactSectionOpen={() => setCompactSettingsSectionOpen(true)} sidebarHeader={compactMode ? undefined : profileSidebarHeader} avatarState={ownAvatarState} openRequest={settingsOpenRequest} appearance={appearance} onAppearanceApply={setAppearance} avatarUrl={profileAvatar} onAvatarChange={updateProfileAvatar} nickname={profileName} nicknameLoadState={nicknameLoadState} onNicknameRetry={refreshProfileName} onNicknameChange={updateProfileName} sendOnEnter={sendOnEnter} onSendOnEnterChange={setSendOnEnter} historyMessageLimit={historyMessageLimit} onHistoryMessageLimitChange={setHistoryMessageLimit} onAutoDownloadImagesChange={setAutoDownloadImages} saveChatHistory={saveChatHistory} onSaveChatHistoryChange={setSaveChatHistory} profileSettingsReady={persistenceReady} notifyMessages={notifyMessages} onNotifyMessagesChange={(enabled) => updateNotificationPreference("notifyMessages", enabled)} notifyRequests={notifyRequests} onNotifyRequestsChange={(enabled) => updateNotificationPreference("notifyRequests", enabled)} notifySound={notifySound} onNotifySoundChange={setNotifySound} notificationVolume={notificationVolume} onNotificationVolumeChange={setNotificationVolume} spellcheckEnabled={spellcheckEnabled} onSpellcheckEnabledChange={(enabled) => void updateSpellcheckPreference("spellcheckEnabled", enabled)} spellcheckRussian={spellcheckRussian} onSpellcheckRussianChange={(enabled) => void updateSpellcheckPreference("spellcheckRussian", enabled)} spellcheckEnglish={spellcheckEnglish} onSpellcheckEnglishChange={(enabled) => void updateSpellcheckPreference("spellcheckEnglish", enabled)} spellcheckSaving={!persistenceReady || spellcheckSave?.status === "saving"} spellcheckSaveError={spellcheckSave?.profileId === activeProfileId && spellcheckSave.status === "failed"} toxId={ownToxId} />}
     </main>
   );
 }

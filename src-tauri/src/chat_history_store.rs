@@ -32,9 +32,6 @@ struct StoreManifest {
     deleted_messages: HashMap<String, HashSet<String>>,
 }
 
-#[path = "legacy_033_migration.rs"]
-pub(super) mod legacy_033_migration;
-
 #[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 struct ContactManifest {
@@ -182,7 +179,9 @@ const fn initial_revision() -> u64 {
     1
 }
 
-static REGISTRY: OnceLock<Mutex<HashMap<PathBuf, RegisteredStore>>> = OnceLock::new();
+// Detached slots are closed with take(); they never acquire a replacement store.
+type RegisteredStoreSlot = Arc<Mutex<Option<RegisteredStore>>>;
+static REGISTRY: OnceLock<Mutex<HashMap<PathBuf, RegisteredStoreSlot>>> = OnceLock::new();
 
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -229,8 +228,17 @@ fn test_commit_cut(root: &Path, cut: CommitCut) -> Result<(), String> {
     })
 }
 
-fn registry() -> &'static Mutex<HashMap<PathBuf, RegisteredStore>> {
+fn registry() -> &'static Mutex<HashMap<PathBuf, RegisteredStoreSlot>> {
     REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn registered_slot(history_path: &Path) -> Result<RegisteredStoreSlot, String> {
+    registry()
+        .lock()
+        .map_err(|_| "CHAT_HISTORY_REGISTRY_LOCK_POISONED".to_string())?
+        .get(history_path)
+        .cloned()
+        .ok_or_else(|| "CHAT_HISTORY_STORE_NOT_REGISTERED".to_string())
 }
 
 fn ensure_available(store: &RegisteredStore) -> Result<(), String> {
@@ -242,11 +250,12 @@ fn ensure_available(store: &RegisteredStore) -> Result<(), String> {
 }
 
 fn registered_reader(history_path: &Path) -> Result<RegisteredStoreReader, String> {
-    let stores = registry()
+    let slot = registered_slot(history_path)?;
+    let guard = slot
         .lock()
         .map_err(|_| "CHAT_HISTORY_REGISTRY_LOCK_POISONED".to_string())?;
-    let store = stores
-        .get(history_path)
+    let store = guard
+        .as_ref()
         .ok_or_else(|| "CHAT_HISTORY_STORE_NOT_REGISTERED".to_string())?;
     ensure_available(store)?;
     let files = referenced_files(&store.manifest)
@@ -314,16 +323,12 @@ fn identity_matches(
         && record_key.eq_ignore_ascii_case(friend_public_key)
 }
 
-fn identity_token(friend_number: u32, friend_public_key: &str) -> String {
-    if friend_public_key.is_empty() {
-        format!("number:{friend_number}")
-    } else {
-        format!("key:{}", friend_public_key.to_ascii_uppercase())
-    }
+fn identity_token(friend_public_key: &str) -> String {
+    format!("key:{}", friend_public_key.to_ascii_uppercase())
 }
 
-fn contact_slug(friend_number: u32, friend_public_key: &str) -> String {
-    sha256_hex(identity_token(friend_number, friend_public_key).as_bytes())
+fn contact_slug(friend_public_key: &str) -> String {
+    sha256_hex(identity_token(friend_public_key).as_bytes())
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -365,10 +370,10 @@ fn validate_manifest(manifest: &StoreManifest) -> Result<(), String> {
     let mut identities = HashSet::new();
     let mut files = HashSet::new();
     for contact in &manifest.contacts {
-        if !identities.insert(identity_token(
-            contact.friend_number,
-            &contact.friend_public_key,
-        )) {
+        if contact.friend_public_key.is_empty() {
+            return Err("CHAT_HISTORY_LEGACY_FORMAT_UNSUPPORTED".to_string());
+        }
+        if !identities.insert(identity_token(&contact.friend_public_key)) {
             return Err("CHAT_HISTORY_MANIFEST_DUPLICATE_CONTACT".to_string());
         }
         if contact.revision == 0 || contact.search_epoch == 0 {
@@ -484,7 +489,7 @@ fn write_chunk(
     let bytes =
         serde_json::to_vec(rows).map_err(|_| "CHAT_HISTORY_CHUNK_ENCODE_FAILED".to_string())?;
     let digest = sha256_hex(&bytes);
-    let slug = contact_slug(contact.friend_number, &contact.friend_public_key);
+    let slug = contact_slug(&contact.friend_public_key);
     let file = format!(
         "chunk-{slug}-{generation:016x}-{index:08x}-{}.json",
         &digest[..16]
@@ -554,9 +559,8 @@ fn chunk_may_contain_any<'a>(chunk: &ChunkManifest, ids: impl Iterator<Item = &'
         .any(|message_id| bloom_may_contain(&chunk.id_bloom, message_id))
 }
 
-fn verify_store(root: &Path, manifest: &StoreManifest) -> Result<Vec<Option<u64>>, String> {
+fn verify_store(root: &Path, manifest: &StoreManifest) -> Result<(), String> {
     validate_manifest(manifest)?;
-    let mut last_events = Vec::with_capacity(manifest.contacts.len());
     for contact in &manifest.contacts {
         let mut total = 0usize;
         let mut ids = HashSet::new();
@@ -574,35 +578,28 @@ fn verify_store(root: &Path, manifest: &StoreManifest) -> Result<Vec<Option<u64>
         if total != contact.total {
             return Err("CHAT_HISTORY_MANIFEST_COUNT_MISMATCH".to_string());
         }
-        last_events.push(last_event);
+        if contact.last_event != last_event {
+            return Err("CHAT_HISTORY_LAST_EVENT_MISMATCH".to_string());
+        }
     }
-    Ok(last_events)
+    Ok(())
 }
 
 fn load_verified_manifest(root: &Path) -> Result<StoreManifest, String> {
-    let mut manifest = load_manifest(root)?;
-    let last_events = verify_store(root, &manifest)?;
-    let mut summary_changed = false;
-    for (contact, last_event) in manifest.contacts.iter_mut().zip(last_events) {
-        if contact.last_event != last_event {
-            contact.last_event = last_event;
-            summary_changed = true;
-        }
-    }
-    if summary_changed {
-        // Version-1 manifests predate the compact activity summary. Verification
-        // already streams one bounded chunk at a time, so reuse those maxima and
-        // repair the manifest atomically without materializing full histories.
-        write_manifest(root, &manifest)?;
-    }
+    let manifest = load_manifest(root)?;
+    verify_store(root, &manifest)?;
     Ok(manifest)
 }
 
-fn read_legacy_history(history_path: &Path) -> Result<Vec<ToxMessage>, String> {
-    let bytes = profiles::read_file(history_path)
-        .map_err(|_| "CHAT_HISTORY_LEGACY_READ_FAILED".to_string())?;
-    serde_json::from_slice::<Vec<ToxMessage>>(&bytes)
-        .map_err(|_| "CHAT_HISTORY_LEGACY_DECODE_FAILED".to_string())
+fn history_path_present(path: &Path) -> Result<bool, String> {
+    if let Some(volume) = crate::kai::managed_volume(path) {
+        return Ok(volume.is_file(path)? || volume.is_dir(path)?);
+    }
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(_) => Err("CHAT_HISTORY_METADATA_READ_FAILED".to_string()),
+    }
 }
 
 fn referenced_files(manifest: &StoreManifest) -> HashSet<String> {
@@ -639,30 +636,6 @@ fn cleanup_orphan_chunks(root: &Path, manifest: &StoreManifest) {
     );
 }
 
-fn normalized_legacy_messages(mut messages: Vec<ToxMessage>) -> Vec<ToxMessage> {
-    let reserved = messages
-        .iter()
-        .filter(|message| !message.id.is_empty())
-        .map(|message| message.id.clone())
-        .collect::<HashSet<_>>();
-    let mut seen = HashSet::new();
-    for (ordinal, message) in messages.iter_mut().enumerate() {
-        if message.id.is_empty() || !seen.insert(message.id.clone()) {
-            let base = format!("legacy-{ordinal:016x}");
-            let mut candidate = base.clone();
-            let mut suffix = 0usize;
-            while reserved.contains(&candidate) || seen.contains(&candidate) {
-                suffix = suffix.saturating_add(1);
-                candidate = format!("{base}-{suffix}");
-            }
-            message.id = candidate.clone();
-            message.protocol_version = None;
-            seen.insert(candidate);
-        }
-    }
-    messages
-}
-
 fn group_all(messages: Vec<ToxMessage>) -> Vec<ContactRows> {
     let mut groups = Vec::<ContactRows>::new();
     for message in messages {
@@ -697,6 +670,12 @@ fn build_fresh_manifest(
     generation: u64,
     messages: Vec<ToxMessage>,
 ) -> Result<StoreManifest, String> {
+    if messages
+        .iter()
+        .any(|message| message.friend_public_key.is_empty())
+    {
+        return Err("CHAT_HISTORY_CONTACT_KEY_REQUIRED".to_string());
+    }
     profiles::create_dir_all(root).map_err(|_| "CHAT_HISTORY_STORE_CREATE_FAILED".to_string())?;
     let mut contacts = Vec::new();
     for group in group_all(messages) {
@@ -717,8 +696,7 @@ fn build_fresh_manifest(
         }
         contacts.push(contact);
     }
-    contacts
-        .sort_by_key(|contact| identity_token(contact.friend_number, &contact.friend_public_key));
+    contacts.sort_by_key(|contact| identity_token(&contact.friend_public_key));
     let manifest = StoreManifest {
         version: STORE_VERSION,
         generation: generation.max(1),
@@ -960,55 +938,71 @@ fn bounded_working_set(store: &RegisteredStore) -> Result<Vec<ToxMessage>, Strin
 
 pub(super) fn open_and_register(
     history_path: &Path,
-    legacy: Vec<ToxMessage>,
+    initial_messages: Vec<ToxMessage>,
 ) -> Result<Vec<ToxMessage>, String> {
-    let root = store_root(history_path)?;
-    let manifest_file = manifest_path(&root);
-    let original_exists = profiles::file_exists(history_path);
-    let mut supplied_legacy = Some(legacy);
-    let (candidate, needs_manifest_write) = if profiles::file_exists(&manifest_file) {
-        (load_manifest(&root)?, false)
-    } else {
-        // A missing manifest in an existing chunk store is data loss, not a
-        // new empty history. Never overwrite it from a bounded resident tail.
-        if !original_exists && profiles::directory_exists(&root) {
-            return Err("CHAT_HISTORY_MANIFEST_MISSING".to_string());
+    let gate = super::batched_path_gate(history_path)?;
+    super::with_batched_path_gate(history_path, &gate, || {
+        // Serialize replacement with unregister and queued commits of this
+        // path. The global registry is released before waiting for this store.
+        let previous = registry()
+            .lock()
+            .map_err(|_| "CHAT_HISTORY_REGISTRY_LOCK_POISONED".to_string())?
+            .get(history_path)
+            .cloned();
+        let mut previous_guard = previous
+            .as_ref()
+            .map(|slot| {
+                slot.lock()
+                    .map_err(|_| "CHAT_HISTORY_REGISTRY_LOCK_POISONED".to_string())
+            })
+            .transpose()?;
+        let root = store_root(history_path)?;
+        if !history_path_present(&manifest_path(&root))? {
+            if history_path_present(history_path)? {
+                return Err("CHAT_HISTORY_LEGACY_FORMAT_UNSUPPORTED".to_string());
+            }
+            // A missing manifest in an existing chunk store cannot be
+            // replaced by an empty or bounded history.
+            if history_path_present(&root)? {
+                return Err("CHAT_HISTORY_MANIFEST_MISSING".to_string());
+            }
+            let candidate = build_fresh_manifest(&root, 1, initial_messages)?;
+            write_manifest(&root, &candidate)?;
         }
-        let messages = if original_exists {
-            supplied_legacy
-                .take()
-                .filter(|messages| !messages.is_empty())
-                .map(Ok)
-                .unwrap_or_else(|| read_legacy_history(history_path))?
-        } else {
-            supplied_legacy.take().unwrap_or_default()
+        let reloaded = load_verified_manifest(&root)?;
+        cleanup_orphan_chunks(&root, &reloaded);
+        let store = RegisteredStore {
+            root: root.clone(),
+            manifest: reloaded,
+            reclamation: Arc::new(Mutex::new(ReaderReclamation::default())),
+            poisoned: false,
         };
-        (
-            build_fresh_manifest(&root, 1, normalized_legacy_messages(messages))?,
-            true,
-        )
-    };
-    if needs_manifest_write {
-        write_manifest(&root, &candidate)?;
-    }
-    let reloaded = load_verified_manifest(&root)?;
-    cleanup_orphan_chunks(&root, &reloaded);
-    let store = RegisteredStore {
-        root: root.clone(),
-        manifest: reloaded,
-        reclamation: Arc::new(Mutex::new(ReaderReclamation::default())),
-        poisoned: false,
-    };
-    let working = bounded_working_set(&store)?;
-    if original_exists {
-        profiles::remove_file(history_path)
-            .map_err(|_| "CHAT_HISTORY_LEGACY_REMOVE_FAILED".to_string())?;
-    }
-    registry()
-        .lock()
-        .map_err(|_| "CHAT_HISTORY_REGISTRY_LOCK_POISONED".to_string())?
-        .insert(history_path.to_path_buf(), store);
-    Ok(working)
+        let working = bounded_working_set(&store)?;
+        // All fallible loading/validation precedes closing the old slot.
+        // Failed open keeps its original registration and admission epoch.
+        let mut stores = registry()
+            .lock()
+            .map_err(|_| "CHAT_HISTORY_REGISTRY_LOCK_POISONED".to_string())?;
+        let same = match (previous.as_ref(), stores.get(history_path)) {
+            (None, None) => true,
+            (Some(old), Some(current)) => Arc::ptr_eq(old, current),
+            _ => false,
+        };
+        if !same {
+            return Err("CHAT_HISTORY_STORE_NOT_REGISTERED".to_string());
+        }
+        let retired = super::transition_batched_path_epoch(history_path, true, || {
+            let retired = previous_guard.as_mut().and_then(|guard| guard.take());
+            stores.insert(
+                history_path.to_path_buf(),
+                Arc::new(Mutex::new(Some(store))),
+            );
+            retired
+        })?;
+        drop(stores);
+        drop(retired);
+        Ok(working)
+    })
 }
 
 pub(super) fn contains_registered(history_path: &Path) -> bool {
@@ -1019,11 +1013,38 @@ pub(super) fn contains_registered(history_path: &Path) -> bool {
 }
 
 pub(super) fn unregister(history_path: &Path) -> bool {
-    registry()
-        .lock()
-        .ok()
-        .and_then(|mut stores| stores.remove(history_path))
-        .is_some()
+    let Ok(gate) = super::batched_path_gate(history_path) else {
+        return false;
+    };
+    super::with_batched_path_gate(history_path, &gate, || {
+        let slot = registry()
+            .lock()
+            .map_err(|_| "CHAT_HISTORY_REGISTRY_LOCK_POISONED".to_string())?
+            .get(history_path)
+            .cloned();
+        let Some(slot) = slot else {
+            return Ok(false);
+        };
+        // A poisoned slot may be closed, never reused. No I/O is attempted.
+        let mut guard = slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut stores = registry()
+            .lock()
+            .map_err(|_| "CHAT_HISTORY_REGISTRY_LOCK_POISONED".to_string())?;
+        if !stores
+            .get(history_path)
+            .is_some_and(|current| Arc::ptr_eq(current, &slot))
+        {
+            return Err("CHAT_HISTORY_STORE_NOT_REGISTERED".to_string());
+        }
+        let retired = super::transition_batched_path_epoch(history_path, false, || {
+            stores.remove(history_path);
+            guard.take()
+        })?;
+        drop(stores);
+        drop(retired);
+        Ok(true)
+    })
+    .unwrap_or(false)
 }
 
 pub(super) fn contact_revision_registered(
@@ -1031,11 +1052,12 @@ pub(super) fn contact_revision_registered(
     friend_number: u32,
     friend_public_key: &str,
 ) -> Result<u64, String> {
-    let stores = registry()
+    let slot = registered_slot(history_path)?;
+    let guard = slot
         .lock()
         .map_err(|_| "CHAT_HISTORY_REGISTRY_LOCK_POISONED".to_string())?;
-    let store = stores
-        .get(history_path)
+    let store = guard
+        .as_ref()
         .ok_or_else(|| "CHAT_HISTORY_STORE_NOT_REGISTERED".to_string())?;
     ensure_available(store)?;
     Ok(
@@ -1047,16 +1069,16 @@ pub(super) fn contact_revision_registered(
 
 pub(super) fn last_events_registered(
     history_path: &Path,
-) -> Result<(HashMap<String, u64>, HashMap<u32, u64>), String> {
-    let stores = registry()
+) -> Result<HashMap<String, u64>, String> {
+    let slot = registered_slot(history_path)?;
+    let guard = slot
         .lock()
         .map_err(|_| "CHAT_HISTORY_REGISTRY_LOCK_POISONED".to_string())?;
-    let store = stores
-        .get(history_path)
+    let store = guard
+        .as_ref()
         .ok_or_else(|| "CHAT_HISTORY_STORE_NOT_REGISTERED".to_string())?;
     let mut by_key = HashMap::<String, u64>::new();
     ensure_available(store)?;
-    let by_number = HashMap::<u32, u64>::new();
     for contact in &store.manifest.contacts {
         let Some(last_event) = contact.last_event else {
             continue;
@@ -1070,7 +1092,7 @@ pub(super) fn last_events_registered(
             *entry = (*entry).max(last_event);
         }
     }
-    Ok((by_key, by_number))
+    Ok(by_key)
 }
 
 pub(super) fn window_registered(
@@ -1225,6 +1247,7 @@ pub(super) fn page_registered(
     })
 }
 
+#[cfg(test)]
 pub(super) fn latest_registered(
     history_path: &Path,
     friend_number: u32,
@@ -1242,8 +1265,8 @@ pub(super) fn latest_registered(
     .messages)
 }
 
-/// Read only special chunks, newest first. The active row is needed only for
-/// migration of PQ notice state written before the durable notice marker.
+/// Read special chunks newest first. Include the active row when recovering a
+/// PQ notice written to history before its marker reached durable storage.
 pub(super) fn latest_pq_history_registered(
     history_path: &Path,
     friend_number: u32,
@@ -1376,11 +1399,12 @@ pub(super) fn remove_message_registered(
     if message_id.is_empty() {
         return Ok(false);
     }
-    let mut stores = registry()
+    let slot = registered_slot(history_path)?;
+    let mut guard = slot
         .lock()
         .map_err(|_| "CHAT_HISTORY_REGISTRY_LOCK_POISONED".to_string())?;
-    let store = stores
-        .get_mut(history_path)
+    let store = guard
+        .as_mut()
         .ok_or_else(|| "CHAT_HISTORY_STORE_NOT_REGISTERED".to_string())?;
     ensure_available(store)?;
     let Some(contact_index) = store.manifest.contacts.iter().position(|contact| {
@@ -1442,43 +1466,24 @@ pub(super) fn delete_message_registered(
     if message_id.is_empty() {
         return Err("CHAT_MESSAGE_ID_REQUIRED".into());
     }
-    let mut stores = registry()
+    if friend_public_key.is_empty() {
+        return Err("CHAT_HISTORY_CONTACT_KEY_REQUIRED".into());
+    }
+    let slot = registered_slot(history_path)?;
+    let mut guard = slot
         .lock()
-        .map_err(|_| "CHAT_HISTORY_REGISTRY_LOCK_POISONED")?;
-    let store = stores
-        .get_mut(history_path)
-        .ok_or("CHAT_HISTORY_STORE_NOT_REGISTERED")?;
+        .map_err(|_| "CHAT_HISTORY_REGISTRY_LOCK_POISONED".to_string())?;
+    let store = guard
+        .as_mut()
+        .ok_or_else(|| "CHAT_HISTORY_STORE_NOT_REGISTERED".to_string())?;
     ensure_available(store)?;
     let mut next = store.manifest.clone();
-    let token = identity_token(friend_number, friend_public_key);
-    let mut inserted = next
+    let token = identity_token(friend_public_key);
+    let inserted = next
         .deleted_messages
         .entry(token)
         .or_default()
         .insert(message_id.into());
-    // Legacy queued snapshots can predate stable-key reconciliation. Fence
-    // their numeric identities too; explicit other public keys remain isolated.
-    let mut legacy_numbers = vec![friend_number];
-    legacy_numbers.extend(
-        next.contacts
-            .iter()
-            .filter(|contact| {
-                identity_matches(
-                    contact.friend_number,
-                    &contact.friend_public_key,
-                    friend_number,
-                    friend_public_key,
-                )
-            })
-            .map(|contact| contact.friend_number),
-    );
-    for number in legacy_numbers {
-        inserted |= next
-            .deleted_messages
-            .entry(identity_token(number, ""))
-            .or_default()
-            .insert(message_id.into());
-    }
     let generation = next.generation.saturating_add(1).max(1);
     let mut stale = Vec::new();
     for contact in next.contacts.iter_mut().filter(|contact| {
@@ -1563,7 +1568,10 @@ fn group_incoming(
         if message.id.is_empty() {
             return Err("CHAT_HISTORY_MESSAGE_ID_REQUIRED".to_string());
         }
-        let token = identity_token(message.friend_number, &message.friend_public_key);
+        if message.friend_public_key.is_empty() {
+            return Err("CHAT_HISTORY_CONTACT_KEY_REQUIRED".to_string());
+        }
+        let token = identity_token(&message.friend_public_key);
         let deleted = manifest.deleted_messages.get(&token);
         if deleted.is_some_and(|ids| ids.contains(&message.id)) {
             continue;
@@ -1965,11 +1973,12 @@ fn upsert_registered_ordered(
     if messages.is_empty() {
         return Ok(());
     }
-    let mut stores = registry()
+    let slot = registered_slot(history_path)?;
+    let mut guard = slot
         .lock()
         .map_err(|_| "CHAT_HISTORY_REGISTRY_LOCK_POISONED".to_string())?;
-    let store = stores
-        .get_mut(history_path)
+    let store = guard
+        .as_mut()
         .ok_or_else(|| "CHAT_HISTORY_STORE_NOT_REGISTERED".to_string())?;
     ensure_available(store)?;
     let groups = group_incoming(&store.manifest, messages)?;
@@ -2027,7 +2036,7 @@ fn upsert_registered_ordered(
     }
     next.generation = generation;
     next.contacts
-        .sort_by_key(|contact| identity_token(contact.friend_number, &contact.friend_public_key));
+        .sort_by_key(|contact| identity_token(&contact.friend_public_key));
     commit_manifest(store, next, stale)
 }
 
@@ -2035,11 +2044,12 @@ pub(super) fn clear_registered(
     history_path: &Path,
     friend: Option<(u32, &str)>,
 ) -> Result<(), String> {
-    let mut stores = registry()
+    let slot = registered_slot(history_path)?;
+    let mut guard = slot
         .lock()
         .map_err(|_| "CHAT_HISTORY_REGISTRY_LOCK_POISONED".to_string())?;
-    let store = stores
-        .get_mut(history_path)
+    let store = guard
+        .as_mut()
         .ok_or_else(|| "CHAT_HISTORY_STORE_NOT_REGISTERED".to_string())?;
     ensure_available(store)?;
     let mut next = store.manifest.clone();
@@ -2318,8 +2328,7 @@ fn query_cursor_hash(query: &str) -> String {
 }
 
 fn contact_cursor_hash(contact: &ContactManifest) -> String {
-    sha256_hex(identity_token(contact.friend_number, &contact.friend_public_key).as_bytes())[..16]
-        .to_string()
+    sha256_hex(identity_token(&contact.friend_public_key).as_bytes())[..16].to_string()
 }
 
 fn encode_search_cursor(cursor: SearchCursor, contact: &ContactManifest, query: &str) -> String {
@@ -2540,12 +2549,7 @@ mod tests {
             message("a", 1, "KEY-A", "old A", 1),
             message("b", 2, "KEY-B", "untouched B", 2),
         ];
-        profiles::atomic_write(&path, &serde_json::to_vec(&rows).unwrap()).unwrap();
         open_and_register(&path, rows).unwrap();
-        assert!(
-            !profiles::file_exists(&path),
-            "legacy must be retired before fault"
-        );
         let root = store_root(&path).unwrap();
         let manifest = load_verified_manifest(&root).unwrap();
         (path, root, manifest)
@@ -2695,9 +2699,10 @@ mod tests {
             b"truncated",
         )
         .unwrap();
-        let mut stores = registry().lock().unwrap();
-        let result = commit_manifest(stores.get_mut(&path).unwrap(), next, vec![old.clone()]);
-        drop(stores);
+        let slot = registered_slot(&path).unwrap();
+        let mut store = slot.lock().unwrap();
+        let result = commit_manifest(store.as_mut().unwrap(), next, vec![old.clone()]);
+        drop(store);
         assert!(
             result.is_err(),
             "an invalid new chunk must not publish a manifest"
@@ -2746,7 +2751,6 @@ mod tests {
                     .map(|i| message(format!("a-{i}"), 1, "KEY-A", "old A", i as u64))
                     .collect::<Vec<_>>();
                 rows.push(message("b", 2, "KEY-B", "untouched B", 2));
-                profiles::atomic_write(&path, &serde_json::to_vec(&rows).unwrap()).unwrap();
                 open_and_register(&path, rows).unwrap();
                 profiles::checkpoint_managed_volume(&path).unwrap();
                 let root = store_root(&path).unwrap();
@@ -3009,7 +3013,10 @@ mod tests {
         delete_message_registered(&path, 7, "key-7", "target").unwrap();
         let mut legacy_stale = removed.clone();
         legacy_stale.friend_public_key.clear();
-        upsert_registered(&path, &[legacy_stale]).unwrap();
+        assert_eq!(
+            upsert_registered(&path, &[legacy_stale]).unwrap_err(),
+            "CHAT_HISTORY_CONTACT_KEY_REQUIRED"
+        );
         upsert_registered(&path, &[removed, reply]).unwrap();
         assert!(unregister(&path));
         open_and_register(&path, Vec::new()).unwrap();
@@ -3152,52 +3159,41 @@ mod tests {
     }
 
     #[test]
-    fn migrates_duplicate_legacy_rows_once_and_reopens_idempotently() {
+    fn obsolete_history_is_rejected_without_rewriting() {
         let path = test_history_path("migration");
-        let mut first = message("", 7, "KEY-7", "same", 42);
-        let mut second = message("", 7, "KEY-7", "same", 42);
-        first.protocol_version = None;
-        second.protocol_version = None;
-        let legacy = vec![first, second];
-        profiles::atomic_write(&path, &serde_json::to_vec(&legacy).unwrap()).unwrap();
+        let rows = vec![message("old", 7, "KEY-7", "obsolete", 42)];
+        let bytes = serde_json::to_vec(&rows).unwrap();
+        profiles::atomic_write(&path, &bytes).unwrap();
 
-        let opened = open_and_register(&path, Vec::new()).unwrap();
-        assert_eq!(opened.len(), 2);
-        assert_ne!(opened[0].id, opened[1].id);
-        assert!(opened.iter().all(|row| row.id.starts_with("legacy-")));
-        assert!(opened.iter().all(|row| row.protocol_version.is_none()));
-        assert!(!profiles::file_exists(&path));
-        let ids = opened.iter().map(|row| row.id.clone()).collect::<Vec<_>>();
-
-        assert!(unregister(&path));
-        let reopened = open_and_register(&path, Vec::new()).unwrap();
         assert_eq!(
-            reopened
-                .iter()
-                .map(|row| row.id.clone())
-                .collect::<Vec<_>>(),
-            ids
+            open_and_register(&path, Vec::new()).err().as_deref(),
+            Some("CHAT_HISTORY_LEGACY_FORMAT_UNSUPPORTED")
         );
+        assert_eq!(profiles::read_file(&path).unwrap(), bytes);
+        assert!(!profiles::directory_exists(&store_root(&path).unwrap()));
+        assert!(!contains_registered(&path));
         remove_test_history(&path);
     }
 
     #[test]
-    fn migration_consumes_the_already_parsed_legacy_rows() {
+    fn current_history_ignores_and_preserves_the_obsolete_monolith() {
         let path = test_history_path("migration-supplied");
-        let on_disk = vec![message("disk", 4, "KEY-4", "disk copy", 1)];
-        profiles::atomic_write(&path, &serde_json::to_vec(&on_disk).unwrap()).unwrap();
-        let supplied = vec![message("supplied", 4, "KEY-4", "already parsed", 1)];
+        let current = vec![message("current", 4, "KEY-4", "current format", 1)];
+        open_and_register(&path, current).unwrap();
+        assert!(unregister(&path));
 
-        let opened = open_and_register(&path, supplied).unwrap();
-        assert_eq!(opened.len(), 1);
-        assert_eq!(opened[0].id, "supplied");
-        assert_eq!(opened[0].text, "already parsed");
-
+        let obsolete = vec![message("disk", 4, "KEY-4", "obsolete copy", 1)];
+        let bytes = serde_json::to_vec(&obsolete).unwrap();
+        profiles::atomic_write(&path, &bytes).unwrap();
+        let reopened = open_and_register(&path, Vec::new()).unwrap();
+        assert_eq!(reopened.len(), 1);
+        assert_eq!(reopened[0].id, "current");
+        assert_eq!(profiles::read_file(&path).unwrap(), bytes);
         remove_test_history(&path);
     }
 
     #[test]
-    fn legacy_manifest_backfills_last_events_once_without_version_bump() {
+    fn retired_legacy_manifest_without_last_events_is_preserved() {
         let path = test_history_path("last-event-legacy");
         open_and_register(
             &path,
@@ -3208,6 +3204,9 @@ mod tests {
             ],
         )
         .unwrap();
+        let by_key = last_events_registered(&path).unwrap();
+        assert_eq!(by_key.get("KEY-A"), Some(&90));
+        assert_eq!(by_key.get("KEY-B"), Some(&70));
         assert!(unregister(&path));
 
         let root = store_root(&path).unwrap();
@@ -3220,25 +3219,14 @@ mod tests {
         for contact in legacy["contacts"].as_array_mut().unwrap() {
             contact.as_object_mut().unwrap().remove("lastEvent");
         }
-        profiles::atomic_write(&manifest_file, &serde_json::to_vec(&legacy).unwrap()).unwrap();
+        let legacy_bytes = serde_json::to_vec(&legacy).unwrap();
+        profiles::atomic_write(&manifest_file, &legacy_bytes).unwrap();
 
-        open_and_register(&path, Vec::new()).unwrap();
-        let (by_key, by_number) = last_events_registered(&path).unwrap();
-        assert_eq!(by_key.get("KEY-A"), Some(&90));
-        assert_eq!(by_key.get("KEY-B"), Some(&70));
-        assert!(by_number.is_empty());
-        let repaired = profiles::read_file(&manifest_file).unwrap();
-        let repaired_json: serde_json::Value = serde_json::from_slice(&repaired).unwrap();
-        assert_eq!(repaired_json["version"], STORE_VERSION);
-        assert!(repaired_json["contacts"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|contact| contact.get("lastEvent").is_some()));
-
-        assert!(unregister(&path));
-        open_and_register(&path, Vec::new()).unwrap();
-        assert_eq!(profiles::read_file(&manifest_file).unwrap(), repaired);
+        assert_eq!(
+            open_and_register(&path, Vec::new()).err().as_deref(),
+            Some("CHAT_HISTORY_LAST_EVENT_MISMATCH")
+        );
+        assert_eq!(profiles::read_file(&manifest_file).unwrap(), legacy_bytes);
         remove_test_history(&path);
     }
 
@@ -3257,12 +3245,12 @@ mod tests {
 
         let lowered = message("a-latest", 1, "KEY-A", "corrected timestamp", 5);
         upsert_registered(&path, &[lowered]).unwrap();
-        let (by_key, _) = last_events_registered(&path).unwrap();
+        let by_key = last_events_registered(&path).unwrap();
         assert_eq!(by_key.get("KEY-A"), Some(&10));
         assert_eq!(by_key.get("KEY-B"), Some(&20));
 
         upsert_registered(&path, &[message("a-next", 1, "KEY-A", "next", 40)]).unwrap();
-        let (by_key, _) = last_events_registered(&path).unwrap();
+        let by_key = last_events_registered(&path).unwrap();
         assert_eq!(by_key.get("KEY-A"), Some(&40));
         assert_eq!(by_key.get("KEY-B"), Some(&20));
 
@@ -3270,7 +3258,7 @@ mod tests {
         let mut resident = open_and_register(&path, Vec::new()).unwrap();
         resident.retain(crate::message_requires_runtime_residency);
         assert!(resident.is_empty());
-        let (by_key, _) = last_events_registered(&path).unwrap();
+        let by_key = last_events_registered(&path).unwrap();
         assert_eq!(by_key.get("KEY-A"), Some(&40));
         assert_eq!(by_key.get("KEY-B"), Some(&20));
         remove_test_history(&path);
@@ -3290,39 +3278,40 @@ mod tests {
         .unwrap();
 
         assert!(remove_message_registered(&path, 11, "key-a", "a-latest").unwrap());
-        let (by_key, _) = last_events_registered(&path).unwrap();
+        let by_key = last_events_registered(&path).unwrap();
         assert_eq!(by_key.get("KEY-A"), Some(&10));
         assert_eq!(by_key.get("KEY-B"), Some(&20));
 
         clear_registered(&path, Some((1, "key-a"))).unwrap();
-        let (by_key, _) = last_events_registered(&path).unwrap();
+        let by_key = last_events_registered(&path).unwrap();
         assert!(!by_key.contains_key("KEY-A"));
         assert_eq!(by_key.get("KEY-B"), Some(&20));
 
         clear_registered(&path, None).unwrap();
-        let (by_key, by_number) = last_events_registered(&path).unwrap();
+        let by_key = last_events_registered(&path).unwrap();
         assert!(by_key.is_empty());
-        assert!(by_number.is_empty());
         remove_test_history(&path);
     }
 
     #[test]
-    fn incomplete_migration_recovers_from_the_retained_monolith() {
+    fn incomplete_legacy_migration_preserves_monolith_and_chunks() {
         let path = test_history_path("migration-recovery");
-        let legacy = vec![message("", 3, "KEY-3", "recover me", 1)];
-        profiles::atomic_write(&path, &serde_json::to_vec(&legacy).unwrap()).unwrap();
+        let old_rows = vec![message("old", 3, "KEY-3", "old message", 1)];
+        let bytes = serde_json::to_vec(&old_rows).unwrap();
+        profiles::atomic_write(&path, &bytes).unwrap();
         let root = store_root(&path).unwrap();
-        let candidate =
-            build_fresh_manifest(&root, 1, normalized_legacy_messages(legacy.clone())).unwrap();
-        write_manifest(&root, &candidate).unwrap();
-        let corrupt = safe_chunk_path(&root, &candidate.contacts[0].chunks[0].file).unwrap();
-        profiles::atomic_write(&corrupt, b"[]").unwrap();
+        let candidate = build_fresh_manifest(&root, 1, old_rows).unwrap();
+        let chunk = safe_chunk_path(&root, &candidate.contacts[0].chunks[0].file).unwrap();
+        profiles::atomic_write(&chunk, b"[]").unwrap();
 
-        let recovered = open_and_register(&path, Vec::new()).unwrap();
-        assert_eq!(recovered.len(), 1);
-        assert_eq!(recovered[0].text, "recover me");
-        assert!(recovered[0].id.starts_with("legacy-"));
-        assert!(!profiles::file_exists(&path));
+        assert_eq!(
+            open_and_register(&path, Vec::new()).err().as_deref(),
+            Some("CHAT_HISTORY_LEGACY_FORMAT_UNSUPPORTED")
+        );
+        assert_eq!(profiles::read_file(&path).unwrap(), bytes);
+        assert_eq!(profiles::read_file(&chunk).unwrap().as_slice(), b"[]");
+        assert!(!profiles::file_exists(&manifest_path(&root)));
+        assert!(!contains_registered(&path));
         remove_test_history(&path);
     }
 
@@ -3394,10 +3383,11 @@ mod tests {
             .map(|index| message(format!("m-{index:04}"), 2, "KEY-2", "old", index))
             .collect::<Vec<_>>();
         open_and_register(&path, rows).unwrap();
-        let before = registry()
+        let before = registered_slot(&path)
+            .unwrap()
             .lock()
             .unwrap()
-            .get(&path)
+            .as_ref()
             .unwrap()
             .manifest
             .contacts[0]
@@ -3421,10 +3411,11 @@ mod tests {
                 .id,
             "m-0599"
         );
-        let after = registry()
+        let after = registered_slot(&path)
+            .unwrap()
             .lock()
             .unwrap()
-            .get(&path)
+            .as_ref()
             .unwrap()
             .manifest
             .contacts[0]
@@ -3680,8 +3671,9 @@ mod tests {
 
         let root = store_root(&path).unwrap();
         let (chunk_count, disk_bytes) = {
-            let stores = registry().lock().unwrap();
-            let store = stores.get(&path).unwrap();
+            let slot = registered_slot(&path).unwrap();
+            let guard = slot.lock().unwrap();
+            let store = guard.as_ref().unwrap();
             let contact = find_contact(&store.manifest, FRIEND_NUMBER, FRIEND_KEY).unwrap();
             let mut bytes = profiles::metadata_len(&manifest_path(&root)).unwrap();
             for chunk in &contact.chunks {

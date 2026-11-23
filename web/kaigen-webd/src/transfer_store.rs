@@ -22,7 +22,7 @@ use tauri_app_lib::{
     web_core::WorkspacePayloadCipher,
     web_transfer_store::{
         StoreDirection, StoreError, StoreObjectStatus, StoreOperation, StorePhase, StoreReply,
-        StoreSpec, StoreTicket, WebTransferStore,
+        StoreRetention, StoreSpec, StoreTicket, WebTransferStore,
     },
 };
 
@@ -114,48 +114,14 @@ impl TransferQuota {
         Ok(())
     }
 
-    fn reserve_legacy_browser_receipt(
-        &self,
-        previous: u64,
-        next: u64,
-        exact_extra: u64,
-    ) -> Result<(), StoreError> {
-        // Only the validated legacy Incoming receipt upgrade calls this path.
-        // Keep usage accurate above the limit until actual payload deletion;
-        // ordinary allocations still use replace_transfer and remain denied.
-        if exact_extra == 0
-            || exact_extra > 128
-            || next
-                .checked_sub(previous)
-                .is_none_or(|delta| delta != 0 && delta != exact_extra)
-        {
-            return Err(StoreError::Quota);
-        }
-        let mut usage = self.inner.lock().map_err(|_| StoreError::Unavailable)?;
-        usage.transfer = usage
-            .transfer
-            .checked_sub(previous)
-            .and_then(|value| value.checked_add(next))
-            .ok_or(StoreError::Quota)?;
-        self.transfer_bytes.store(usage.transfer, Ordering::Release);
-        Ok(())
-    }
-
-    fn restore_transfer(
-        &self,
-        bytes: u64,
-        payload_bytes: u64,
-        receipt_extra: u64,
-    ) -> Result<(), StoreError> {
+    fn restore_transfer(&self, bytes: u64, payload_bytes: u64) -> Result<(), StoreError> {
         let mut usage = self.inner.lock().map_err(|_| StoreError::Unavailable)?;
         // Persisted quota is the combined counter. A concurrent new payload
         // checkpoint already knows its own actual byte count.
         if usage.payload_revision == 0 {
             usage.payload = payload_bytes;
         }
-        if bytes.saturating_add(usage.payload.max(usage.payload_reserved))
-            > self.limit.saturating_add(receipt_extra)
-        {
+        if bytes.saturating_add(usage.payload.max(usage.payload_reserved)) > self.limit {
             return Err(StoreError::Quota);
         }
         usage.transfer = bytes;
@@ -196,15 +162,11 @@ struct Chunk {
 }
 
 #[derive(Clone, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Manifest {
     version: u32,
     status: StoreObjectStatus,
     chunks: Vec<Chunk>,
-    /// Exact additional reservation for a legacy Incoming browser receipt.
-    /// It is authenticated, verified on recovery and removed only with payload.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    browser_receipt_extra_bytes: Option<u64>,
 }
 
 impl Manifest {
@@ -225,8 +187,7 @@ impl Manifest {
         maximum.status.phase = StorePhase::Committed;
         maximum.status.committed_sha256 = Some([255; 32]);
         // `false` is longer than `true`. Keep this reservation after delivery;
-        // an already accepted modern object never needs more terminal quota.
-        // Legacy None keeps its original accounting until explicitly upgraded.
+        // an accepted object never needs more quota to record its receipt.
         maximum.status.native_delivery_confirmed =
             self.status.native_delivery_confirmed.map(|_| false);
         maximum.status.browser_download_confirmed =
@@ -275,9 +236,25 @@ struct Published {
     order: VecDeque<StoreTicket>,
     operation_keys: HashMap<String, StoreTicket>,
     objects: Vec<StoreObjectStatus>,
+    pending_purges: Vec<StoreSpec>,
     ready: bool,
     failure: Option<StoreError>,
     profile_removals: HashMap<String, ProfileRemovalEntry>,
+    retention: StoreRetention,
+    retained_readable: HashSet<String>,
+    blocked_objects: HashSet<String>,
+    blocked_profiles: HashSet<String>,
+}
+
+impl Published {
+    fn payload_available(&self, status: &StoreObjectStatus) -> bool {
+        !self.blocked_objects.contains(&status.spec.object_id)
+            && !self.blocked_profiles.contains(&status.spec.profile_id)
+            && self.retention.payload_available(
+                status,
+                self.retained_readable.contains(&status.spec.object_id),
+            )
+    }
 }
 
 pub(crate) struct TransferStore {
@@ -286,9 +263,11 @@ pub(crate) struct TransferStore {
     stopping: Arc<AtomicBool>,
     stopped: Arc<AtomicBool>,
     suspended: AtomicBool,
+    retention: StoreRetention,
 }
 
 impl TransferStore {
+    #[cfg(test)]
     pub fn start(
         root: PathBuf,
         cipher: WorkspacePayloadCipher,
@@ -296,8 +275,46 @@ impl TransferStore {
         profile_ids: HashSet<String>,
         storage_ownership: Arc<crate::state::StorageRootOwnership>,
     ) -> Result<Arc<Self>, String> {
+        Self::start_with_retention(
+            root,
+            cipher,
+            quota,
+            profile_ids,
+            storage_ownership,
+            StoreRetention::EndpointReceipt,
+        )
+    }
+
+    pub fn start_retained(
+        root: PathBuf,
+        cipher: WorkspacePayloadCipher,
+        quota: Arc<TransferQuota>,
+        profile_ids: HashSet<String>,
+        storage_ownership: Arc<crate::state::StorageRootOwnership>,
+    ) -> Result<Arc<Self>, String> {
+        Self::start_with_retention(
+            root,
+            cipher,
+            quota,
+            profile_ids,
+            storage_ownership,
+            StoreRetention::UntilRemoval,
+        )
+    }
+
+    fn start_with_retention(
+        root: PathBuf,
+        cipher: WorkspacePayloadCipher,
+        quota: Arc<TransferQuota>,
+        profile_ids: HashSet<String>,
+        storage_ownership: Arc<crate::state::StorageRootOwnership>,
+        retention: StoreRetention,
+    ) -> Result<Arc<Self>, String> {
         let (sender, receiver) = mpsc::sync_channel(QUEUE_LIMIT);
-        let published = Arc::new(Mutex::new(Published::default()));
+        let published = Arc::new(Mutex::new(Published {
+            retention,
+            ..Published::default()
+        }));
         let stopping = Arc::new(AtomicBool::new(false));
         let stopped = Arc::new(AtomicBool::new(false));
         let handle = Arc::new(Self {
@@ -306,19 +323,22 @@ impl TransferStore {
             stopping: Arc::clone(&stopping),
             stopped: Arc::clone(&stopped),
             suspended: AtomicBool::new(false),
+            retention,
         });
         thread::Builder::new()
             .name("web-transfer-store".into())
             .spawn(move || {
                 // Retain ownership until this independent worker has finished.
                 let _storage_ownership = storage_ownership;
-                let loaded = Worker::load(root, cipher, quota).and_then(|mut worker| {
-                    // A successfully persisted profile removal is also the
-                    // durable cleanup receipt. Finish any interrupted sweep
-                    // before exposing objects after a daemon restart.
-                    worker.retain_profiles(&profile_ids)?;
-                    Ok(worker)
-                });
+                let loaded = Worker::load_with_retention(root, cipher, quota, retention).and_then(
+                    |mut worker| {
+                        // A successfully persisted profile removal is also the
+                        // durable cleanup receipt. Finish any interrupted sweep
+                        // before exposing objects after a daemon restart.
+                        worker.retain_profiles(&profile_ids)?;
+                        Ok(worker)
+                    },
+                );
                 let mut worker = match loaded {
                     Ok(worker) => worker,
                     Err(error) => {
@@ -347,11 +367,16 @@ impl TransferStore {
                             if let Some(entry) = state.profile_removals.get_mut(&profile_id) {
                                 entry.result = Some(result);
                             }
+                            state.pending_purges = worker.pending_purge_cleanup.values().cloned().collect();
                             state.objects = worker
                                 .objects
                                 .values()
+                                .filter(|entry| !worker.pending_purge_cleanup.contains_key(&entry.status.spec.object_id))
                                 .map(|entry| entry.status.clone())
                                 .collect();
+                            state
+                                .retained_readable
+                                .clone_from(&worker.retained_readable);
                             invalidate_removed_ranges(&mut state);
                         }
                         continue;
@@ -367,11 +392,16 @@ impl TransferStore {
                             entry.completed_operation = entry.pending.take();
                             entry.result = Some(result);
                         }
+                        state.pending_purges = worker.pending_purge_cleanup.values().cloned().collect();
                         state.objects = worker
                             .objects
                             .values()
+                            .filter(|value| !worker.pending_purge_cleanup.contains_key(&value.status.spec.object_id))
                             .map(|value| value.status.clone())
                             .collect();
+                        state
+                            .retained_readable
+                            .clone_from(&worker.retained_readable);
                         invalidate_removed_ranges(&mut state);
                     }
                 }
@@ -463,6 +493,10 @@ impl TransferStore {
                 mpsc::TrySendError::Full(_) => StoreError::Busy,
                 mpsc::TrySendError::Disconnected(_) => StoreError::Unavailable,
             })?;
+        // Also covers Begin/Finalize requests already queued but not yet
+        // published when removal was accepted.
+        state.blocked_profiles.insert(profile_id.to_string());
+        invalidate_removed_ranges(&mut state);
         state.profile_removals.insert(
             profile_id.to_string(),
             ProfileRemovalEntry {
@@ -490,6 +524,20 @@ impl Drop for TransferStore {
 }
 
 impl WebTransferStore for TransferStore {
+    fn retention(&self) -> StoreRetention {
+        self.retention
+    }
+
+    fn payload_available(&self, status: &StoreObjectStatus) -> bool {
+        let Ok(state) = self.published.lock() else {
+            return false;
+        };
+        state.failure.is_none()
+            && state
+                .objects
+                .iter()
+                .any(|current| current.spec == status.spec && state.payload_available(current))
+    }
     fn is_ready(&self) -> bool {
         !self.is_stopping()
             && self
@@ -503,6 +551,11 @@ impl WebTransferStore for TransferStore {
             return Err(StoreError::Unavailable);
         }
         validate_operation(&operation)?;
+        if self.retention == StoreRetention::UntilRemoval
+            && matches!(operation, StoreOperation::ReleaseDelivered { .. })
+        {
+            return Err(StoreError::Conflict);
+        }
         let mut state = self.published.try_lock().map_err(|_| StoreError::Busy)?;
         // Recheck under the publication lock: a suspend must also cover a
         // submitter that passed the first check just before suspension.
@@ -601,6 +654,17 @@ impl WebTransferStore for TransferStore {
                 mpsc::TrySendError::Full(_) => StoreError::Busy,
                 mpsc::TrySendError::Disconnected(_) => StoreError::Unavailable,
             })?;
+        let removed_object = match &operation {
+            StoreOperation::Remove { object_id } => Some(object_id),
+            StoreOperation::Purge { spec } => Some(&spec.object_id),
+            _ => None,
+        };
+        if let Some(object_id) = removed_object {
+            // Accepted removal owns this object before the worker deletes any
+            // bytes. Even already-completed cached range tickets fail closed.
+            state.blocked_objects.insert(object_id.clone());
+            invalidate_removed_ranges(&mut state);
+        }
         state.next_ticket = ticket;
         state.operation_keys.insert(key.clone(), ticket);
         state.tickets.insert(
@@ -655,7 +719,8 @@ impl WebTransferStore for TransferStore {
                 .objects
                 .iter()
                 .find(|current| {
-                    current.spec.object_id == status.spec.object_id && current.payload_available()
+                    current.spec.object_id == status.spec.object_id
+                        && state.payload_available(current)
                 })
                 .cloned()
                 .map(|status| StoreReply::Range {
@@ -668,8 +733,22 @@ impl WebTransferStore for TransferStore {
         })
     }
 
-    fn snapshot(&self) -> Vec<StoreObjectStatus> {
-        self.try_snapshot().unwrap_or_default()
+    fn try_snapshot(&self) -> Result<Vec<StoreObjectStatus>, StoreError> {
+        TransferStore::try_snapshot(self)
+    }
+
+    fn pending_purges(&self) -> Result<Vec<StoreSpec>, StoreError> {
+        if self.is_stopping() {
+            return Err(StoreError::Unavailable);
+        }
+        let state = self.published.try_lock().map_err(|_| StoreError::Busy)?;
+        if let Some(error) = state.failure {
+            return Err(error);
+        }
+        if !state.ready {
+            return Err(StoreError::Busy);
+        }
+        Ok(state.pending_purges.clone())
     }
 }
 
@@ -714,7 +793,7 @@ fn invalidate_removed_ranges(state: &mut Published) {
                 return None;
             };
             (!state.objects.iter().any(|current| {
-                current.spec.object_id == status.spec.object_id && current.payload_available()
+                current.spec.object_id == status.spec.object_id && state.payload_available(current)
             }))
             .then_some(*ticket)
         })
@@ -742,12 +821,14 @@ fn operation_key(operation: &StoreOperation) -> String {
             length,
         } => format!("read/{object_id}/{offset}/{length}"),
         StoreOperation::Remove { object_id } => format!("remove/{object_id}"),
+        StoreOperation::Purge { spec } => format!("purge/{}", spec.object_id),
     }
 }
 
 fn same_operation(left: &StoreOperation, right: &StoreOperation) -> bool {
     match (left, right) {
         (StoreOperation::Begin(a), StoreOperation::Begin(b)) => a == b,
+        (StoreOperation::Purge { spec: a }, StoreOperation::Purge { spec: b }) => a == b,
         (
             StoreOperation::Append {
                 object_id: a,
@@ -785,6 +866,10 @@ fn valid_id(value: &str) -> bool {
 }
 
 fn validate_spec(spec: &StoreSpec) -> Result<(), StoreError> {
+    validate_spec_fields(spec, true)
+}
+
+fn validate_spec_fields(spec: &StoreSpec, require_payload_hash: bool) -> Result<(), StoreError> {
     if !valid_id(&spec.object_id)
         || !valid_id(&spec.profile_id)
         || !valid_id(&spec.message_id)
@@ -801,7 +886,8 @@ fn validate_spec(spec: &StoreSpec) -> Result<(), StoreError> {
             .as_ref()
             .is_some_and(|value| !valid_id(value))
         || (spec.direction == StoreDirection::Outgoing
-            && (spec.operation_id.is_none() || spec.expected_sha256.is_none()))
+            && (spec.operation_id.is_none()
+                || require_payload_hash && spec.expected_sha256.is_none()))
     {
         return Err(StoreError::Range);
     }
@@ -810,7 +896,7 @@ fn validate_spec(spec: &StoreSpec) -> Result<(), StoreError> {
 
 fn validate_operation(operation: &StoreOperation) -> Result<(), StoreError> {
     let id = match operation {
-        StoreOperation::Begin(spec) => return validate_spec(spec),
+        StoreOperation::Begin(spec) | StoreOperation::Purge { spec } => return validate_spec(spec),
         StoreOperation::Append {
             object_id,
             offset,
@@ -853,15 +939,34 @@ struct Worker {
     quota: Arc<TransferQuota>,
     objects: HashMap<String, Manifest>,
     charges: HashMap<String, u64>,
+    // Durable fences are not completion receipts until every owned chunk is gone.
+    pending_purge_cleanup: HashMap<String, StoreSpec>,
     write_failed: bool,
     removed_profiles: HashSet<String>,
+    retention: StoreRetention,
+    retained_readable: HashSet<String>,
 }
 
 impl Worker {
+    #[cfg(test)]
     fn load(
         workspace_root: PathBuf,
         cipher: WorkspacePayloadCipher,
         quota: Arc<TransferQuota>,
+    ) -> Result<Self, StoreError> {
+        Self::load_with_retention(
+            workspace_root,
+            cipher,
+            quota,
+            StoreRetention::EndpointReceipt,
+        )
+    }
+
+    fn load_with_retention(
+        workspace_root: PathBuf,
+        cipher: WorkspacePayloadCipher,
+        quota: Arc<TransferQuota>,
+        retention: StoreRetention,
     ) -> Result<Self, StoreError> {
         let root = workspace_root.join(DIRECTORY);
         secure_directory(&workspace_root)?;
@@ -872,8 +977,11 @@ impl Worker {
             quota,
             objects: HashMap::new(),
             charges: HashMap::new(),
+            pending_purge_cleanup: HashMap::new(),
             write_failed: false,
             removed_profiles: HashSet::new(),
+            retention,
+            retained_readable: HashSet::new(),
         };
         for entry in fs::read_dir(&worker.root).map_err(|_| StoreError::Unavailable)? {
             let entry = entry.map_err(|_| StoreError::Unavailable)?;
@@ -921,11 +1029,24 @@ impl Worker {
                 serde_json::from_slice::<Manifest>(&plain).map_err(|_| StoreError::Unavailable);
             plain.fill(0);
             let manifest = parsed?;
-            validate_spec(&manifest.status.spec)?;
+            validate_spec_fields(
+                &manifest.status.spec,
+                !manifest.status.is_identity_tombstone(),
+            )?;
             if manifest.version != 1 || manifest.status.spec.object_id != name {
                 return Err(StoreError::Conflict);
             }
             worker.validate_manifest(&manifest)?;
+            if retention == StoreRetention::UntilRemoval
+                && manifest.status.phase == StorePhase::Committed
+                && !manifest.status.payload_released
+                && (!manifest.status.delivery_confirmed()
+                    || worker.validate_manifest_payload(&manifest, true).is_ok())
+            {
+                // Old endpoint receipts may have survived partial cleanup.
+                // Preserve their metadata/quota, but expose only proven bytes.
+                worker.retained_readable.insert(name.clone());
+            }
             worker.clean_uncommitted(&manifest)?;
             worker.charges.insert(name.clone(), manifest.charge()?);
             worker.objects.insert(name, manifest);
@@ -939,21 +1060,19 @@ impl Worker {
         } else {
             0
         };
-        let receipt_extra = worker.objects.values().try_fold(0_u64, |sum, manifest| {
-            sum.checked_add(manifest.browser_receipt_extra_bytes.unwrap_or(0))
-                .ok_or(StoreError::Quota)
-        })?;
-        worker
-            .quota
-            .restore_transfer(total, payload_bytes, receipt_extra)?;
+        worker.quota.restore_transfer(total, payload_bytes)?;
         Ok(worker)
     }
 
     fn publish(&self, published: &Mutex<Published>) {
         if let Ok(mut state) = published.lock() {
+            state.retention = self.retention;
+            state.retained_readable.clone_from(&self.retained_readable);
+            state.pending_purges = self.pending_purge_cleanup.values().cloned().collect();
             state.objects = self
                 .objects
                 .values()
+                .filter(|entry| !self.pending_purge_cleanup.contains_key(&entry.status.spec.object_id))
                 .map(|entry| entry.status.clone())
                 .collect();
             state.ready = true;
@@ -991,7 +1110,7 @@ impl Worker {
                 if manifest.status.phase != StorePhase::Committed {
                     return Err(StoreError::Busy);
                 }
-                if !manifest.status.payload_available() {
+                if !self.payload_available(&manifest.status) {
                     return Err(StoreError::Unavailable);
                 }
                 let bytes = self.read_range(manifest, offset, length)?;
@@ -1002,6 +1121,7 @@ impl Worker {
                 })
             }
             StoreOperation::Remove { object_id } => self.remove(&object_id),
+            StoreOperation::Purge { spec } => self.purge(spec),
         }
     }
 
@@ -1027,7 +1147,6 @@ impl Worker {
         }
         let manifest = Manifest {
             version: 1,
-            browser_receipt_extra_bytes: None,
             status: StoreObjectStatus {
                 native_delivery_confirmed: (spec.direction == StoreDirection::Outgoing)
                     .then_some(false),
@@ -1182,6 +1301,7 @@ impl Worker {
         let status = next.status.clone();
         self.objects.insert(id.to_string(), next);
         self.charges.insert(id.to_string(), new_charge);
+        self.retained_readable.insert(id.to_string());
         Ok(StoreReply::Status(status))
     }
 
@@ -1206,8 +1326,6 @@ impl Worker {
             .ok_or(StoreError::Unavailable)?;
         let next_charge = next.charge()?;
         self.quota.replace_transfer(old_charge, next_charge)?;
-        // New objects reserved this marker at Begin. A legacy upgrade may add
-        // a small index charge; retain it after an ambiguous rename/fsync error.
         self.charges.insert(id.to_string(), next_charge);
         // Only metadata changes. A failed attempt keeps the last published
         // status and can safely rewrite the same monotonic marker on retry,
@@ -1243,12 +1361,6 @@ impl Worker {
         if previous.status.browser_download_confirmed == Some(true) {
             return Ok(StoreReply::Status(previous.status));
         }
-        let legacy_charge = previous
-            .status
-            .browser_download_confirmed
-            .is_none()
-            .then(|| previous.charge())
-            .transpose()?;
         let mut next = previous;
         next.status.browser_download_confirmed = Some(true);
         let old_charge = self
@@ -1256,30 +1368,8 @@ impl Worker {
             .get(id)
             .copied()
             .ok_or(StoreError::Unavailable)?;
-        if let Some(legacy_charge) = legacy_charge {
-            // The receipt also records its exact allowance, so recovery never
-            // grants headroom to a modern/pre-reserved or fabricated receipt.
-            next.browser_receipt_extra_bytes = Some(0);
-            for _ in 0..3 {
-                next.browser_receipt_extra_bytes = Some(
-                    next.charge()?
-                        .checked_sub(legacy_charge)
-                        .ok_or(StoreError::Quota)?,
-                );
-            }
-            let next_charge = next.charge()?;
-            let extra = next.browser_receipt_extra_bytes.ok_or(StoreError::Quota)?;
-            if next_charge.checked_sub(legacy_charge) != Some(extra)
-                || (old_charge != legacy_charge && old_charge != next_charge)
-            {
-                return Err(StoreError::Quota);
-            }
-            self.quota
-                .reserve_legacy_browser_receipt(old_charge, next_charge, extra)?;
-        } else {
-            self.quota.replace_transfer(old_charge, next.charge()?)?;
-        }
         let next_charge = next.charge()?;
+        self.quota.replace_transfer(old_charge, next_charge)?;
         self.charges.insert(id.to_string(), next_charge);
         // Publish success only after the exact browser receipt is durable.
         // An uncertain index write is safe to retry without deleting payload.
@@ -1295,7 +1385,12 @@ impl Worker {
         offset: u64,
         length: usize,
     ) -> Result<Vec<u8>, StoreError> {
-        if manifest.status.delivery_confirmed() || manifest.status.payload_released {
+        // Append replay compares the already durable staging prefix internally.
+        // Public ReadRange still requires Committed in apply before this call.
+        let staging_prefix = manifest.status.phase == StorePhase::Staging
+            && !manifest.status.delivery_confirmed()
+            && !manifest.status.payload_released;
+        if !staging_prefix && !self.payload_available(&manifest.status) {
             return Err(StoreError::Unavailable);
         }
         let end = offset
@@ -1340,27 +1435,33 @@ impl Worker {
         Ok(bytes)
     }
 
+    fn payload_available(&self, status: &StoreObjectStatus) -> bool {
+        self.retention.payload_available(
+            status,
+            self.retained_readable.contains(&status.spec.object_id),
+        )
+    }
+
     fn validate_manifest(&self, manifest: &Manifest) -> Result<[u8; 32], StoreError> {
-        if !manifest.status.delivery_receipts_valid()
+        self.validate_manifest_payload(manifest, false)
+    }
+
+    fn validate_manifest_payload(
+        &self,
+        manifest: &Manifest,
+        verify_delivered: bool,
+    ) -> Result<[u8; 32], StoreError> {
+        // Begin writes a pending receipt for the transfer's endpoint, which
+        // reserves terminal index space before any bytes are accepted.
+        let endpoint_receipt = match manifest.status.spec.direction {
+            StoreDirection::Incoming => manifest.status.browser_download_confirmed,
+            StoreDirection::Outgoing => manifest.status.native_delivery_confirmed,
+        };
+        if endpoint_receipt.is_none()
+            || !manifest.status.delivery_receipts_valid()
             || (manifest.status.payload_released && !manifest.chunks.is_empty())
         {
             return Err(StoreError::Conflict);
-        }
-        if let Some(extra) = manifest.browser_receipt_extra_bytes {
-            if extra == 0
-                || extra > 128
-                || manifest.status.payload_released
-                || manifest.status.spec.direction != StoreDirection::Incoming
-                || manifest.status.browser_download_confirmed != Some(true)
-            {
-                return Err(StoreError::Conflict);
-            }
-            let mut legacy = manifest.clone();
-            legacy.status.browser_download_confirmed = None;
-            legacy.browser_receipt_extra_bytes = None;
-            if manifest.charge()?.checked_sub(legacy.charge()?) != Some(extra) {
-                return Err(StoreError::Conflict);
-            }
         }
         let delivered = manifest.status.delivery_confirmed();
         if manifest.status.phase == StorePhase::Committed
@@ -1386,7 +1487,7 @@ impl Worker {
             if position > manifest.status.spec.size_bytes {
                 return Err(StoreError::Range);
             }
-            if !delivered {
+            if !delivered || verify_delivered {
                 let mut bytes = self.read_chunk(manifest, chunk)?;
                 digest.update(&bytes);
                 bytes.fill(0);
@@ -1399,7 +1500,7 @@ impl Worker {
         // removal. Its manifest still has to prove the exact size/hash/chunk
         // structure, but a crash may have removed any subset of those chunks.
         // Other objects continue to authenticate every byte before recovery.
-        if delivered {
+        if delivered && !verify_delivered {
             return manifest.status.committed_sha256.ok_or(StoreError::Hash);
         }
         let hash: [u8; 32] = digest.finalize().into();
@@ -1441,7 +1542,75 @@ impl Worker {
             .join(format!("{:016x}-{:08x}.enc", chunk.offset, chunk.length))
     }
 
+    fn purge(&mut self, spec: StoreSpec) -> Result<StoreReply, StoreError> {
+        validate_spec(&spec)?;
+        if self.removed_profiles.contains(&spec.profile_id) {
+            return Err(StoreError::Conflict);
+        }
+        if let Some(previous) = self.objects.get(&spec.object_id) {
+            if !previous.status.spec.same_identity(&spec)
+                || (!previous.status.is_identity_tombstone() && previous.status.spec != spec)
+            {
+                return Err(StoreError::Conflict);
+            }
+            return self.remove_with_metadata(&spec.object_id, true);
+        }
+        if let Some(operation) = &spec.operation_id {
+            if self.objects.values().any(|existing| {
+                existing.status.spec.profile_id == spec.profile_id
+                    && existing.status.spec.operation_id.as_ref() == Some(operation)
+            }) {
+                return Err(StoreError::Conflict);
+            }
+        }
+        // Begin may not have reached the worker. Commit its captured identity
+        // directly as a tombstone; a delayed Begin can never recreate payload.
+        let captured = spec.clone();
+        let mut retired = spec;
+        retired.name.clear();
+        retired.mime.clear();
+        retired.size_bytes = 0;
+        retired.expected_sha256 = None;
+        let manifest = Manifest {
+            version: 1,
+            status: StoreObjectStatus {
+                native_delivery_confirmed: (retired.direction == StoreDirection::Outgoing)
+                    .then_some(false),
+                browser_download_confirmed: (retired.direction == StoreDirection::Incoming)
+                    .then_some(false),
+                spec: retired,
+                durable_bytes: 0,
+                phase: StorePhase::Removed,
+                committed_sha256: None,
+                payload_released: false,
+            },
+            chunks: vec![],
+        };
+        let charge = manifest.charge()?;
+        self.quota.replace_transfer(0, charge)?;
+        if let Err(error) = self.commit_manifest(&manifest) {
+            self.write_failed = true;
+            return Err(error);
+        }
+        let status = manifest.status.clone();
+        self.charges.insert(status.spec.object_id.clone(), charge);
+        self.objects.insert(status.spec.object_id.clone(), manifest.clone());
+        self.pending_purge_cleanup.insert(status.spec.object_id.clone(), captured);
+        self.clean_uncommitted(&manifest)?;
+        self.pending_purge_cleanup.remove(&status.spec.object_id);
+        Ok(StoreReply::Status(status))
+    }
+
     fn remove(&mut self, id: &str) -> Result<StoreReply, StoreError> {
+        self.remove_with_metadata(id, false)
+    }
+
+    fn remove_with_metadata(
+        &mut self,
+        id: &str,
+        purge_metadata: bool,
+    ) -> Result<StoreReply, StoreError> {
+        self.retained_readable.remove(id);
         let previous = self.objects.get(id).ok_or(StoreError::Unavailable)?.clone();
         let mut next = previous.clone();
         next.status.phase = StorePhase::Removed;
@@ -1452,7 +1621,12 @@ impl Worker {
         next.status.browser_download_confirmed =
             next.status.browser_download_confirmed.map(|_| false);
         next.status.payload_released = false;
-        next.browser_receipt_extra_bytes = None;
+        if purge_metadata {
+            next.status.spec.name.clear();
+            next.status.spec.mime.clear();
+            next.status.spec.size_bytes = 0;
+            next.status.spec.expected_sha256 = None;
+        }
         next.chunks.clear();
         if let Err(error) = self.commit_manifest(&next) {
             self.write_failed = true;
@@ -1461,6 +1635,10 @@ impl Worker {
         // Durable tombstone precedes deletion: replaying a cancelled operation
         // cannot resurrect a second outgoing offer after a crash.
         self.objects.insert(id.to_string(), next.clone());
+        if next.status.is_identity_tombstone() {
+            self.pending_purge_cleanup.entry(id.to_string())
+                .or_insert_with(|| previous.status.spec.clone());
+        }
         self.clean_uncommitted(&next)?;
         let old_charge = self
             .charges
@@ -1470,10 +1648,14 @@ impl Worker {
         let next_charge = next.charge()?;
         self.quota.replace_transfer(old_charge, next_charge)?;
         self.charges.insert(id.to_string(), next_charge);
+        self.pending_purge_cleanup.remove(id);
         Ok(StoreReply::Status(next.status))
     }
 
     fn release_delivered(&mut self, id: &str) -> Result<StoreReply, StoreError> {
+        if self.retention == StoreRetention::UntilRemoval {
+            return Err(StoreError::Conflict);
+        }
         let previous = self.objects.get(id).ok_or(StoreError::Unavailable)?.clone();
         if !previous.status.delivery_confirmed()
             || !previous.status.delivery_receipts_valid()
@@ -1487,7 +1669,6 @@ impl Worker {
         }
         let mut next = previous;
         next.status.payload_released = true;
-        next.browser_receipt_extra_bytes = None;
         next.chunks.clear();
         // The already durable delivery receipt permits an interrupted deletion.
         // Do not release quota until every payload file is actually gone and
@@ -1529,10 +1710,14 @@ impl Worker {
             .values()
             .filter(|entry| {
                 entry.status.spec.profile_id == profile_id
-                    && entry.status.phase != StorePhase::Removed
+                    && (entry.status.phase != StorePhase::Removed
+                        || self.pending_purge_cleanup.contains_key(&entry.status.spec.object_id))
             })
             .map(|entry| entry.status.spec.object_id.clone())
             .collect::<Vec<_>>();
+        for object in &objects {
+            self.retained_readable.remove(object);
+        }
         for object in objects {
             self.remove(&object)?;
         }
@@ -1591,8 +1776,13 @@ pub(crate) fn validate_restored(
         return Ok(0);
     }
     let quota = TransferQuota::new(user_limit, 0);
-    let worker = Worker::load(workspace_root.to_path_buf(), cipher, Arc::clone(&quota))
-        .map_err(|error| error.code().to_string())?;
+    let worker = Worker::load_with_retention(
+        workspace_root.to_path_buf(),
+        cipher,
+        Arc::clone(&quota),
+        StoreRetention::EndpointReceipt,
+    )
+    .map_err(|error| error.code().to_string())?;
     let charge = quota.transfer_bytes();
     drop(worker);
     Ok(charge)
@@ -1643,6 +1833,7 @@ mod tests {
             profile_id: "profileA".into(),
             message_id: "messageA".into(),
             friend_public_key: "AB".repeat(32),
+            contact_incarnation: 0,
             direction: StoreDirection::Outgoing,
             name: "private-attachment.bin".into(),
             mime: "application/octet-stream".into(),
@@ -1674,6 +1865,143 @@ mod tests {
         if let Err(panic) = result {
             std::panic::resume_unwind(panic);
         }
+    }
+
+    #[test]
+    fn pending_purge_before_begin_is_durable_and_rejects_late_replay() {
+        with_delivery_fixture("purge-before-begin", b"pending bytes", |root, vault, spec| {
+            let mut store = worker(root, vault);
+            let StoreReply::Status(retired) = store.apply(StoreOperation::Purge {
+                spec: spec.clone(),
+            }).unwrap() else { panic!("missing purge status") };
+            assert!(retired.is_identity_tombstone());
+            assert!(retired.spec.same_identity(spec));
+            assert!(store.pending_purge_cleanup.is_empty());
+            assert_eq!(fs::read_dir(root.join(DIRECTORY).join(&spec.object_id)).unwrap().count(), 1);
+            assert_eq!(store.apply(StoreOperation::Begin(spec.clone())).unwrap_err(), StoreError::Conflict);
+            assert_eq!(store.apply(StoreOperation::Finalize {
+                object_id: spec.object_id.clone(),
+            }).unwrap_err(), StoreError::Range);
+            drop(store);
+            let mut reopened = worker(root, vault);
+            assert!(reopened.objects[&spec.object_id].status.is_identity_tombstone());
+            assert_eq!(reopened.apply(StoreOperation::Begin(spec.clone())).unwrap_err(), StoreError::Conflict);
+            assert!(matches!(reopened.apply(StoreOperation::Purge { spec: spec.clone() }),
+                Ok(StoreReply::Status(status)) if status.is_identity_tombstone()));
+        });
+    }
+
+    #[test]
+    fn pending_purge_requires_full_live_spec_and_stable_identity() {
+        with_delivery_fixture("purge-identity", b"bound payload", |root, vault, spec| {
+            let mut store = worker(root, vault);
+            store.begin(spec.clone()).unwrap();
+            let index = root.join(DIRECTORY).join(&spec.object_id).join("index.enc");
+            let original_index = fs::read(&index).unwrap();
+            for field in ["object", "profile", "peer", "message", "operation", "epoch",
+                "direction", "name", "mime", "size", "hash"] {
+                let mut changed = spec.clone();
+                match field {
+                    "object" => changed.object_id = "other-object".into(),
+                    "profile" => changed.profile_id = "other-profile".into(),
+                    "peer" => changed.friend_public_key = "CD".repeat(32),
+                    "message" => changed.message_id = "other-message".into(),
+                    "operation" => changed.operation_id = Some("other-operation".into()),
+                    "epoch" => changed.contact_incarnation += 1,
+                    "direction" => changed.direction = StoreDirection::Incoming,
+                    "name" => changed.name = "other.bin".into(),
+                    "mime" => changed.mime = "image/png".into(),
+                    "size" => changed.size_bytes += 1,
+                    "hash" => changed.expected_sha256 = Some([0; 32]),
+                    _ => unreachable!(),
+                }
+                assert_eq!(store.apply(StoreOperation::Purge { spec: changed }).unwrap_err(),
+                    StoreError::Conflict, "accepted changed {field}");
+                assert_eq!(fs::read(&index).unwrap(), original_index, "rewrote {field}");
+                assert_eq!(&store.objects[&spec.object_id].status.spec, spec);
+            }
+            store.apply(StoreOperation::Purge { spec: spec.clone() }).unwrap();
+            let mut other_epoch = spec.clone();
+            other_epoch.contact_incarnation += 1;
+            assert_eq!(store.apply(StoreOperation::Purge { spec: other_epoch }).unwrap_err(),
+                StoreError::Conflict);
+        });
+    }
+
+    #[test]
+    fn pending_purge_ticket_replay_requires_full_captured_spec() {
+        let (root, vault, spec) = fixture("purge-ticket", b"ticket payload");
+        with_test_store(root, &vault, TransferQuota::new(64 * 1024 * 1024, 0),
+            HashSet::from([spec.profile_id.clone()]), |store| {
+                let ticket = publish_operation(store, StoreOperation::Purge { spec: spec.clone() });
+                assert_eq!(store.try_submit(StoreOperation::Purge { spec: spec.clone() }).unwrap(), ticket);
+                for field in ["name", "epoch", "peer"] {
+                    let mut changed = spec.clone();
+                    match field {
+                        "name" => changed.name = "different.bin".into(),
+                        "epoch" => changed.contact_incarnation += 1,
+                        "peer" => changed.friend_public_key = "CD".repeat(32),
+                        _ => unreachable!(),
+                    }
+                    assert_eq!(store.try_submit(StoreOperation::Purge { spec: changed }).unwrap_err(),
+                        StoreError::Conflict);
+                }
+                assert!(matches!(store.try_result(ticket),
+                    Some(Ok(StoreReply::Status(status))) if status.is_identity_tombstone()));
+                let late = publish_operation(store, StoreOperation::Begin(spec.clone()));
+                assert!(matches!(store.try_result(late), Some(Err(StoreError::Conflict))));
+            });
+    }
+
+    #[test]
+    fn pending_purge_cleanup_failure_keeps_original_custody_until_retry() {
+        let bytes = b"cleanup must finish";
+        let (root, vault, spec) = fixture("purge-cleanup", bytes);
+        with_test_store(root.clone(), &vault, TransferQuota::new(64 * 1024 * 1024, 0),
+            HashSet::from([spec.profile_id.clone()]), |store| {
+                let mut other = spec.clone();
+                other.object_id = "other-transfer".into();
+                other.operation_id = Some("other-operation".into());
+                other.message_id = "other-message".into();
+                other.friend_public_key = "CD".repeat(32);
+                other.contact_incarnation = 7;
+                for bound in [&spec, &other] {
+                    for operation in [StoreOperation::Begin(bound.clone()),
+                        StoreOperation::Append { object_id: bound.object_id.clone(), offset: 0,
+                            bytes: Arc::from(&bytes[..]) },
+                        StoreOperation::Finalize { object_id: bound.object_id.clone() }] {
+                        let ticket = publish_operation(store, operation);
+                        assert!(matches!(store.try_result(ticket), Some(Ok(StoreReply::Status(_)))));
+                    }
+                }
+                let other_index = root.join(DIRECTORY).join(&other.object_id).join("index.enc");
+                let preserved = fs::read(&other_index).unwrap();
+                let object_dir = root.join(DIRECTORY).join(&spec.object_id);
+                let blocked = object_dir.join(format!("{:016x}-{:08x}.enc", 0, bytes.len()));
+                fs::remove_file(&blocked).unwrap();
+                fs::create_dir(&blocked).unwrap();
+                let failed = publish_operation(store, StoreOperation::Purge { spec: spec.clone() });
+                assert!(matches!(store.try_result(failed), Some(Err(StoreError::Unavailable))));
+                assert!(!store.try_snapshot().unwrap().iter().any(|row| row.spec.object_id == spec.object_id));
+                assert_eq!(store.pending_purges().unwrap(), vec![spec.clone()]);
+                // No bridge object is needed to rediscover this captured request.
+                let recovered_request = store.pending_purges().unwrap().pop().unwrap();
+                let remove = publish_operation(store, StoreOperation::Remove { object_id: spec.object_id.clone() });
+                assert!(matches!(store.try_result(remove), Some(Err(StoreError::Unavailable))));
+                assert_eq!(store.pending_purges().unwrap(), vec![recovered_request.clone()]);
+                assert_eq!(fs::read(&other_index).unwrap(), preserved);
+                fs::remove_dir(&blocked).unwrap();
+                let retried = publish_operation(store, StoreOperation::Purge { spec: recovered_request });
+                assert!(matches!(store.try_result(retried),
+                    Some(Ok(StoreReply::Status(status))) if status.is_identity_tombstone()));
+                assert!(store.pending_purges().unwrap().is_empty());
+                assert!(store.try_snapshot().unwrap().iter().any(|row|
+                    row.spec.object_id == spec.object_id && row.is_identity_tombstone()));
+                assert_eq!(fs::read_dir(&object_dir).unwrap().count(), 1);
+                assert_eq!(fs::read(&other_index).unwrap(), preserved);
+                assert!(store.try_snapshot().unwrap().iter().any(|row|
+                    row.spec == other && row.phase == StorePhase::Committed));
+            });
     }
 
     fn endpoint_spec(spec: &StoreSpec, direction: StoreDirection) -> StoreSpec {
@@ -1757,7 +2085,7 @@ mod tests {
     }
 
     #[test]
-    fn native_delivery_legacy_absence_keeps_existing_quota_and_roundtrips() {
+    fn missing_endpoint_receipt_rejects_transfer_without_removing_payload() {
         let bytes = b"legacy retained payload";
         with_delivery_fixture("native-delivery-legacy", bytes, |root, vault, spec| {
             let mut store = worker(root, vault);
@@ -1766,53 +2094,27 @@ mod tests {
             store.finalize(&spec.object_id).unwrap();
             let mut legacy = store.objects[&spec.object_id].clone();
             legacy.status.native_delivery_confirmed = None;
-            let encoded = serde_json::to_vec(&legacy).unwrap();
-            assert!(!String::from_utf8_lossy(&encoded).contains("nativeDeliveryConfirmed"));
-            let decoded: Manifest = serde_json::from_slice(&encoded).unwrap();
-            assert_eq!(decoded.status.native_delivery_confirmed, None);
-            assert_eq!(serde_json::to_vec(&decoded).unwrap(), encoded);
             store.commit_manifest(&legacy).unwrap();
-            let legacy_charge = legacy.charge().unwrap();
+            let index = root.join(DIRECTORY).join(&spec.object_id).join("index.enc");
+            let before = fs::read(&index).unwrap();
+            let chunks: Vec<_> = legacy
+                .chunks
+                .iter()
+                .map(|chunk| store.chunk_path(&spec.object_id, chunk))
+                .collect();
             drop(store);
-            let quota = TransferQuota::new(legacy_charge, 0);
-            let mut restored = Worker::load(
-                root.to_path_buf(),
-                vault.payload_cipher().unwrap(),
-                Arc::clone(&quota),
-            )
-            .unwrap();
-            assert_eq!(
-                restored.objects[&spec.object_id]
-                    .status
-                    .native_delivery_confirmed,
-                None
-            );
-            assert_eq!(quota.transfer_bytes(), legacy_charge);
+            let quota = TransferQuota::new(legacy.charge().unwrap(), 0);
             assert!(matches!(
-                restored.mark_delivered(&spec.object_id),
-                Err(StoreError::Quota)
+                Worker::load(
+                    root.to_path_buf(),
+                    vault.payload_cipher().unwrap(),
+                    Arc::clone(&quota),
+                ),
+                Err(StoreError::Conflict)
             ));
-            assert_eq!(
-                restored.objects[&spec.object_id]
-                    .status
-                    .native_delivery_confirmed,
-                None
-            );
-            assert_eq!(
-                restored
-                    .read_range(&restored.objects[&spec.object_id], 0, bytes.len())
-                    .unwrap(),
-                bytes
-            );
-            drop(restored);
-            let mut upgraded = worker(root, vault);
-            upgraded.mark_delivered(&spec.object_id).unwrap();
-            assert_eq!(
-                upgraded.objects[&spec.object_id]
-                    .status
-                    .native_delivery_confirmed,
-                Some(true)
-            );
+            assert_eq!(quota.transfer_bytes(), 0);
+            assert_eq!(fs::read(&index).unwrap(), before);
+            assert!(chunks.iter().all(|path| path.is_file()));
         });
     }
 
@@ -1822,7 +2124,6 @@ mod tests {
         with_delivery_fixture("native-delivery-quota", &bytes, |root, vault, spec| {
             let initial = Manifest {
                 version: 1,
-                browser_receipt_extra_bytes: None,
                 status: StoreObjectStatus {
                     spec: spec.clone(),
                     durable_bytes: 0,
@@ -2321,7 +2622,6 @@ mod tests {
             assert_eq!(store.quota.transfer_bytes(), charged);
             let confirmed = store.objects[&spec.object_id].clone();
             assert_eq!(confirmed.status.browser_download_confirmed, Some(true));
-            assert!(confirmed.browser_receipt_extra_bytes.is_none());
             assert!(matches!(
                 store.read_range(&confirmed, 0, bytes.len()),
                 Err(StoreError::Unavailable)
@@ -2335,9 +2635,9 @@ mod tests {
     }
 
     #[test]
-    fn browser_download_legacy_full_quota_receipt_survives_restart_then_frees_actual_payload() {
+    fn browser_download_at_full_quota_survives_restart_then_frees_actual_payload() {
         let bytes = vec![0x6b; CHUNK_BYTES + 19];
-        with_delivery_fixture("browser-legacy-full-quota", &bytes, |root, vault, spec| {
+        with_delivery_fixture("browser-full-quota", &bytes, |root, vault, spec| {
             let spec = endpoint_spec(spec, StoreDirection::Incoming);
             let mut store = worker(root, vault);
             store.begin(spec.clone()).unwrap();
@@ -2347,20 +2647,15 @@ mod tests {
                     .unwrap();
             }
             store.finalize(&spec.object_id).unwrap();
-            let mut legacy = store.objects[&spec.object_id].clone();
-            legacy.status.browser_download_confirmed = None;
-            store.commit_manifest(&legacy).unwrap();
-            let charge = legacy.charge().unwrap();
-            store.charges.insert(spec.object_id.clone(), charge);
-            store.objects.insert(spec.object_id.clone(), legacy.clone());
+            let pending = store.objects[&spec.object_id].clone();
+            let charge = pending.charge().unwrap();
+            assert_eq!(pending.status.browser_download_confirmed, Some(false));
             store.quota = TransferQuota::new(charge, 0);
             store.quota.replace_transfer(0, charge).unwrap();
             store.apply(endpoint_receipt(&spec, &bytes)).unwrap();
             let confirmed = store.objects[&spec.object_id].clone();
-            let extra = confirmed.browser_receipt_extra_bytes.unwrap();
-            assert_eq!(store.quota.transfer_bytes(), charge + extra);
-            assert!(extra > 0 && extra <= 128);
-            assert!(legacy
+            assert_eq!(store.quota.transfer_bytes(), charge);
+            assert!(pending
                 .chunks
                 .iter()
                 .all(|chunk| store.chunk_path(&spec.object_id, chunk).is_file()));
@@ -2374,24 +2669,20 @@ mod tests {
                 TransferQuota::new(charge, 0),
             )
             .unwrap();
-            assert_eq!(restored.quota.transfer_bytes(), charge + extra);
+            assert_eq!(restored.quota.transfer_bytes(), charge);
             assert_eq!(restored.objects[&spec.object_id].status, confirmed.status);
             let mut forged = confirmed.clone();
-            forged.browser_receipt_extra_bytes = Some(extra + 1);
+            forged.status.browser_download_confirmed = None;
             assert!(matches!(
                 restored.validate_manifest(&forged),
                 Err(StoreError::Conflict)
             ));
-            forged = confirmed.clone();
-            forged.status.browser_download_confirmed = Some(false);
-            assert!(matches!(
-                restored.validate_manifest(&forged),
-                Err(StoreError::Conflict)
-            ));
+            let mut retired_index = serde_json::to_value(&confirmed).unwrap();
+            retired_index["browserReceiptExtraBytes"] = 1.into();
+            assert!(serde_json::from_value::<Manifest>(retired_index).is_err());
             restored.release_delivered(&spec.object_id).unwrap();
             let released = &restored.objects[&spec.object_id];
             assert!(released.status.payload_released && released.status.delivery_confirmed());
-            assert!(released.browser_receipt_extra_bytes.is_none());
             assert_eq!(restored.quota.transfer_bytes(), released.charge().unwrap());
             assert!(charge - restored.quota.transfer_bytes() >= bytes.len() as u64);
             assert_eq!(
@@ -3397,7 +3688,6 @@ mod tests {
         let (root, vault, spec) = fixture("fixed-frames", &bytes);
         let manifest = Manifest {
             version: 1,
-            browser_receipt_extra_bytes: None,
             status: StoreObjectStatus {
                 spec: spec.clone(),
                 durable_bytes: 0,
@@ -3602,6 +3892,7 @@ mod tests {
             stopping: Arc::new(AtomicBool::new(false)),
             stopped: Arc::new(AtomicBool::new(false)),
             suspended: AtomicBool::new(false),
+            retention: StoreRetention::EndpointReceipt,
         };
         let first = StoreOperation::Append {
             object_id: "transferA".into(),

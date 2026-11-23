@@ -3,7 +3,7 @@ import { spawnSync } from "node:child_process";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { bindingIdentity, digest, nativeCounts, prepare, treeIdentity, within } from "./current-verification.mjs";
+import { bindingIdentity, cargoPreuse, digest, nativeCounts, prepare, treeIdentity, within } from "./current-verification.mjs";
 
 const actualRoot = path.resolve(import.meta.dirname, "..");
 const fixturePlatform = { win32: "windows", linux: "debian", darwin: "macos" }[process.platform];
@@ -83,7 +83,9 @@ try {
   await file("native/src/lib.rs", '#[test]\nfn baseline(){assert_eq!(2+2,4);}\n');
   let result = spawnSync("git", ["-c", "safe.directory=" + owner, "init", "-q"], { cwd: owner, encoding: "utf8", windowsHide: true });
   assert.equal(result.status, 0, result.stderr);
-  result = spawnSync("cargo", ["generate-lockfile", "--offline", "--manifest-path", "native/Cargo.toml"], { cwd: owner, encoding: "utf8", windowsHide: true });
+  const lockArgs = ["generate-lockfile", "--offline", "--manifest-path", "native/Cargo.toml"];
+  const lockCargo = await cargoPreuse("cargo", lockArgs, owner);
+  result = spawnSync(lockCargo, lockArgs, { cwd: owner, encoding: "utf8", windowsHide: true });
   assert.equal(result.status, 0, result.stderr);
   const artifactDirectory = path.join(workspace, "program-artifact"); await mkdir(artifactDirectory);
   const artifact = path.join(artifactDirectory, "candidate.bin"); await writeFile(artifact, "candidate-bytes");
@@ -194,7 +196,9 @@ try {
   await check("new Cargo manifest is unresolved instead of empty PASS", async () => {
     await file("new-native/Cargo.toml", '[package]\nname="new_native"\nversion="0.1.0"\nedition="2021"\n');
     await file("new-native/src/lib.rs", "#[test]\nfn new_test(){assert!(true);}\n");
-    const lock = spawnSync("cargo", ["generate-lockfile", "--offline", "--manifest-path", "new-native/Cargo.toml"], { cwd: owner, encoding: "utf8", windowsHide: true });
+    const lockArgs = ["generate-lockfile", "--offline", "--manifest-path", "new-native/Cargo.toml"];
+    const lockCargo = await cargoPreuse("cargo", lockArgs, owner);
+    const lock = spawnSync(lockCargo, lockArgs, { cwd: owner, encoding: "utf8", windowsHide: true });
     assert.equal(lock.status, 0, lock.stderr);
     const blocked = await planned([], 2);
     assert.ok(blocked.value.unresolved.some((item) => item.input === "new-native/Cargo.toml"));

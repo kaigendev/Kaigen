@@ -9,6 +9,8 @@ use std::time::Duration;
 mod tests;
 
 const WIRE_VERSION: u8 = 2;
+// The on-disk ML-KEM key format has its own version, independent of the wire protocol.
+const IDENTITY_FORMAT_VERSION: u8 = 1;
 const FRAGMENT: usize = 1200;
 const MAX_RECORD: usize = 512 * 1024;
 const MAX_TEXT: usize = 256 * 1024 + 64;
@@ -17,7 +19,6 @@ const MAX_SKIPPED: u64 = 128;
 const MAX_OUTGOING: usize = 128;
 const MAX_OUTGOING_BYTES: usize = 4 * 1024 * 1024;
 const MAX_RETIRED: usize = 4096;
-const MAX_DETACHED_ARCHIVES: usize = 16;
 const MAX_SUPERSEDED_EPOCHS: usize = 32;
 const MAX_CAPABILITY_PROBES: usize = 16;
 const RETRY: Duration = Duration::from_secs(1);
@@ -29,6 +30,31 @@ const CAPABILITY_ACK_INTERVAL: Duration = Duration::from_millis(250);
 // the sender UI starts and after it reserves its one-shot collection window.
 // A missing or closed UI still falls back without extending the reservation.
 const IDENTITY_ENTROPY_UI_LEASE: Duration = Duration::from_secs(20);
+
+#[derive(Deserialize, Serialize)]
+struct StoredIdentity {
+    version: u8,
+    algorithm: String,
+    secret_key_hex: String,
+}
+
+impl Drop for StoredIdentity {
+    fn drop(&mut self) {
+        // Take ownership of the backing bytes so they can be wiped directly.
+        crypto::wipe(&mut std::mem::take(&mut self.secret_key_hex).into_bytes());
+    }
+}
+struct Identity {
+    secret_key: Vec<u8>,
+    public_key: Vec<u8>,
+    fingerprint: String,
+}
+
+impl Drop for Identity {
+    fn drop(&mut self) {
+        crypto::wipe(&mut self.secret_key);
+    }
+}
 
 #[derive(Clone, Serialize, Deserialize)]
 struct Secret([u8; 32]);
@@ -251,8 +277,7 @@ struct Stored {
     version: u8,
     owner: String,
     peers: BTreeMap<String, PeerState>,
-    /// Explicit contact deletion quarantines protocol state instead of making
-    /// it reachable from a later Tox friend-number reuse or same-key re-add.
+    /// Current files can still contain this field, but never contain archives.
     #[serde(default)]
     detached: BTreeMap<String, Vec<PeerState>>,
     /// Public lifecycle markers only; never retain deleted contact secrets.
@@ -396,9 +421,8 @@ impl Engine {
     pub(super) fn new(data_dir: &Path) -> Result<Self, String> {
         let path = data_dir.join("pq-sessions-v2.json");
         let identity_path = data_dir.join("pq-identity.json");
-        let mut stored: Stored = if profiles::file_exists(&path) {
-            serde_json::from_slice(&profiles::read_file(&path)?)
-                .map_err(|_| "PQ_SAVED_STATE_INVALID")?
+        let stored: Stored = if let Some(bytes) = profiles::read_optional_file(&path)? {
+            serde_json::from_slice(&bytes).map_err(|_| "PQ_SAVED_STATE_INVALID")?
         } else {
             Stored::default()
         };
@@ -406,27 +430,7 @@ impl Engine {
             return Err("PQ_SAVED_VERSION_UNSUPPORTED".into());
         }
         validate_stored(&stored)?;
-        if !stored.detached.is_empty() {
-            // 0.3.2 archived secrets after explicit local contact deletion.
-            // Existing live flags cannot distinguish its inert replacement from
-            // a later explicit refusal, so preserve that decision. A contact
-            // with no live state starts fresh when next added.
-            for key in stored.detached.keys() {
-                if !stored.peers.contains_key(key) {
-                    stored.fresh_contacts.insert(key.clone());
-                }
-            }
-            stored.detached.clear();
-            let mut bytes = serde_json::to_vec(&stored).map_err(|_| "PQ_STATE_ENCODE_FAILED")?;
-            let committed = profiles::write_file_checkpointed(&path, &bytes);
-            crypto::wipe(&mut bytes);
-            committed?;
-        }
-        let identity = if profiles::file_exists(&identity_path) {
-            Some(load_or_create_identity(&identity_path)?)
-        } else {
-            None
-        };
+        let identity = load_existing_identity(&identity_path)?;
         if identity.is_none()
             && stored.peers.values().any(|p| {
                 !p.epochs.is_empty()
@@ -504,17 +508,10 @@ impl Engine {
         if !s.stored.owner.is_empty() && s.stored.owner != owner {
             return Err("PQ_OWNER_MISMATCH".into());
         }
-        let release_unconfirmed = |p: &PeerState| {
-            !p.supported
-                && p.auto_pending
-                && !p.manual_request
-                && p.current.is_none()
-                && p.handshake.is_none()
-        };
         let changed = s.stored.owner.is_empty()
             || contacts
                 .iter()
-                .any(|(_, key, _)| s.stored.peers.get(key).is_none_or(release_unconfirmed));
+                .any(|(_, key, _)| !s.stored.peers.contains_key(key));
         if changed {
             // A mounted KAI checkpoint rewrites the whole profile. Publish all
             // newly discovered contacts in one transaction before exposing any
@@ -523,24 +520,12 @@ impl Engine {
                 store.owner = owner;
                 for (_, key, existing) in &contacts {
                     let fresh = store.fresh_contacts.remove(key);
-                    let p = store.peers.entry(key.clone()).or_insert_with(|| PeerState {
+                    store.peers.entry(key.clone()).or_insert_with(|| PeerState {
                         auto_start_on_ready: fresh || !*existing,
                         first_message_seen: *existing && !fresh,
                         auto_consumed: *existing && !fresh,
                         ..PeerState::default()
                     });
-                    // Retain the previous migration of unsupported automatic
-                    // attempts without changing confirmed or manual sessions.
-                    if release_unconfirmed(p) {
-                        p.auto_pending = false;
-                        p.auto_consumed = true;
-                        p.manual_only = true;
-                        p.auto_start_on_ready = false;
-                        p.auto_skip_pending = true;
-                        p.wanted = false;
-                        p.cancelled = None;
-                        p.error = None;
-                    }
                 }
                 Ok(())
             })?;
@@ -574,7 +559,6 @@ impl Engine {
         let key = route(&s, friend)?;
         self.transaction(&mut s, |st| {
             st.peers.remove(&key);
-            st.detached.remove(&key);
             st.fresh_contacts.insert(key.clone());
             Ok(())
         })?;
@@ -660,24 +644,6 @@ impl Engine {
         packets
     }
 
-    pub(super) fn drive_discovery(
-        &self,
-        friend: u32,
-        online: bool,
-    ) -> Result<Vec<Vec<u8>>, String> {
-        if !online {
-            return self.drive(friend, false, true);
-        }
-        {
-            let mut s = self.inner.lock().map_err(|_| "PQ_STATE_LOCKED")?;
-            let key = route(&s, friend)?;
-            let r = s.runtime.entry(key).or_default();
-            r.online = true;
-            r.was_online = true;
-        }
-        Ok(self.discovery(friend))
-    }
-
     pub(super) fn reset_generation(&self, friend: u32) -> u64 {
         let Ok(s) = self.inner.lock() else {
             return 0;
@@ -731,25 +697,6 @@ impl Engine {
                 .is_some_and(|k| k.eq_ignore_ascii_case(key))
         })
     }
-    pub(super) fn import_trust(&self, friend: u32, fingerprint: String) -> Result<(), String> {
-        let mut s = self.inner.lock().map_err(|_| "PQ_STATE_LOCKED")?;
-        let key = route(&s, friend)?;
-        if s.stored.peers[&key].trusted_fingerprint.as_ref() == Some(&fingerprint) {
-            return Ok(());
-        }
-        self.transaction(&mut s, |st| {
-            let p = st.peers.get_mut(&key).ok_or("PQ_PEER_MISSING")?;
-            if p.trusted_fingerprint
-                .as_ref()
-                .is_some_and(|old| old != &fingerprint)
-            {
-                return Err("PQ_TRUST_MIGRATION_MISMATCH".into());
-            }
-            p.trusted_fingerprint = Some(fingerprint);
-            Ok(())
-        })
-    }
-
     pub(super) fn remap(&self, mapping: &HashMap<u32, u32>) {
         if let Ok(mut s) = self.inner.lock() {
             s.routes = std::mem::take(&mut s.routes)
@@ -759,6 +706,7 @@ impl Engine {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn capability(&self) -> Vec<Vec<u8>> {
         let identity = self
             .inner
@@ -768,6 +716,7 @@ impl Engine {
             .unwrap_or_default();
         packets(&Record::Capability { identity }).unwrap_or_default()
     }
+    #[cfg(test)]
     pub(super) fn capability_probe(&self, friend: u32) -> Vec<Vec<u8>> {
         let Ok(s) = self.inner.lock() else {
             return Vec::new();
@@ -777,6 +726,7 @@ impl Engine {
         };
         capability_probe_locked(&s, key)
     }
+    #[cfg(test)]
     pub(super) fn has_identity(&self) -> bool {
         self.inner.lock().is_ok_and(|s| s.identity.is_some())
     }
@@ -799,11 +749,6 @@ impl Engine {
                     .map(|runtime| runtime.connection_revision)
             })
             .unwrap_or(0)
-    }
-    pub(super) fn requires_v2(&self, friend: u32) -> bool {
-        self.inner
-            .lock()
-            .is_ok_and(|s| peer(&s, friend).is_some_and(peer_requires_v2))
     }
     pub(super) fn owns(&self, friend: u32) -> bool {
         self.inner.lock().is_ok_and(|s| {
@@ -901,7 +846,6 @@ impl Engine {
                     && p.handshake.is_none()
                     && (!supported || p.identity.is_empty())
             }),
-            legacy_available: false,
             protocol_version: WIRE_VERSION,
             shutdown_state: if p.is_some_and(|p| !p.close_phase.is_empty()) {
                 "closing"
@@ -1025,7 +969,7 @@ impl Engine {
             secret_key,
         };
         let stored = StoredIdentity {
-            version: VERSION,
+            version: IDENTITY_FORMAT_VERSION,
             algorithm: "ML-KEM-768".into(),
             secret_key_hex: encode_hex(&identity.secret_key),
         };
@@ -1185,20 +1129,6 @@ impl Engine {
         Ok(())
     }
 
-    pub(super) fn legacy_capability_validated(&self, friend: u32) {
-        let Ok(mut s) = self.inner.lock() else {
-            return;
-        };
-        let Some(key) = s.routes.get(&friend).cloned() else {
-            return;
-        };
-        let runtime = s.runtime.entry(key).or_default();
-        runtime.online = true;
-        runtime.was_online = true;
-        runtime.identity_capability_validated = true;
-        runtime.last_attempt = None;
-    }
-
     pub(super) fn skip_auto(&self, friend: u32) -> Result<(), String> {
         let mut s = self.inner.lock().map_err(|_| "PQ_STATE_LOCKED")?;
         let key = route(&s, friend)?;
@@ -1237,48 +1167,6 @@ impl Engine {
             let p = st.peers.get_mut(&key).ok_or("PQ_PEER_MISSING")?;
             p.auto_skip_pending = false;
             p.error = None;
-            Ok(())
-        })
-    }
-    pub(super) fn request_identity_only(&self, friend: u32) -> Result<(), String> {
-        let mut s = self.inner.lock().map_err(|_| "PQ_STATE_LOCKED")?;
-        let key = route(&s, friend)?;
-        self.transaction(&mut s, |st| {
-            let p = st.peers.get_mut(&key).ok_or("PQ_PEER_MISSING")?;
-            if p.auto_skip_pending {
-                return Err("PQ_SESSION_WAIT".into());
-            }
-            p.wanted = true;
-            p.manual_request = true;
-            p.auto_consumed = true;
-            p.auto_pending = false;
-            p.error = None;
-            Ok(())
-        })
-    }
-    pub(super) fn finish_legacy_request(&self, friend: u32) -> Result<(), String> {
-        let mut s = self.inner.lock().map_err(|_| "PQ_STATE_LOCKED")?;
-        let key = route(&s, friend)?;
-        self.transaction(&mut s, |st| {
-            let p = st.peers.get_mut(&key).ok_or("PQ_PEER_MISSING")?;
-            p.wanted = false;
-            p.manual_request = false;
-            p.cancelled = None;
-            Ok(())
-        })
-    }
-    pub(super) fn latch_manual_only(&self, friend: u32) -> Result<(), String> {
-        let mut s = self.inner.lock().map_err(|_| "PQ_STATE_LOCKED")?;
-        let key = route(&s, friend)?;
-        self.transaction(&mut s, |st| {
-            let p = st.peers.get_mut(&key).ok_or("PQ_PEER_MISSING")?;
-            p.manual_only = true;
-            p.auto_start_on_ready = false;
-            p.auto_consumed = true;
-            p.auto_pending = false;
-            p.wanted = false;
-            p.manual_request = false;
-            p.cancelled = None;
             Ok(())
         })
     }
@@ -1739,9 +1627,10 @@ impl Engine {
         let mut s = self.inner.lock().map_err(|_| "PQ_STATE_LOCKED")?;
         let key = route(&s, friend)?;
         let p = &s.stored.peers[&key];
-        if let Some((id, _old)) = p.outgoing.iter().find(|(_, o)| o.operation == operation) {
+        if let Some((_wire_id, _)) = p.outgoing.iter().find(|(_, o)| o.operation == operation) {
             return Ok(EncryptedMessage {
-                wire_id: *id,
+                #[cfg(test)]
+                wire_id: *_wire_id,
                 // The native drive loop retries the exact durable record at a
                 // bounded rate; a composer/outbox poll must not flood toxcore.
                 packets: Vec::new(),
@@ -1817,6 +1706,7 @@ impl Engine {
             .send_attempts
             .insert(wire_id, Instant::now());
         Ok(EncryptedMessage {
+            #[cfg(test)]
             wire_id,
             packets: output,
         })
@@ -1961,41 +1851,12 @@ impl Engine {
     }
 
     pub(super) fn handle(&self, friend: u32, bytes: &[u8]) -> Result<PacketResult, String> {
-        self.handle_scoped(friend, bytes, false)
-    }
-
-    pub(super) fn handle_discovery(
-        &self,
-        friend: u32,
-        bytes: &[u8],
-    ) -> Result<PacketResult, String> {
-        self.handle_scoped(friend, bytes, true)
-    }
-
-    fn handle_scoped(
-        &self,
-        friend: u32,
-        bytes: &[u8],
-        discovery_only: bool,
-    ) -> Result<PacketResult, String> {
         let mut s = self.inner.lock().map_err(|_| "PQ_STATE_LOCKED")?;
         let key = route(&s, friend)?;
         let Some(record) = reassemble(&mut s, &key, bytes)? else {
             return Ok(empty_result());
         };
         let mut result = empty_result();
-        if discovery_only
-            && !matches!(
-                &record,
-                Record::ReadinessProbe { .. }
-                    | Record::ReadinessAck { .. }
-                    | Record::Capability { .. }
-                    | Record::CapabilityProbe { .. }
-                    | Record::CapabilityAck { .. }
-            )
-        {
-            return Ok(result);
-        }
         if !matches!(
             &record,
             Record::ReadinessProbe { .. }
@@ -3272,15 +3133,6 @@ fn peer(s: &State, friend: u32) -> Option<&PeerState> {
         .get(&friend)
         .and_then(|key| s.stored.peers.get(key))
 }
-fn peer_requires_v2(p: &PeerState) -> bool {
-    p.supported
-        || p.current.is_some()
-        || p.handshake.is_some()
-        || p.auto_pending
-        || !p.close_phase.is_empty()
-        || !p.epochs.is_empty()
-        || !p.outgoing.is_empty()
-}
 // Preflight owns no keys or durable queue policy. Only its authenticated ACK
 // begins a close; timeout/cancellation can discard the probe safely.
 fn expire_shutdown_check(s: &mut State, key: &str) {
@@ -3499,198 +3351,46 @@ fn cancelled_tx(peer: &PeerState) -> Option<&str> {
         _ => None,
     }
 }
-/// Pure migration of authenticated legacy payload; no runtime routes are consulted.
-pub(super) fn migrate_legacy_033(
-    bytes: Option<&[u8]>,
-    owner: &str,
-    local_public: Option<&[u8]>,
-    required: &BTreeSet<String>,
-    had_identity: bool,
-    blocked_ids: &BTreeSet<String>,
-    opaque_protection: bool,
-) -> Result<(bool, Vec<u8>, u64, u64), String> {
-    struct MigrationJson(Option<serde_json::Value>);
-    impl std::ops::Deref for MigrationJson {
-        type Target = Option<serde_json::Value>;
-        fn deref(&self) -> &Self::Target {
-            &self.0
+
+fn load_existing_identity(path: &Path) -> Result<Option<Identity>, String> {
+    if let Some(mut bytes) = profiles::read_optional_file(path)? {
+        let parsed = serde_json::from_slice::<StoredIdentity>(&bytes);
+        crypto::wipe(&mut bytes);
+        let stored =
+            parsed.map_err(|error| format!("Не удалось прочитать PQ identity: {error}"))?;
+        if stored.version != IDENTITY_FORMAT_VERSION || stored.algorithm != "ML-KEM-768" {
+            return Err("Неподдерживаемый формат PQ identity".to_string());
         }
-    }
-    impl Drop for MigrationJson {
-        fn drop(&mut self) {
-            fn wipe(value: &mut serde_json::Value) {
-                match value {
-                    serde_json::Value::String(s) => {
-                        let mut bytes = std::mem::take(s).into_bytes();
-                        crypto::wipe(&mut bytes);
-                    }
-                    serde_json::Value::Array(values) => {
-                        for value in values {
-                            wipe(value);
-                        }
-                    }
-                    serde_json::Value::Object(values) => {
-                        for value in values.values_mut() {
-                            wipe(value);
-                        }
-                    }
-                    _ => *value = serde_json::Value::Null,
-                }
-            }
-            if let Some(value) = self.0.as_mut() {
-                wipe(value);
-            }
+        let mut secret_key = decode_hex(&stored.secret_key_hex)?;
+        if secret_key.len() != MLKEM_SECRET_KEY_BYTES {
+            crypto::wipe(&mut secret_key);
+            return Err("Некорректная длина secret key PQ identity".to_string());
         }
+        // FIPS 203 stores the public encapsulation key inside dk.
+        // mlkem-native serializes it at this fixed offset for ML-KEM-768.
+        let public_key = secret_key[1152..1152 + MLKEM_PUBLIC_KEY_BYTES].to_vec();
+        Ok(Some(Identity {
+            fingerprint: fingerprint(&public_key),
+            public_key,
+            secret_key,
+        }))
+    } else {
+        Ok(None)
     }
-    let input =
-        MigrationJson(bytes.and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok()));
-    if input
-        .as_ref()
-        .and_then(|v| v.get("version"))
-        .and_then(serde_json::Value::as_u64)
-        .is_some_and(|v| v > WIRE_VERSION as u64)
-    {
-        return Err("MIGRATION_033_NEWER_SCHEMA".into());
-    }
-    let canonical = crate::chat_history_store::legacy_033_migration::public_key;
-    let bound_owner = input
-        .as_ref()
-        .and_then(|v| v.get("owner"))
-        .and_then(serde_json::Value::as_str)
-        .and_then(canonical)
-        .as_deref()
-        == Some(owner);
-    // The authenticated volume's actual Tox identity and this explicit self binding
-    // establish local ownership. A filename or current friend-number never does.
-    let keep_identity = bound_owner && local_public.is_some();
-    let mut stored = Stored {
-        version: WIRE_VERSION,
-        owner: owner.into(),
-        peers: BTreeMap::new(),
-        detached: BTreeMap::new(),
-        fresh_contacts: BTreeSet::new(),
-    };
-    let mut dropped = u64::from(had_identity && !keep_identity);
-    let mut regenerate = required.clone();
-    let mut reset_count = 0u64;
-    let mut normalized_counts = BTreeMap::<String, usize>::new();
-    if let Some(peers) = input
-        .as_ref()
-        .and_then(|v| v.get("peers"))
-        .and_then(serde_json::Value::as_object)
-    {
-        for key in peers.keys() {
-            if let Some(pk) = canonical(key) {
-                *normalized_counts.entry(pk).or_default() += 1;
-            }
-        }
-        for (key, value) in peers {
-            let Some(pk) = canonical(key) else {
-                dropped += 1;
-                continue;
-            };
-            let protected = value.get("wanted").and_then(serde_json::Value::as_bool) == Some(true)
-                || value
-                    .get("auto_pending")
-                    .and_then(serde_json::Value::as_bool)
-                    == Some(true)
-                || value.get("current").is_some_and(|v| !v.is_null())
-                || value.get("handshake").is_some_and(|v| !v.is_null())
-                || value
-                    .get("close_phase")
-                    .and_then(serde_json::Value::as_str)
-                    .is_some_and(|v| !v.is_empty());
-            if !bound_owner || normalized_counts.get(&pk) != Some(&1) {
-                dropped += 1;
-                if bound_owner && protected {
-                    regenerate.insert(pk);
-                }
-                continue;
-            }
-            let parsed = PeerState::deserialize(value);
-            if let Ok(peer) = parsed {
-                let isolated = Stored {
-                    version: WIRE_VERSION,
-                    owner: owner.into(),
-                    peers: BTreeMap::from([(pk.clone(), peer.clone())]),
-                    detached: BTreeMap::new(),
-                    fresh_contacts: BTreeSet::new(),
-                };
-                let needs_identity = !peer.epochs.is_empty()
-                    || peer.handshake.as_ref().is_some_and(|h| {
-                        !matches!(h.phase.as_str(), "incoming" | "accept_pending")
-                    });
-                let local_matches = peer.handshake.as_ref().is_none_or(|h| {
-                    if !h.initiator {
-                        return true;
-                    }
-                    match &h.offer {
-                        Record::Offer { identity, .. } => local_public == Some(identity.as_slice()),
-                        _ => false,
-                    }
-                });
-                if validate_stored(&isolated).is_ok()
-                    && (!needs_identity || keep_identity)
-                    && local_matches
-                    && !peer
-                        .outgoing
-                        .values()
-                        .any(|out| opaque_protection || blocked_ids.contains(&out.operation))
-                {
-                    stored.peers.insert(pk, peer);
-                    continue;
-                }
-            }
-            dropped += 1;
-            if protected {
-                regenerate.insert(pk);
-            }
-        }
-    } else if bytes.is_some() {
-        dropped += 1;
-    }
-    if let Some(detached) = input
-        .as_ref()
-        .and_then(|v| v.get("detached"))
-        .and_then(serde_json::Value::as_object)
-    {
-        dropped += detached
-            .values()
-            .map(|v| v.as_array().map_or(1, |v| v.len()) as u64)
-            .sum::<u64>();
-    }
-    if bound_owner {
-        if let Some(fresh) = input
-            .as_ref()
-            .and_then(|v| v.get("fresh_contacts"))
-            .and_then(serde_json::Value::as_array)
-        {
-            for key in fresh {
-                if let Some(key) = key.as_str().and_then(canonical) {
-                    stored.fresh_contacts.insert(key);
-                } else {
-                    dropped += 1;
-                }
-            }
-        }
-    }
-    for pk in regenerate {
-        let peer = stored.peers.entry(pk).or_default();
-        if peer.current.is_none() && peer.handshake.is_none() {
-            // Durable manual protection prevents first-send fallback to plaintext.
-            peer.wanted = true;
-            peer.manual_request = true;
-            peer.auto_pending = true;
-            peer.auto_start_on_ready = true;
-            peer.manual_only = false;
-            peer.auto_skip_pending = false;
-            peer.error = None;
-            reset_count += 1;
-        }
-    }
-    validate_stored(&stored)?;
-    let bytes = serde_json::to_vec(&stored).map_err(|_| "MIGRATION_033_ENCODE_FAILED")?;
-    Ok((keep_identity, bytes, dropped, reset_count))
+}
+
+// This fixed domain identifies the fingerprint format used by current PQ peers.
+fn fingerprint(public_key: &[u8]) -> String {
+    let mut hash = Sha256::new();
+    hash.update(b"Tox-PQ ML-KEM-768 identity v1\0");
+    hash.update(public_key);
+    let encoded = encode_hex(&hash.finalize());
+    encoded
+        .as_bytes()
+        .chunks(4)
+        .map(|chunk| std::str::from_utf8(chunk).unwrap())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn validate_stored(st: &Stored) -> Result<(), String> {
@@ -3698,20 +3398,20 @@ fn validate_stored(st: &Stored) -> Result<(), String> {
     if !st.owner.is_empty() {
         normalized_key(&st.owner).map_err(|_| invalid())?;
     }
-    if st.owner.is_empty()
-        && (!st.peers.is_empty() || !st.detached.is_empty() || !st.fresh_contacts.is_empty())
-    {
-        return Err(invalid());
+    if !st.detached.is_empty() {
+        return Err("PQ_DETACHED_ARCHIVE_UNSUPPORTED".into());
     }
-    let detached_count = st.detached.values().try_fold(0usize, |total, peers| {
-        total.checked_add(peers.len()).ok_or_else(invalid)
-    })?;
-    if detached_count > MAX_DETACHED_ARCHIVES {
+    if st.owner.is_empty() && (!st.peers.is_empty() || !st.fresh_contacts.is_empty()) {
         return Err(invalid());
     }
     for (key, p) in &st.peers {
         normalized_key(key).map_err(|_| invalid())?;
         if !p.identity.is_empty() && p.identity.len() != MLKEM_PUBLIC_KEY_BYTES
+            || !p.supported
+                && p.auto_pending
+                && !p.manual_request
+                && p.current.is_none()
+                && p.handshake.is_none()
             || live_epoch_count(p) > 2
             || p.superseded_epochs.len() > MAX_SUPERSEDED_EPOCHS
             || p.superseded_epochs
@@ -3882,25 +3582,6 @@ fn validate_stored(st: &Stored) -> Result<(), String> {
     for key in &st.fresh_contacts {
         normalized_key(key).map_err(|_| invalid())?;
     }
-    for (key, archived) in &st.detached {
-        normalized_key(key).map_err(|_| invalid())?;
-        if archived.is_empty() {
-            return Err(invalid());
-        }
-        // Reuse the exact active-peer validator while ensuring archived state
-        // remains unreachable from normal routing. Recursion is one level:
-        // this isolated value has no detached entries.
-        for p in archived {
-            let isolated = Stored {
-                version: st.version,
-                owner: st.owner.clone(),
-                peers: BTreeMap::from([(key.clone(), p.clone())]),
-                detached: BTreeMap::new(),
-                fresh_contacts: BTreeSet::new(),
-            };
-            validate_stored(&isolated)?;
-        }
-    }
     Ok(())
 }
 fn route(s: &State, friend: u32) -> Result<String, String> {
@@ -3936,7 +3617,6 @@ fn unavailable_status(error: &str) -> PqStatus {
         identity_waiting: false,
         auto_pending: false,
         manual_waiting_for_capability: false,
-        legacy_available: false,
         protocol_version: WIRE_VERSION,
         shutdown_state: "idle".into(),
         shutdown_cancellable: false,

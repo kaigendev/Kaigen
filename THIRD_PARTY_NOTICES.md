@@ -4,7 +4,7 @@
 
 - Источник сборки: <https://github.com/kaigendev/kaigen-toxcore>.
 - Базовая версия: upstream v0.2.24-rc.2 (API 0.2.24); форк Kaigen.
-- Зафиксированный commit: `ec7bd2cce618ed6542fbc55b84574704eb380ef2`.
+- Зафиксированный commit: `d34d16e6473f61545fed9d8cb59bb1e86da993f1`.
 - Форк включает ограничение повторных запросов, исправления безопасности 1–8, а также исправления наследования сокетов Windows и HTTP CONNECT. История исправлений хранится в `patches/c-toxcore`; сборка не накладывает их повторно.
 - Исходное авторство и лицензии сохранены в репозитории форка, включая `UPSTREAM.md` и файлы лицензий.
 - Лицензия: GPL-3.0-or-later
@@ -84,6 +84,15 @@ Conjure — отдельный helper overlay поверх неизменённ�
 ## Rust и npm зависимости
 
 Версии Rust-зависимостей зафиксированы в `src-tauri/Cargo.lock` и `web/kaigen-webd/Cargo.lock`, npm-зависимостей — в `package-lock.json`. React/React DOM 19.3.1 (MIT), Tauri/API 2.12.4, tauri-build 2.7.3 и официальный CLI 2.12.3 сохраняют собственные лицензии. Linux packaging использует отдельный managed CLI 2.12.3 с bundler 2.10.3 (Apache-2.0 OR MIT); официальный исходный manifest уже содержит этот bundler и не требует прежнего patch. Исходный archive, полный Cargo.lock, features и binary provenance закреплены в patches/tauri-cli/manifest.json. Активная Windows-сборка использует `windows-core` 0.100.0 с `windows` 0.62.2 и `webview2-com` 0.39.1 через закреплённые исправления совместимости. Оригинальные архивы, лицензии, SHA-256 и точные изменения сохранены в `runtime-manifests/vendor-inputs/windows-core-0100` и `patches/windows-core-0100`; исходники `windows-core` 0.100.0 не изменены. Каждый компонент сохраняет собственную лицензию.
+
+## Локальный медиадекодер FFmpeg
+
+- npm-пакет `@ffmpeg/core` 0.12.10, однопоточная WebAssembly-сборка FFmpeg 5.1.4: <https://github.com/ffmpegwasm/ffmpeg.wasm>.
+- Официальный неизменённый пакет: <https://registry.npmjs.org/@ffmpeg/core/-/core-0.12.10.tgz>; 20 634 719 байт; SHA-256 `D00089CE82E1BDF637DDBE42E0C3D41A1BA8CF4C9E825E7FA4D0BB970E844BD4`. npm integrity закреплён в `package-lock.json`.
+- Лицензия пакета: GPL-2.0-or-later, согласно его `package.json`. FFmpeg собран с `--enable-gpl` и включает libx264; эта сборка не является LGPL-only. Исходники FFmpeg 5.1.4 и текст GPL v2: <https://github.com/FFmpeg/FFmpeg/tree/n5.1.4>, <https://github.com/FFmpeg/FFmpeg/blob/n5.1.4/COPYING.GPLv2>.
+- Обвязка ffmpeg.wasm: Copyright (c) 2019 Jerome Wu, MIT; исходное уведомление: <https://github.com/ffmpegwasm/ffmpeg.wasm/blob/main/LICENSE>. Включённые upstream-библиотеки сохраняют собственные лицензии; состав и рецепт сборки опубликованы в <https://github.com/ffmpegwasm/ffmpeg.wasm/blob/main/Dockerfile>.
+
+Закреплённые JavaScript/WASM включаются в Desktop/Web и загружаются локально только при необходимости подготовки медиа. Пакет не имеет транзитивных npm-зависимостей. Файлы пользователя не передаются внешнему сервису, а исходное вложение сохраняется неизменным.
 
 ## Встроенные шрифты
 

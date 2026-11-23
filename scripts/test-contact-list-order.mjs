@@ -121,7 +121,7 @@ match(appSource, /data-kaigen-ui-id=\{APP_UI_IDS\.main_contacts_element_toggle_o
 match(appSource, /aria-pressed=\{contactSort\.mode === "activity"\}/u);
 match(appSource, /aria-pressed=\{contactSort\.mode === "status"\}/u);
 match(appSource, /aria-pressed=\{hideOfflineContacts\}/u);
-match(appSource, /sharedLayoutState = \{ appearance, chatListWidth, profileOrder, contactSort, hideOfflineContacts \}/u);
+match(appSource, /await savePortableLayoutPatch\(\{ contactSort: next \}[^]*setContactSort\(next\)/u);
 match(appSource, /setContactSort\(normalizeContactSort\(saved\.contactSort\)\)/u);
 match(appSource, /setHideOfflineContacts\(saved\.hideOfflineContacts\)/u);
 match(appSource, /time: formatContactEvent\(friend\.last_event \?\? friend\.addedAt, language\)/u);

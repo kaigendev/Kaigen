@@ -15,6 +15,7 @@ const friendNames = ["QA Bob · 100k", "QA Carol", "QA Dave", "QA Erin · unread
 const removedFriends = new Set<number>();
 let sendFailures = 0;
 let cancellationFailures = 0;
+let deleteStorageBusy = false;
 let friendDiscoveryPending = 0;
 export const geometrySendAttempts: any[] = [];
 export const geometryCancellationCalls: any[] = [];
@@ -129,6 +130,24 @@ function routeInvoke<T>(kind: RouteKind, command: string, args: any): Promise<T>
 }
 export const geometryProfileSwitches: Array<{ profileId: string; previousProfileId: string; previousState: any }> = [];
 export const geometryProfileLocalState = (id: string) => structuredClone(id === activeProfileId ? local : profileLocalStates.get(id));
+
+type HeldLocalStateSave = { owner: string; chatId: string; draft: string; wait: Promise<void>; release: () => void; state: any | null; receivedAt: number | null; releasedAt: number | null; committedAt: number | null };
+let heldLocalStateSave: HeldLocalStateSave | null = null;
+export function geometryHoldNextLocalStateSave(owner: string, chatId: string, draft: string) {
+  if (heldLocalStateSave && heldLocalStateSave.releasedAt === null) throw new Error("Previous local-state save hold is still active");
+  let release!: () => void;
+  const wait = new Promise<void>((resolve) => { release = resolve; });
+  heldLocalStateSave = { owner, chatId, draft, wait, release, state: null, receivedAt: null, releasedAt: null, committedAt: null };
+}
+export function geometryHeldLocalStateSave() {
+  const held = heldLocalStateSave;
+  return held ? { owner: held.owner, chatId: held.chatId, state: structuredClone(held.state), receivedAt: held.receivedAt, releasedAt: held.releasedAt, committedAt: held.committedAt } : null;
+}
+export function geometryReleaseLocalStateSave() {
+  const held = heldLocalStateSave;
+  if (held && held.releasedAt === null) { held.releasedAt = performance.now(); held.release(); }
+}
+
 export const geometryNativeListenerCount = (name: string) => events.get(name)?.size ?? 0;
 export function geometryEmitNativeEvent(name: string, payload: unknown) {
   for (const handler of events.get(name) ?? []) handler({ event: name, id: ++profileEventSequence, payload });
@@ -138,6 +157,7 @@ export const geometryDelayFriendDiscovery = (ms: number) => { friendDiscoveryDel
 export const geometryFriendDiscoveryPending = () => friendDiscoveryPending;
 export const geometryFailNextSend = (count = 1) => { sendFailures = count; };
 export const geometryFailNextCancellation = (count = 1) => { cancellationFailures = count; };
+export const geometryDeferNextContactDeletion = () => { deleteStorageBusy = true; };
 export const geometryFriendKey = (friend: number) => keys[friend];
 export function geometryReuseFriendSlot(friend: number, publicKey: string) {
   if (!removedFriends.has(friend) || publicKey.length !== 64) throw new Error("friend slot is not available for reuse");
@@ -546,13 +566,18 @@ export async function invoke<T>(command: string, args: any = {}): Promise<T> {
     case "save_local_state": {
       localSaveCount += 1;
       const owner = args.profileId ?? activeProfileId;
+      const next = structuredClone(args.state);
+      const held = heldLocalStateSave;
+      const captureHold = held && held.receivedAt === null && held.releasedAt === null
+        && owner === held.owner && next.drafts?.[held.chatId] === held.draft;
+      if (captureHold) { held.state = structuredClone(next); held.receivedAt = performance.now(); await held.wait; }
       const previous = owner === activeProfileId ? local : profileLocalStates.get(owner);
       const epoch = previous?.historyClearEpoch ?? 0;
-      const next = structuredClone(args.state);
       if ((next.historyClearEpoch ?? 0) !== epoch) { next.draftQuotes = {}; next.peerReactionNotices = {}; next.scrollAnchors = {}; }
       next.historyClearEpoch = epoch;
       profileLocalStates.set(owner, next);
       if (owner === activeProfileId) local = structuredClone(next);
+      if (captureHold) held.committedAt = performance.now();
       return null as T;
     }
     case "load_layout_state": return layout as T;
@@ -581,6 +606,7 @@ export async function invoke<T>(command: string, args: any = {}): Promise<T> {
           searchEvidence.push({ startedCalls: 0, completedCalls: 0, inFlight: 0, matchingQueryRequests: 0, lastRequest: null, lastResponse: null });
           revision += 1;
         }
+        if (removedFriends.delete(pendingRequestFriendNumber)) revision += 1;
         return pendingRequestFriendNumber as T;
       }
       const friend = keys.findIndex((key, number) => !removedFriends.has(number) && args.toxId?.toUpperCase().startsWith(key));
@@ -786,6 +812,10 @@ export async function invoke<T>(command: string, args: any = {}): Promise<T> {
       geometryDeleteCalls.push(structuredClone(args));
       await sleep(100);
       if (keys[args.friendNumber] !== args.expectedPublicKey) throw new Error("CHAT_CONTACT_IDENTITY_CHANGED");
+      if (deleteStorageBusy) {
+        deleteStorageBusy = false;
+        throw new Error("TRANSFER_STORAGE_BUSY");
+      }
       removedFriends.add(args.friendNumber);
       revision += 1;
       return null as T;
@@ -817,6 +847,14 @@ export const releaseTransferPreviews = () => {};
 export const releaseProfileTransferPreviews = () => {};
 export const transferPreviewSource = () => "";
 export const sendFile = async () => 0;
+// Geometry cases do not provide original media or a filesystem destination.
+// Fail explicitly if a case starts using either action without configuring it.
+export async function loadAttachmentMedia(..._args: unknown[]): Promise<never> {
+  throw new Error("GEOMETRY_MEDIA_SOURCE_NOT_CONFIGURED");
+}
+export async function saveAttachmentCopy(..._args: unknown[]): Promise<never> {
+  throw new Error("GEOMETRY_FILE_COPY_NOT_CONFIGURED");
+}
 export async function listen<T>(event: string, handler: (event: T) => void) {
   const handlers = events.get(event) ?? new Set();
   handlers.add(handler as (event: any) => void);

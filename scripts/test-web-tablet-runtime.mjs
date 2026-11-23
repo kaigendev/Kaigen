@@ -96,7 +96,10 @@ try {
     assert.equal(await page.evaluate(() => window.workspaceCalls.length), 0, "Mismatch must not allocate");
     await fields.nth(1).fill("disposable-password");
     await submit.tap();
-    await page.waitForFunction(() => document.querySelector(".web-error")?.textContent?.includes("DISPOSABLE_CREATION_FAILURE"));
+    await page.waitForFunction((expectedError) => window.workspaceCalls.length === 1
+      && document.querySelector(".web-error")?.textContent === expectedError,
+    language === "ru" ? "Не удалось выполнить действие. Повторите попытку."
+      : "The action could not be completed. Try again.");
     await submit.scrollIntoViewIfNeeded();
     await page.screenshot({ path: path.join(evidence, `${language}-${viewport.width}x${viewport.height}-error.png`) });
     // Simulate the visible viewport shrinking when a software keyboard opens.

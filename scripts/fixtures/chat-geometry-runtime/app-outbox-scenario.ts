@@ -1,11 +1,13 @@
 import {
   geometryAppendOutgoingText, geometryCancellationCalls, geometryDelayFriendDiscovery,
-  geometryDeleteCalls, geometryEmitFriendStatus, geometryFailNextCancellation,
+  geometryDeferNextContactDeletion, geometryDeleteCalls, geometryEmitFriendStatus, geometryFailNextCancellation,
   geometryFailNextSend, geometryFriendDiscoveryPending, geometryFriendKey,
   geometryPendingRequestFriendNumber, geometryPendingRequestKey,
   geometryProfileLocalState, geometryReuseFriendSlot, geometrySendAttempts,
+  geometryHoldNextLocalStateSave, geometryHeldLocalStateSave, geometryReleaseLocalStateSave,
 } from "./app-platform";
 import { composer, setComposerDraft } from "./composer-test-adapter";
+import { opaqueUiEntityKey } from "../../../src/uiIdentity";
 
 const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 const frames = () => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
@@ -53,6 +55,89 @@ const cancellationAction = () => [...document.querySelectorAll<HTMLButtonElement
   .find((button) => button.textContent?.includes("Отменить отправку") || button.textContent?.includes("Cancel sending"));
 const contact = (name: string) => [...document.querySelectorAll<HTMLButtonElement>(".chat-item")]
   .find((button) => button.textContent?.includes(name));
+
+type PendingViewportStage = { id: number; kind: "resize" | "capture"; width: number; height: number; name: string; done?: boolean };
+declare global { var __KAIGEN_OUTBOX_VIEWPORT_STAGE__: PendingViewportStage | undefined; }
+let pendingViewportSequence = 0;
+async function pendingViewportStage(kind: PendingViewportStage["kind"], width: number, height: number, name: string) {
+  const stage = { id: ++pendingViewportSequence, kind, width, height, name };
+  globalThis.__KAIGEN_OUTBOX_VIEWPORT_STAGE__ = stage;
+  await waitFor(() => globalThis.__KAIGEN_OUTBOX_VIEWPORT_STAGE__?.id === stage.id
+    && globalThis.__KAIGEN_OUTBOX_VIEWPORT_STAGE__.done ? true : undefined, "pending contact " + kind);
+}
+
+async function pendingContactGeometry(key: string, check: (condition: unknown, label: string) => void, cases: Record<string, unknown>[]) {
+  const originalViewport = { width: innerWidth, height: innerHeight };
+  const preferenceKey = "kaigen.interface-layout";
+  const oldPreference = localStorage.getItem(preferenceKey);
+  const applyPreference = (value: string | null) => {
+    const before = localStorage.getItem(preferenceKey);
+    if (value === null) localStorage.removeItem(preferenceKey); else localStorage.setItem(preferenceKey, value);
+    window.dispatchEvent(new StorageEvent("storage", { key: preferenceKey, oldValue: before, newValue: value, storageArea: localStorage }));
+  };
+  const pendingRow = () => document.querySelector<HTMLButtonElement>(`[data-kaigen-ui-entity-key="${opaqueUiEntityKey("contact", key)}"]`);
+  const resize = async (width: number, height: number, name: string) => {
+    await pendingViewportStage("resize", width, height, name);
+    await waitFor(() => innerWidth === width && innerHeight === height ? true : undefined, "actual pending viewport");
+    await frames();
+  };
+  const language = async (value: "ru" | "en") => {
+    if (document.documentElement.lang === value) return;
+    document.querySelector<HTMLButtonElement>(".rail-profile-menu-button")!.click();
+    (await waitFor(() => document.querySelectorAll<HTMLButtonElement>(".rail-profile-menu button")[1] ?? undefined, "pending settings menu")).click();
+    (await waitFor(() => document.querySelector<HTMLButtonElement>('.settings-nav button[title="Язык"], .settings-nav button[title="Language"]') ?? undefined, "pending language tab")).click();
+    const select = await waitFor(() => [...document.querySelectorAll<HTMLSelectElement>(".settings-content select")]
+      .find((field) => field.querySelector('option[value="en"]')), "pending language selection");
+    select.value = value;
+    select.dispatchEvent(new Event("change", { bubbles: true }));
+    await waitFor(() => document.documentElement.lang === value ? true : undefined, "pending translated language");
+    document.querySelector<HTMLButtonElement>(".rail-button.chats-button")!.click();
+    await frames();
+  };
+  try {
+    applyPreference("auto");
+    for (const lang of ["ru", "en"] as const) {
+      await resize(1440, 1000, "language-" + lang);
+      await waitFor(() => !document.querySelector(".app-shell.ultra-compact") ? true : undefined, "full pending language controls");
+      await language(lang);
+      for (const [mode, width, height] of [["full", 1440, 1000], ["tablet", 1024, 768], ["mobile", 390, 844]] as const) {
+        await resize(width, height, lang + "-" + mode);
+        await waitFor(() => !!document.querySelector(".app-shell.ultra-compact") === (mode === "mobile") ? true : undefined, "pending layout " + mode);
+        document.querySelector<HTMLButtonElement>(".compact-chat-back")?.click();
+        const row = await waitFor(() => { const candidate = pendingRow(); return candidate && candidate.getBoundingClientRect().height > 0 ? candidate : undefined; }, "visible pending row");
+        row.scrollIntoView({ block: "nearest" });
+        await frames();
+        const status = [...row.querySelectorAll<HTMLElement>(".chat-status.pending, .compact-presence.pending")]
+          .find((element) => element.getBoundingClientRect().height > 0 && getComputedStyle(element).visibility !== "hidden");
+        const copy = row.querySelector<HTMLElement>(".chat-copy")!;
+        const avatarOnly = getComputedStyle(copy).display === "none";
+        const avatar = row.querySelector<HTMLElement>(".contact-status-pending");
+        const indicator = avatarOnly ? avatar : status;
+        const box = row.getBoundingClientRect(), statusBox = indicator?.getBoundingClientRect();
+        const expected = lang === "ru" ? "ожидает авторизации" : "waiting for authorization";
+        cases.push({ name: "pending-contact-geometry", lang, mode, viewport: { width: innerWidth, height: innerHeight },
+          row: { left: box.left, right: box.right, top: box.top, bottom: box.bottom }, status: statusBox ? { left: statusBox.left, right: statusBox.right, top: statusBox.top, bottom: statusBox.bottom } : null,
+          label: avatarOnly ? row.title : status?.textContent?.trim(), presentation: avatarOnly ? "avatar" : "text", shellClasses: document.querySelector(".app-shell")?.className });
+        await pendingViewportStage("capture", width, height, "pending-contact-" + lang + "-" + mode);
+        check(avatarOnly ? !!avatar && getComputedStyle(avatar, "::after").borderTopStyle === "dashed"
+          && row.title.toLocaleLowerCase(lang).includes(expected) && row.getAttribute("aria-label")?.toLocaleLowerCase(lang).includes(expected)
+          : !!status && status.textContent?.toLocaleLowerCase(lang).includes(expected), mode + "/" + lang + " pending status is visible and translated in its list presentation");
+        check(box.width > 0 && box.left >= -1 && box.right <= innerWidth + 1, mode + "/" + lang + " pending contact stays inside viewport");
+        check(!!statusBox && statusBox.left >= box.left - 1 && statusBox.right <= box.right + 1
+          && statusBox.top >= box.top - 1 && statusBox.bottom <= box.bottom + 1, mode + "/" + lang + " pending status fits its row");
+        check(document.documentElement.scrollWidth <= innerWidth + 1 && row.scrollWidth <= row.clientWidth + 1, mode + "/" + lang + " pending row has no horizontal overflow");
+        check(!row.disabled && !!row.closest(".contact-row"), mode + "/" + lang + " pending contact retains its action target");
+      }
+    }
+  } finally {
+    await resize(1440, 1000, "restore-language");
+    await waitFor(() => !document.querySelector(".app-shell.ultra-compact") ? true : undefined, "restore full pending controls");
+    await language("ru");
+    applyPreference(oldPreference);
+    await resize(originalViewport.width, originalViewport.height, "restore-viewport");
+    globalThis.__KAIGEN_OUTBOX_VIEWPORT_STAGE__ = undefined;
+  }
+}
 
 export async function runActualAppOutboxScenario() {
   let assertions = 0;
@@ -112,8 +197,11 @@ export async function runActualAppOutboxScenario() {
     Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(requestInput, `${pendingRequestKey}${"0".repeat(12)}`);
     requestInput.dispatchEvent(new Event("input", { bubbles: true }));
     document.querySelector<HTMLFormElement>(".add-contact-card")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
-    await waitFor(() => document.querySelector<HTMLElement>(".add-contact-status")?.textContent?.includes("Запрос авторизации отправлен") ? true : undefined, "outgoing request accepted");
+    await waitFor(() => document.querySelector<HTMLElement>(".add-contact-status")?.textContent?.includes("Контакт добавлен. Ожидает авторизации.") ? true : undefined, "outgoing request accepted");
+    const pendingContact = document.querySelector<HTMLElement>(`[data-kaigen-ui-entity-key="${opaqueUiEntityKey("contact", pendingRequestKey)}"]`);
+    check(!!pendingContact?.querySelector(".chat-status.pending, .compact-presence.pending"), "accepted contact is immediately visible with its pending authorization status");
     document.querySelector<HTMLButtonElement>(".add-contact-card .text-button")!.click();
+    await pendingContactGeometry(pendingRequestKey, check, cases);
     await waitFor(() => geometryProfileLocalState("qa-profile-a")?.outgoingFriendRequests?.some((request: any) => request.toxId.startsWith(pendingRequestKey)) ? true : undefined, "persisted outgoing authorization request");
     check(geometryPendingRequestFriendNumber() !== null, "request created a separate unauthorized pending friend");
     check(!!geometryProfileLocalState("qa-profile-a")?.outgoingFriendRequests?.some((request: any) => request.toxId.startsWith(pendingRequestKey)), "pending peer request is durable before unrelated contact deletion");
@@ -148,16 +236,64 @@ export async function runActualAppOutboxScenario() {
     check(!contact("QA Bob"), "pre-delete friend poll cannot resurrect removed peer");
     geometryDelayFriendDiscovery(0);
 
+    const pendingFriendNumber = geometryPendingRequestFriendNumber();
+    const pendingChatId = `tox-${pendingRequestKey}`;
+    const pendingRow = await waitFor(() => document.querySelector<HTMLButtonElement>(`[data-kaigen-ui-entity-key="${opaqueUiEntityKey("contact", pendingRequestKey)}"]`) ?? undefined, "pending contact before save race");
+    pendingRow.click(); await frames();
+    const pendingEditor = await waitFor(() => composer() ?? undefined, "pending contact composer");
+    geometryFailNextSend();
+    setComposerDraft(pendingEditor, "Pending retry operation before deletion");
+    const pendingAttemptsBefore = geometrySendAttempts.length;
+    document.querySelector<HTMLButtonElement>(".composer .send")!.click();
+    await waitFor(() => geometrySendAttempts.length > pendingAttemptsBefore ? true : undefined, "pending failed send reaches actual API");
+    await waitFor(() => document.querySelector(".chat-send-retry") ?? undefined, "pending failed send retry card");
+    const pendingOperation = await waitFor(() => Object.values(geometryProfileLocalState("qa-profile-a")?.pendingSendOperations ?? {})
+      .find((item: any) => item.expectedPublicKey === pendingRequestKey) as any, "pending operation is durably captured");
+    const pendingDraft = "Pending in-flight draft must not survive deletion";
+    geometryHoldNextLocalStateSave("qa-profile-a", pendingChatId, pendingDraft);
+    setComposerDraft(pendingEditor, pendingDraft);
+    const heldSave = await waitFor(() => { const held = geometryHeldLocalStateSave(); return held?.receivedAt !== null && held?.state?.drafts?.[pendingChatId] === pendingDraft ? held : undefined; }, "actual UI local-state save held before backend commit");
+    const saveRace: Record<string, unknown> = { name: "pending-delete-inflight-save", friendNumber: pendingFriendNumber, operationId: pendingOperation.operationId, receivedAt: heldSave.receivedAt };
+    cases.push(saveRace);
+    check(heldSave.committedAt === null && heldSave.releasedAt === null, "actual UI save is held before backend commit");
+    check(!!heldSave.state.pendingSendOperations?.[pendingOperation.operationId], "held UI snapshot includes pending peer operation metadata");
+    const pendingDeletesBefore = geometryDeleteCalls.filter((call) => call.expectedPublicKey === pendingRequestKey).length;
+
+    geometryDeferNextContactDeletion();
     document.querySelector<HTMLButtonElement>(".requests-button")!.click();
     const pendingRequestCard = await waitFor(() => [...document.querySelectorAll<HTMLElement>(".outgoing-request")]
       .find((card) => card.querySelector("code")?.textContent?.startsWith(pendingRequestKey)), "pending request card");
     pendingRequestCard.querySelector<HTMLButtonElement>(".cancel-request-button")!.click();
-    const pendingFriendNumber = geometryPendingRequestFriendNumber();
+    await frames();
+    saveRace.deleteCallsBeforeRelease = geometryDeleteCalls.filter((call) => call.expectedPublicKey === pendingRequestKey).length - pendingDeletesBefore;
+    check(saveRace.deleteCallsBeforeRelease === 0 && geometryHeldLocalStateSave()?.committedAt === null, "pending delete Native RPC waits for the held UI save to commit");
+    geometryReleaseLocalStateSave();
+    await waitFor(() => geometryHeldLocalStateSave()?.committedAt !== null ? true : undefined, "held UI save commits before contact mutation");
+    saveRace.releasedAt = geometryHeldLocalStateSave()?.releasedAt;
+    saveRace.committedAt = geometryHeldLocalStateSave()?.committedAt;
     await waitFor(() => geometryDeleteCalls.some((call) => call.friendNumber === pendingFriendNumber && call.expectedPublicKey === pendingRequestKey) ? true : undefined, "pending friend backend deletion");
     await waitFor(() => !geometryProfileLocalState("qa-profile-a")?.outgoingFriendRequests?.some((request: any) => request.toxId.startsWith(pendingRequestKey)) ? true : undefined, "pending request durable cancellation");
     check(!geometryProfileLocalState("qa-profile-a")?.outgoingFriendRequests?.some((request: any) => request.toxId.startsWith(pendingRequestKey)), "cancelling pending peer request removes only its durable record");
+    const attempts = geometryDeleteCalls.filter((call) => call.expectedPublicKey === pendingRequestKey).slice(pendingDeletesBefore);
+    check(attempts.length === 2 && JSON.stringify(attempts[0]) === JSON.stringify(attempts[1]), "one cancellation retries storage contention with the same captured contact identity");
     cases.push({ name: "pending-request-cancel", friendNumber: pendingFriendNumber, removed: true });
     document.querySelector<HTMLButtonElement>(".chats-button")!.click();
+
+    document.querySelector<HTMLButtonElement>(".contact-list-add")!.click();
+    const readdInput = await waitFor(() => document.querySelector<HTMLInputElement>(".add-contact-card input") ?? undefined, "same-key readd form");
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(readdInput, `${pendingRequestKey}${"0".repeat(12)}`);
+    readdInput.dispatchEvent(new Event("input", { bubbles: true }));
+    document.querySelector<HTMLFormElement>(".add-contact-card")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    await waitFor(() => document.querySelector<HTMLElement>(".add-contact-status")?.textContent?.includes("Контакт добавлен. Ожидает авторизации.") ? true : undefined, "same-key pending readd accepted");
+    document.querySelector<HTMLButtonElement>(".add-contact-card .text-button")!.click();
+    const readded = await waitFor(() => document.querySelector<HTMLButtonElement>(`[data-kaigen-ui-entity-key="${opaqueUiEntityKey("contact", pendingRequestKey)}"]`) ?? undefined, "same pending key reappears");
+    readded.click(); await frames();
+    await waitFor(() => geometryProfileLocalState("qa-profile-a")?.outgoingFriendRequests?.some((request: any) => request.toxId.startsWith(pendingRequestKey)) ? true : undefined, "same-key readd is durable");
+    const afterReadd = geometryProfileLocalState("qa-profile-a");
+    check(!afterReadd?.drafts?.[pendingChatId] && !(composer()?.value ?? ""), "same-key readd cannot restore the deleted pending draft in storage or composer");
+    check(!afterReadd?.pendingSendOperations?.[pendingOperation.operationId]
+      && !Object.values(afterReadd?.pendingSendOperations ?? {}).some((item: any) => item.expectedPublicKey === pendingRequestKey || item.chatId === pendingChatId), "same-key readd cannot restore old pending operation metadata");
+    saveRace.readded = true;
 
     const attemptsAfterDelete = geometrySendAttempts.length;
     const replacementKey = "E".repeat(64);
@@ -173,6 +309,7 @@ export async function runActualAppOutboxScenario() {
   } catch (error) {
     return { ok: false, assertions, cases, error: error instanceof Error ? error.stack ?? error.message : String(error) };
   } finally {
+    geometryReleaseLocalStateSave();
     geometryDelayFriendDiscovery(0);
   }
 }

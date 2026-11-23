@@ -7,24 +7,31 @@ export function prepareBrandImage(): Promise<void> {
 
   readiness = new Promise<void>((resolve) => {
     const image = new Image();
+    let finished = false;
     const finish = () => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timeout);
       image.onload = null;
       image.onerror = null;
       resolve();
     };
-    const loaded = new Promise<void>((resolveLoaded) => {
-      image.onload = () => resolveLoaded();
-      image.onerror = () => resolveLoaded();
-      image.src = brandImageUrl;
-      if (image.complete) resolveLoaded();
-    });
+    const timeout = setTimeout(finish, 3000);
+    image.onerror = finish;
+    image.onload = () => {
+      if (typeof image.decode !== "function") finish();
+    };
+    image.src = brandImageUrl;
 
-    // Older WebViews can load an image without supporting decode(). A failed
-    // asset must not prevent access to the application.
+    // The decorative asset must never keep the application on its splash screen.
     if (typeof image.decode === "function") {
-      void image.decode().catch(() => loaded).then(finish);
-    } else {
-      void loaded.then(finish);
+      try {
+        void image.decode().then(finish, finish);
+      } catch {
+        finish();
+      }
+    } else if (image.complete) {
+      finish();
     }
   });
 

@@ -7,6 +7,7 @@ import { importTypeScriptModule } from "./import-typescript-module.mjs";
 const layout = await importTypeScriptModule(new URL("../src/appLayout.ts", import.meta.url));
 const { contactPresence, profilePresence } = await importTypeScriptModule(new URL("../src/profilePresence.ts", import.meta.url));
 const { formatProfileSwitcherTitle } = await importTypeScriptModule(new URL("../src/localization.ts", import.meta.url));
+const { createWebgatePlatformRouter, isWebgateProfileId } = await importTypeScriptModule(new URL("../src/webgate/platformRouter.ts", import.meta.url));
 
 for (const userStatus of ["online", "away", "busy", "offline"]) {
   for (const connection of ["udp", "tcp", "offline", "locked"]) {
@@ -75,24 +76,99 @@ assert.deepEqual(
   "restart normalization removes disabled profiles and appends newly loaded profiles",
 );
 
-const [appSource, rootSource, cssSource, nativeSource, webServerSource] = await Promise.all([
+const [appSource, rootSource, cssSource, nativeSource, webServerSource, realtimeSource] = await Promise.all([
   readFile(new URL("../src/App.tsx", import.meta.url), "utf8"),
   readFile(new URL("../src/RootApp.tsx", import.meta.url), "utf8"),
   readFile(new URL("../src/App.css", import.meta.url), "utf8"),
   readFile(new URL("../src-tauri/src/lib.rs", import.meta.url), "utf8"),
   readFile(new URL("../web/kaigen-webd/src/server.rs", import.meta.url), "utf8"),
+  readFile(new URL("../src/webgate/realtime.ts", import.meta.url), "utf8"),
 ]);
 
 // Execute the real App effects and command callback with deferred bridge replies.
 // This catches ordering bugs that the presence truth table alone cannot detect.
-function ownPresenceEffect(source, anchor) {
+function readAppEffect(source, anchor) {
   const position = source.indexOf(anchor);
-  assert.ok(position >= 0, `missing presence effect: ${anchor}`);
+  assert.ok(position >= 0, `missing App effect: ${anchor}`);
   const start = source.lastIndexOf("  useEffect(() => {", position);
   const end = source.indexOf("\n  }, [", position);
-  assert.ok(start >= 0 && end > position, `invalid presence effect: ${anchor}`);
+  assert.ok(start >= 0 && end > position, `invalid App effect: ${anchor}`);
   return source.slice(start, source.indexOf("\n", end + 1));
 }
+
+const historyPreferenceEffect = readAppEffect(appSource, 'invoke("set_chat_history_enabled"');
+let activeRemote = true;
+const historyCommands = [];
+const routeHistoryPreference = createWebgatePlatformRouter(async (command, args) => {
+  if (command === "webgate_profiles") return {
+    profiles: [
+      { id: "local-profile", loaded: true, active: !activeRemote },
+      { id: "wg-remote-profile", loaded: true, active: activeRemote },
+    ],
+  };
+  historyCommands.push({ route: command, ...args });
+});
+function applyHistoryPreference(profileId, ready, enabled) {
+  vm.runInNewContext(historyPreferenceEffect, {
+    useEffect: (effect) => effect(),
+    invoke: routeHistoryPreference,
+    activeProfileId: profileId,
+    persistenceReady: ready,
+    saveChatHistory: enabled,
+    console,
+  });
+}
+
+await routeHistoryPreference("webgate_profiles");
+applyHistoryPreference("local-profile", false, false);
+applyHistoryPreference("", true, true);
+assert.equal(historyCommands.length, 0, "history preference waits for a loaded owner");
+applyHistoryPreference("local-profile", true, false);
+assert.deepEqual(historyCommands[0], { route: "set_chat_history_enabled", profileId: "local-profile", enabled: false },
+  "a local preference must stay local when the Webgate profile became active first");
+
+activeRemote = false;
+await routeHistoryPreference("webgate_profiles");
+applyHistoryPreference("wg-remote-profile", true, true);
+assert.equal(historyCommands[1]?.route, "webgate_invoke");
+assert.equal(historyCommands[1]?.profileId, "wg-remote-profile");
+assert.equal(historyCommands[1]?.args.profileId, "wg-remote-profile");
+assert.equal(historyCommands[1]?.args.enabled, true,
+  "a Webgate preference must keep its remote owner after switching back to Local");
+
+async function continueWithProfiles(profiles, expectedActive, expectedCalls) {
+  const calls = [];
+  const port = createWebgatePlatformRouter(async (command, args) => {
+    calls.push(command);
+    if (command === "webgate_profiles") return { profiles };
+    if (command === "continue_with_loaded_profiles") {
+      const local = profiles.find((profile) => profile.loaded && !isWebgateProfileId(profile.id));
+      if (local) profiles = profiles.map((profile) => ({ ...profile, active: profile.id === local.id }));
+      return profiles;
+    }
+    assert.equal(command, "webgate_select_profile");
+    assert.equal(args.profileId, expectedActive);
+    assert.ok(profiles.some((profile) => profile.id === args.profileId && profile.loaded));
+    profiles = profiles.map((profile) => ({ ...profile, active: profile.id === args.profileId }));
+    return { profiles };
+  });
+
+  await port("webgate_profiles");
+  calls.length = 0;
+  const resumed = await port("continue_with_loaded_profiles");
+  assert.deepEqual(calls, expectedCalls);
+  assert.deepEqual(resumed.filter((profile) => profile.active && profile.loaded).map((profile) => profile.id),
+    expectedActive ? [expectedActive] : []);
+}
+
+const lockedLocal = { id: "local", loaded: false, active: true };
+const loadedRemote = { id: "wg-loaded", loaded: true, active: false };
+const lockedRemote = { id: "wg-locked", loaded: false, active: false };
+const normalContinue = ["continue_with_loaded_profiles", "webgate_profiles"];
+await continueWithProfiles([lockedLocal, lockedRemote, loadedRemote], "wg-loaded", [...normalContinue, "webgate_select_profile"]);
+await continueWithProfiles([{ ...lockedLocal, loaded: true }, loadedRemote], "local", normalContinue);
+await continueWithProfiles([{ ...lockedLocal, active: false }, { ...loadedRemote, active: true }], "wg-loaded", ["webgate_profiles"]);
+await continueWithProfiles([lockedLocal, lockedRemote], null, normalContinue);
 
 function deferredReply() {
   let resolve;
@@ -116,13 +192,17 @@ function ownPresenceHarness(source, initialStatus = "online") {
     activeProfileId: "active",
     activeProfileAtMount: { id: "active", userStatus: initialStatus },
     ownPresenceRevisionRef: { current: 0 },
-    document: { visibilityState: "visible" },
+    document: Object.assign(new EventTarget(), { visibilityState: "visible" }),
+    isWebgateProfileId,
     console,
     useEffect: (setup) => effects.push(setup),
     setUserStatus: (value) => { state.userStatus = typeof value === "function" ? value(state.userStatus) : value; },
     setNetworkStatus: (value) => { state.networkStatus = typeof value === "function" ? value(state.networkStatus) : value; },
     setStatusMenuOpen: (value) => { state.menuOpen = value; },
-    window: { setInterval: (callback) => { intervals.add(callback); return callback; }, clearInterval: (callback) => intervals.delete(callback) },
+    window: Object.assign(new EventTarget(), {
+      setInterval: (callback) => { intervals.add(callback); return callback; },
+      clearInterval: (callback) => intervals.delete(callback),
+    }),
     invoke: (command) => { const reply = deferredReply(); requests.push({ command, ...reply }); return reply.promise; },
     listen: (name, callback) => { listeners.set(name, callback); return Promise.resolve(() => listeners.delete(name)); },
     onProfileStatusChange: (profileId, status) => { const reply = deferredReply(); commands.push({ profileId, status, ...reply }); return reply.promise; },
@@ -131,10 +211,12 @@ function ownPresenceHarness(source, initialStatus = "online") {
   const end = source.indexOf("\n  function changeUserStatus(", start);
   assert.ok(start >= 0 && end > start, "missing real App status command callback");
   const code = [
-    ownPresenceEffect(source, "if (!activeProfileAtMount) return;"),
-    ownPresenceEffect(source, 'listen<string>("active-user-status-changed"'),
-    ownPresenceEffect(source, 'invoke<UserStatus>("get_tox_user_status")'),
-    ownPresenceEffect(source, 'invoke<NetworkStatus>("get_tox_network_status")'),
+    // Keep the real coalescing/visibility scheduler; replace only its platform imports.
+    realtimeSource.replace(/^import[^\n]*\r?\n/gmu, "").replace("export function watchProfileUpdates", "function watchProfileUpdates"),
+    readAppEffect(source, "if (!activeProfileAtMount) return;"),
+    readAppEffect(source, 'listen<string>("active-user-status-changed"'),
+    readAppEffect(source, 'invoke<UserStatus>("get_tox_user_status")'),
+    readAppEffect(source, 'invoke<NetworkStatus>("get_tox_network_status")'),
     source.slice(start, end),
     "globalThis.changeStatus = changeProfileStatus;",
   ].join("\n");
@@ -187,16 +269,19 @@ for (const transition of ["command", "event", "props"]) {
     await drainReplies();
     assert.equal(harness.state.userStatus, "busy", "a current mount reply remains authoritative");
     assert.equal(harness.state.networkStatus, "online");
+    assert.equal(harness.requests.length, 3, "pending refresh events coalesce into one follow-up after the slow request settles");
+    harness.requests.at(-1).resolve("online");
+    await drainReplies();
     harness.context.document.visibilityState = "hidden";
     harness.tick();
-    assert.equal(harness.requests.length, 2, "hidden tabs do not poll");
+    assert.equal(harness.requests.length, 3, "hidden tabs do not poll");
     harness.context.document.visibilityState = "visible";
     harness.tick();
-    assert.equal(harness.requests.length, 3, "polling resumes after the previous request settles");
+    assert.equal(harness.requests.length, 4, "polling resumes after the previous request settles");
     harness.requests.at(-1).reject(new Error("synthetic transport failure"));
     await drainReplies();
     harness.tick();
-    assert.equal(harness.requests.length, 4, "a failed request must not lock the polling loop");
+    assert.equal(harness.requests.length, 5, "a failed request must not lock the polling loop");
   } finally { harness.dispose(); }
 }
 
@@ -257,8 +342,15 @@ assert.match(rootSource, /onProfileStatusChange=\{changeProfileStatus\}/);
 assert.match(rootSource, /onSwitchProfile=\{switchProfile\}/,
   "App must await the one serialized root profile switch");
 
-assert.match(appSource, /invoke\("save_local_state", \{ profileId: activeProfileId, state \}\)/,
-  "local state writes are bound to the mounted profile identity");
+const localPersistence = appSource.match(/const persistLocalState = useCallback\([\s\S]*?^  \}, \[[^\r\n]*\]\);/mu)?.[0] ?? "";
+assert.match(localPersistence, /owner = captureProfileOwner\(\);[^]*const state = structuredClone\([^]*const save = enqueueLocalStateOperation\(async \(\) => \{[^]*if \(!appOwnerMountedRef\.current\) throw new Error\("PROFILE_OWNER_CHANGED"\);[^]*await invoke\("save_local_state", \{ profileId: owner\.profileId, state \}\);/u,
+  "local state captures mounted owner and bytes before queueing, then writes only that profile");
+assert.match(appSource, /const enqueueLocalStateOperation = useCallback\([^]*const result = localSaveQueueRef\.current\.catch\(\(\) => \{\}\)\.then\(operation\);\s*localSaveQueueRef\.current = result\.then\(\(\) => \{\}, \(\) => \{\}\);\s*return result;/u,
+  "all saved local state operations use the same queue and return their own result");
+assert.match(appSource, /const captureProfileOwner = useCallback\(\(\): ProfileOwnerLease => \{[^]*if \(!appOwnerMountedRef\.current \|\| !activeProfileId \|\| owner\.profileId !== activeProfileId\) throw new Error\("PROFILE_OWNER_CHANGED"\);\s*return \{ profileId: activeProfileId, generation: owner\.generation \};/u,
+  "the saved owner lease originates from the mounted profile and current generation");
+assert.match(localPersistence, /return required \? save : save\.catch\(\(\) => false\);/u,
+  "a required profile save awaits its own serialized durable result");
 assert.match(appSource, /invoke<LocalState \| null>\("load_local_state", \{ profileId: activeProfileId \}\)/,
   "local state reads are bound to the mounted profile identity");
 assert.doesNotMatch(appSource, /setProfileAvatar\(saved\.profileAvatar\)/,

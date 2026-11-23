@@ -22,22 +22,6 @@ assert.equal(settings.normalizeFileReceiveSettings({ maxAutoBytes: 99 * 1024 * 1
 assert.equal(settings.normalizeFileReceiveSettings({ maxConcurrent: 99 }).maxConcurrent, 2);
 assert.equal(settings.normalizeFileReceiveSettings({ maxConcurrent: 0 }).maxConcurrent, 1);
 
-const imageOnly = {
-  ...settings.DEFAULT_FILE_RECEIVE_SETTINGS,
-  autoAcceptAny: false,
-};
-assert.equal(settings.shouldAutoAcceptIncomingFile(imageOnly, "photo.PNG", 1024), true);
-assert.equal(settings.shouldAutoAcceptIncomingFile(imageOnly, "photo.jpeg", 1024), true);
-assert.equal(settings.shouldAutoAcceptIncomingFile(imageOnly, "archive.zip", 1024), false);
-assert.equal(settings.shouldAutoAcceptIncomingFile({ ...imageOnly, denyAll: true }, "photo.jpg", 1024), false);
-assert.equal(settings.shouldAutoAcceptIncomingFile(imageOnly, "photo.jpg", imageOnly.maxAutoBytes + 1), false);
-assert.equal(settings.shouldAutoAcceptIncomingFile({ ...imageOnly, autoAcceptImages: false }, "photo.jpg", 1024), false);
-assert.equal(settings.shouldAutoAcceptIncomingFile(settings.DEFAULT_FILE_RECEIVE_SETTINGS, "archive.zip", 1024), true);
-for (const size of [NaN, Infinity, -1, 1.5, settings.MAX_CHAT_FILE_BYTES + 1]) {
-  assert.equal(settings.shouldAutoAcceptIncomingFile({ ...imageOnly, maxAutoBytes: Infinity }, "photo.jpg", size), false);
-}
-assert.equal(settings.shouldAutoAcceptIncomingFile({ ...settings.DEFAULT_FILE_RECEIVE_SETTINGS, denyAll: true }, "archive.zip", 1), false);
-
 // Polling may deliver the metadata card before its native transfer binding.
 // Keep the same card/state and verify readiness changes only with the offer path.
 const incomingOffer = { path: "pending-file-card://synthetic-offer", transferState: "awaiting_confirmation" };
@@ -64,6 +48,7 @@ const saves = [];
 const writer = settings.createFileReceiveSettingsWriter((profileId, value) => new Promise((resolve, reject) => {
   saves.push({ profileId, value, resolve, reject });
 }));
+const imageOnly = { ...settings.DEFAULT_FILE_RECEIVE_SETTINGS, autoAcceptAny: false };
 const first = writer("profile-one", imageOnly);
 const denied = { ...imageOnly, denyAll: true };
 const second = writer("profile-one", denied);

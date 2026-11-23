@@ -31,10 +31,10 @@ const SHA256 = /^[a-f0-9]{64}$/;
 
 const COMPONENTS = Object.freeze({
   toxcore: {
-    file: "kaigen-toxcore-ec7bd2cce618ed6542fbc55b84574704eb380ef2.zip",
-    size: 1405890,
-    sha256: "8aebf2e3ef3a4c1b3b4afb367e717307eea170e510a0dc53bf0536f57dda003e",
-    materializedTree: "f5bffb2f1a4e791a8531aea42c839b0e9ff89a0f",
+    file: "kaigen-toxcore-d34d16e6473f61545fed9d8cb59bb1e86da993f1.zip",
+    size: 1406655,
+    sha256: "376182c5aef175fd03362d46333344facc751e9a00427a3b467d86d3301e5ec4",
+    materializedTree: "327b6020ed15488e265fd37e77ba20b129b7b237",
   },
   sodium: {
     file: "libsodium-1.0.22-stable-20261013.tar.gz",
@@ -601,7 +601,9 @@ async function validateOutputShape(contract, root) {
     try {
       const source = path.join(probeDirectory, "probe.c");
       const executable = path.join(probeDirectory, "probe");
-      await writeFile(source, "#include <dlfcn.h>\n#include <stdio.h>\nint main(int argc,char **argv){if(argc!=2)return 2;void *h=dlopen(argv[1],RTLD_NOW|RTLD_LOCAL);if(!h){fprintf(stderr,\"%s\\n\",dlerror());return 3;}if(!dlsym(h,\"tox_new\")||!dlsym(h,\"tox_iterate\"))return 4;dlclose(h);return 0;}\n");
+      const requiredSymbols = ["tox_new", "tox_iterate", "tox_kaigen_bootstrap_status"];
+      const missingSymbol = requiredSymbols.map((name) => `!dlsym(h,"${name}")`).join("||");
+      await writeFile(source, `#include <dlfcn.h>\n#include <stdio.h>\nint main(int argc,char **argv){if(argc!=2)return 2;void *h=dlopen(argv[1],RTLD_NOW|RTLD_LOCAL);if(!h){fprintf(stderr,"%s\\n",dlerror());return 3;}if(${missingSymbol})return 4;dlclose(h);return 0;}\n`);
       const compiler = contract.platform === "macos-universal" ? "clang" : "cc";
       const linkFlags = contract.platform === "macos-universal" ? [] : ["-ldl"];
       runExact(compiler, [source, "-o", executable, ...linkFlags]);
@@ -781,6 +783,17 @@ export async function materializedGitTree(root) {
   }
 }
 
+async function verifyToxcoreSource(projectRoot, source) {
+  const allowedSources = [
+    path.join(projectRoot, "work", "toxcore-meta"),
+    path.join(projectRoot, "work", "platform-sources", COMPONENTS.toxcore.file.slice(0, -4)),
+  ];
+  if (!allowedSources.includes(source)) throw new Error("Unexpected c-toxcore work tree");
+  const tree = await materializedGitTree(source);
+  if (tree !== COMPONENTS.toxcore.materializedTree) throw new Error(`Pinned c-toxcore tree mismatch: ${tree}`);
+  return tree;
+}
+
 async function bootstrapProvenance(projectRoot, group, producerScript, consumerScript, cacheTool, recipeSha256) {
   const provenance = {
     mode: "validated-existing-bootstrap",
@@ -797,8 +810,7 @@ async function bootstrapProvenance(projectRoot, group, producerScript, consumerS
   }
   if (group === "c-toxcore") {
     const toxSource = path.join(projectRoot, "work", "platform-sources", COMPONENTS.toxcore.file.slice(0, -4));
-    const actualTree = await materializedGitTree(toxSource);
-    if (actualTree !== COMPONENTS.toxcore.materializedTree) throw new Error(`Bootstrap Kaigen toxcore materialized tree mismatch: ${actualTree}`);
+    const actualTree = await verifyToxcoreSource(projectRoot, toxSource);
     provenance.sourceRepository = "https://github.com/kaigendev/kaigen-toxcore";
     provenance.sourceCommit = COMPONENTS.toxcore.file.slice("kaigen-toxcore-".length, -4);
     provenance.materializedSourceTree = actualTree;
@@ -950,6 +962,11 @@ async function writeContractFile(filename, contract) {
 
 async function cli(argv) {
   const { command, values, required } = parseArgs(argv);
+  if (command === "verify-toxcore-source") {
+    const tree = await verifyToxcoreSource(path.resolve(required("project-root")), path.resolve(required("source")));
+    console.log(JSON.stringify({ tree }));
+    return;
+  }
   if (command === "contract") {
     const contract = await contractFor({
       platform: required("platform"), group: required("group"),

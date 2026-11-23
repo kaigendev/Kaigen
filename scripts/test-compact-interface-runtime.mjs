@@ -15,7 +15,7 @@ for (let i = 2; i < process.argv.length; i += 2) {
 }
 for (const key of ["--playwright-module", "--chromium-executable", "--evidence-root"]) assert(options.has(key), key);
 const scenario = options.get("--scenario") ?? "full";
-assert(["full", "tor-geometry"].includes(scenario));
+assert(["full", "tor-geometry", "requests-navigation", "spellcheck-durability", "pending-contact-add", "pending-contact-profile-switch", "notification-settings"].includes(scenario));
 const evidence = path.resolve(options.get("--evidence-root"));
 assert(!await fs.stat(evidence).catch(() => null), "Fresh evidence directory required");
 await fs.mkdir(evidence, { recursive: true });
@@ -130,8 +130,170 @@ try {
     assert.equal(await page.locator('.save-button, .settings-footer').count(), 0, 'Global Save and footer are absent');
   }
   async function closeMenu() { await page.keyboard.press('Escape'); await popup.waitFor({ state: 'hidden' }); }
-  await page.goto(url); await home();
-  if (scenario === 'tor-geometry') {
+  const fixturePath = { 'spellcheck-durability': '/?spellcheck=1', 'pending-contact-add': '/?pendingContact=1', 'pending-contact-profile-switch': '/?pendingContact=1',
+    'notification-settings': '/?notificationSettings=1' }[scenario] ?? '/';
+  await page.goto(url + fixturePath); await home();
+  if (scenario === 'pending-contact-add') {
+    report.scenario = scenario;
+    const add = page.locator('.contact-list-add:visible');
+    const form = page.locator('.add-contact-card');
+    const toxId = form.locator('input');
+    const pending = key => page.locator('.chat-item[aria-label*="' + key + '" i]').filter({has: page.locator('[class*="pending"]')});
+    const firstId = '7A'.repeat(32) + '0'.repeat(12);
+    const staleId = '8B'.repeat(32) + '0'.repeat(12);
+    const nextDraft = '9C'.repeat(32) + '0'.repeat(12);
+    const submit = async value => {
+      await add.click();
+      await toxId.fill(value);
+      await form.locator('button[type="submit"]').click();
+      await page.waitForFunction(() => window.compactPendingContactFixture.admitted());
+    };
+    const acknowledge = () => page.evaluate(() => window.compactPendingContactFixture.acknowledge());
+    await submit(firstId);
+    assert.equal(await form.isVisible(), true, 'Form remains until the contact add succeeds');
+    await acknowledge();
+    await form.waitFor({state:'hidden'});
+    const first = pending(firstId.slice(58,64));
+    await first.waitFor({state:'visible'});
+    assert.match(await first.getAttribute('aria-label'), /ожидает авторизации/iu);
+    await page.waitForFunction(() => document.activeElement?.matches('.chat-item[aria-label]') === true);
+    const bounds = await visibleBox(first, 'new pending contact in the roster');
+    await submit(staleId);
+    await form.getByRole('button', {name:'Отмена',exact:true}).click();
+    await add.click();
+    await toxId.fill(nextDraft);
+    await acknowledge();
+    await page.waitForFunction(() => !window.compactPendingContactFixture.admitted());
+    await pending(staleId.slice(58,64)).waitFor({state:'attached'});
+    assert.equal(await toxId.inputValue(), nextDraft, 'Earlier response preserves a newly opened form');
+    assert.equal(await form.isVisible(), true);
+    await form.getByRole('button', {name:'Отмена',exact:true}).click();
+    await pending(staleId.slice(58,64)).waitFor({state:'visible'});
+    check('Successful add reveals and focuses the pending contact without closing a different form', {bounds});
+  } else if (scenario === 'pending-contact-profile-switch') {
+    report.scenario = scenario;
+    const toxId = '0D'.repeat(32) + '0'.repeat(12);
+    const form = page.locator('.add-contact-card');
+    const pending = page.locator('.chat-item[aria-label*="0D0D0D" i]').filter({ has: page.locator('[class*="pending"]') });
+    await page.locator('.contact-list-add:visible').click();
+    await form.locator('input').fill(toxId);
+    await form.locator('button[type="submit"]').click();
+    await page.waitForFunction(() => window.compactPendingContactFixture.admitted());
+    try {
+      await form.getByRole('button', { name: 'Отмена', exact: true }).click();
+      await page.getByRole('button', { name: 'Следующий профиль', exact: true }).click();
+      await page.waitForFunction(() => document.querySelector('button[aria-label="Следующий профиль"]')?.disabled === true);
+      assert.equal(await page.evaluate(() => window.appTabletFixture.commands.some(call => call.command === 'switch_profile')), false, 'The profile transition waits for the pending write');
+      assert.equal(await pending.count(), 0);
+    } finally {
+      await page.evaluate(() => window.compactPendingContactFixture.acknowledge());
+    }
+    await page.waitForFunction(() => !window.compactPendingContactFixture.admitted());
+    await page.waitForFunction(() => document.querySelector('.compact-own-status')?.textContent.includes('Second status'));
+    assert.equal(await pending.count(), 0, 'The late response cannot add the old contact to the new profile');
+    await page.getByRole('button', { name: 'Предыдущий профиль', exact: true }).click();
+    await page.waitForFunction(() => document.querySelector('.compact-own-status')?.textContent.includes('Alice status'));
+    await pending.waitFor({ state: 'visible' });
+    const bounds = await visibleBox(pending, 'original profile retained its accepted pending contact');
+    check('An acknowledged add stays with its original profile after a switch', { bounds });
+  } else if (scenario === 'spellcheck-durability') {
+    report.scenario = scenario;
+    const openChats = async () => {
+      const tabs = page.locator('.settings-tabs:visible');
+      const profileMenu = page.locator('.compact-profile-menu-host .rail-profile-menu-button:visible');
+      await tabs.or(profileMenu).first().waitFor();
+      if (!(await tabs.isVisible())) {
+        await profileMenu.click();
+        await page.locator('.compact-profile-menu-host [role="menuitem"]').nth(1).click();
+      }
+      await tabs.getByRole('button', { name: 'Чаты', exact: true }).click();
+    };
+    await openChats();
+    const english = page.locator('.setting-switch').filter({has: page.getByText('English', {exact: true})});
+    const spellcheck = english.locator('input');
+    const sendOnEnter = page.locator('.setting-switch').filter({has: page.getByText('Отправлять по Enter', {exact: true})});
+    const checked = await sendOnEnter.locator('input').isChecked();
+    assert.equal(await spellcheck.isChecked(), false);
+    await page.evaluate(() => window.compactSpellcheckFixture.holdNext());
+    await english.click();
+    try {
+      await page.waitForFunction(() => window.compactSpellcheckFixture.isHeld());
+      assert.equal(await spellcheck.isChecked(), false, 'Pending value stays unpublished');
+      assert.equal(await spellcheck.isDisabled(), true, 'Pending preferences block further spelling changes');
+      await sendOnEnter.click();
+      await page.waitForFunction(() => window.compactSpellcheckFixture.isHeld(), null, { timeout: 2000 });
+      // Allow the independent debounced full save to enter the queue while the old UI value is visible.
+      await new Promise(resolve => setTimeout(resolve, 1150));
+    } finally {
+      await page.evaluate(() => window.compactSpellcheckFixture.release());
+    }
+    await spellcheck.locator('xpath=self::input[not(@disabled)]').waitFor();
+    await page.waitForFunction(expected => window.compactSpellcheckFixture.read()?.sendOnEnter === expected, !checked);
+    assert.equal(await spellcheck.isChecked(), true);
+    assert.equal(await page.evaluate(() => window.compactSpellcheckFixture.read().spellcheckEnglish), true, 'Older full save keeps acknowledged spelling');
+    const visibleAt = Date.now();
+    await page.reload({waitUntil: 'domcontentloaded'});
+    const navigationStarted = await page.evaluate(() => performance.timeOrigin);
+    assert(navigationStarted - visibleAt < 1000, 'Reload follows the visible commitment');
+    await openChats();
+    assert.equal(await spellcheck.isChecked(), true, 'Confirmed spelling survived reload');
+    await page.evaluate(() => window.compactSpellcheckFixture.rejectNext());
+    await english.click();
+    await english.locator('xpath=ancestor::section[1]').getByRole('alert').waitFor();
+    assert.equal(await spellcheck.isChecked(), true, 'Failed save leaves confirmed spelling visible');
+    assert.equal(await spellcheck.isDisabled(), false, 'After refusal a user can retry');
+    assert.equal(await page.evaluate(() => window.compactSpellcheckFixture.read().spellcheckEnglish), true);
+    check('Spelling waits for acknowledgment, fences a queued autosave, survives reload and displays refusal', { reloadDelayMS: navigationStarted - visibleAt });
+  } else if (scenario === 'notification-settings') {
+    report.scenario = scenario;
+    const openNotifications = async () => {
+      const tabs = page.locator('.settings-tabs:visible');
+      const profileMenu = page.locator('.compact-profile-menu-host .rail-profile-menu-button:visible');
+      await tabs.or(profileMenu).first().waitFor();
+      if (!(await tabs.isVisible())) {
+        await profileMenu.click();
+        await page.locator('.compact-profile-menu-host [role="menuitem"]').nth(1).click();
+      }
+      if (!(await page.getByRole('slider', { name: 'Громкость уведомлений' }).isVisible())) {
+        await tabs.getByRole('button', { name: 'Уведомления', exact: true }).click();
+      }
+    };
+    const sound = page.locator('.setting-switch').filter({ has: page.getByText('Звук входящих сообщений', { exact: true }) }).locator('input');
+    const volume = page.getByRole('slider', { name: 'Громкость уведомлений' });
+    try {
+      await page.waitForFunction(() => window.compactNotificationFixture.isHeld());
+      await openNotifications();
+      const toggles = page.locator('.settings-content .setting-switch input');
+      assert.equal(await toggles.count(), 3);
+      assert.deepEqual(await toggles.evaluateAll(inputs => inputs.map(input => input.disabled)), [true, true, true]);
+      assert.equal(await volume.isDisabled(), true);
+      assert.match(await volume.locator('..').innerText(), /…/u, 'Volume stays unknown during profile loading');
+    } finally {
+      await page.evaluate(() => window.compactNotificationFixture.release());
+    }
+    await page.waitForFunction(() => document.querySelector('.settings-content input[type="range"]')?.disabled === false);
+    assert.equal(await sound.isChecked(), true);
+    assert.equal(await volume.inputValue(), '25');
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth + 1), false);
+    check('Notification controls wait for the active profile and show the preferences it returned');
+  } else if (scenario === 'requests-navigation') {
+    report.scenario = scenario;
+    await page.locator('.chat-item').first().click();
+    await visibleBox(page.locator('.compact-chat-back'), 'compact chat Back');
+    const desktopRequests = page.locator('.rail .requests-button');
+    assert.equal(await desktopRequests.isVisible(), false, 'Desktop shortcut is hidden in compact mode');
+    // Deliver the desktop command with compact chat state still open to cover the stale route.
+    await desktopRequests.evaluate(button => button.click());
+    await page.locator('.friend-requests-view:not(.add-contact-view)').waitFor({ state: 'visible' });
+    const chats = page.locator('.compact-bottom-nav .compact-nav-item.chats');
+    const bounds = await visibleBox(chats, 'Chats from compact requests');
+    assert.equal(await page.locator('.compact-nav-item.requests').getAttribute('aria-current'), 'page');
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth + 1), false);
+    await chats.click();
+    await home();
+    await page.locator('.friend-requests-view').waitFor({ state: 'hidden' });
+    check('Requests dismisses compact chat detail and keeps bottom navigation reachable', { bounds });
+  } else if (scenario === 'tor-geometry') {
     report.scenario = scenario;
     const states = [['disabled', 0], ['starting', 0], ['connecting', 0], ['connecting', 75], ['connecting', 100], ['connected', 100], ['error', 0]];
     const noOverlap = (a, b, label) => assert(Math.min(a.right, b.right) - Math.max(a.x, b.x) <= .5 || Math.min(a.bottom, b.bottom) - Math.max(a.y, b.y) <= .5, label);
