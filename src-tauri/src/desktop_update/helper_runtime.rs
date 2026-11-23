@@ -343,6 +343,47 @@ pub(super) fn rollback(directory: &Path, job: &mut Job) -> Result<(), String> {
     types::sync_directory(&job.layout.program_root)
 }
 
+#[cfg(windows)]
+fn msi_command_path(path: &Path) -> Result<PathBuf, String> {
+    use std::ffi::OsString;
+    use std::path::{Component, Prefix};
+
+    let invalid = "UPDATE_MSI_PATH_INVALID";
+    if !path.is_absolute() {
+        return Err(invalid.into());
+    }
+    let mut components = path.components();
+    let Some(Component::Prefix(prefix)) = components.next() else {
+        return Err(invalid.into());
+    };
+    let mut plain = match prefix.kind() {
+        Prefix::Disk(_) | Prefix::UNC(_, _) => return Ok(path.to_path_buf()),
+        Prefix::VerbatimDisk(drive) => PathBuf::from(format!("{}:\\", char::from(drive))),
+        Prefix::VerbatimUNC(server, share) => {
+            let mut root = OsString::from(r"\\");
+            root.push(server);
+            root.push(r"\");
+            root.push(share);
+            root.push(r"\");
+            PathBuf::from(root)
+        }
+        _ => return Err(invalid.into()),
+    };
+    for component in components {
+        match component {
+            Component::RootDir => {}
+            Component::Normal(name) => plain.push(name),
+            _ => return Err(invalid.into()),
+        }
+    }
+    // The installer needs a DOS path. Keep the validated canonical identity
+    // for filesystem and job checks.
+    if fs::canonicalize(&plain).ok().as_deref() != Some(path) {
+        return Err(invalid.into());
+    }
+    Ok(plain)
+}
+
 fn install_msi(directory: &Path, job: &mut Job) -> Result<(), String> {
     #[cfg(windows)]
     {
@@ -355,36 +396,41 @@ fn install_msi(directory: &Path, job: &mut Job) -> Result<(), String> {
         {
             return Err("UPDATE_MSI_REGISTRATION_CHANGED".into());
         }
+        let package = msi_command_path(&msi)?;
+        let mut install_folder = std::ffi::OsString::from("INSTALLFOLDER=");
+        install_folder.push(msi_command_path(&job.layout.program_root)?);
         job.phase = "installing".into();
         types::save_job(directory, job)?;
         let system = std::env::var_os("SystemRoot").ok_or("UPDATE_MSI_UNAVAILABLE")?;
         let mut command = Command::new(PathBuf::from(system).join("System32/msiexec.exe"));
         command
             .arg("/i")
-            .arg(&msi)
+            .arg(package)
             .args([
                 "/passive",
                 "/norestart",
                 "REBOOT=ReallySuppress",
                 "MSIRESTARTMANAGERCONTROL=Disable",
             ])
-            .arg(format!(
-                "INSTALLFOLDER={}",
-                job.layout.program_root.display()
-            ))
+            .arg(install_folder)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
-        let status = platform::spawn(&mut command)?
-            .wait()
-            .map_err(|_| "UPDATE_MSI_FAILED")?;
+        let status = platform::spawn(&mut command)?.wait().map_err(|error| {
+            job.last_native_error = error.raw_os_error();
+            "UPDATE_MSI_FAILED"
+        })?;
         match status.code() {
             Some(0) => Ok(()),
             Some(3010) => {
                 job.error_code = Some("UPDATE_REBOOT_REQUIRED".into());
                 Ok(())
             }
-            _ => Err("UPDATE_MSI_FAILED".into()),
+            Some(code) => {
+                job.last_native_error = Some(code);
+                Err(format!("UPDATE_MSI_FAILED_{code}"))
+            }
+            None => Err("UPDATE_MSI_FAILED".into()),
         }
     }
     #[cfg(not(windows))]
