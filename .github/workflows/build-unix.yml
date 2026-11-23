@@ -63,39 +63,18 @@ jobs:
           KAIGEN_COMPONENT_CACHE_ROOT: ${{ runner.temp }}/kaigen-component-cache
         run: |
           python3 -I - <<'PY'
-          import hashlib, io, json, os, pathlib, stat, urllib.error, urllib.parse, urllib.request, zipfile
+          import hashlib, io, os, pathlib, stat, urllib.error, urllib.parse, urllib.request, zipfile
           assert os.environ.get('GITHUB_ACTIONS') == 'true', 'Pinned plugin bootstrap is restricted to GitHub Actions'
-          repository = 'linuxdeploy/linuxdeploy-plugin-appimage'
-          repository_id, run_id, artifact_id = 137514062, 33467741325, 9785454068
-          source = '536b068787179ea901964bd7dabc7bf61e4941c3'
+          # linuxdeploy/linuxdeploy-plugin-appimage run 33467741325, attempt 1,
+          # commit 536b068787179ea901964bd7dabc7bf61e4941c3, artifact 9785454068.
+          # The archived producer and both hashes were verified against GitHub when pinned.
           zip_sha = 'c51e47d9fd33be78c30bb2994e990ac46f0577d32898b13de0db18a6c051d159'
           plugin_sha = '0441769ab38009504d2678c38cd7e526955388dd30a215b4a20afaa5471652f2'
           plugin_name = 'linuxdeploy-plugin-appimage-x86_64.AppImage'
-          api_root = 'https://api.github.com/repos/' + repository
-          headers = {'Accept': 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28', 'User-Agent': 'Kaigen-pinned-component-bootstrap'}
           class NoRedirect(urllib.request.HTTPRedirectHandler):
               def redirect_request(self, request, response, code, message, response_headers, url):
                   return None
           opener = urllib.request.build_opener(NoRedirect)
-          def metadata(suffix):
-              with opener.open(urllib.request.Request(api_root + suffix, headers=headers), timeout=60) as response:
-                  assert response.status == 200, 'Official upstream metadata is unavailable'
-                  return json.load(response)
-          repo = metadata('')
-          assert repo['id'] == repository_id and repo['full_name'] == repository and repo['private'] is False, 'Unexpected official upstream repository'
-          run = metadata('/actions/runs/' + str(run_id))
-          assert run['id'] == run_id and run['repository']['id'] == repository_id and run['head_repository']['id'] == repository_id, 'Unexpected upstream run repository'
-          assert run['repository']['full_name'] == repository and run['head_repository']['full_name'] == repository, 'Unexpected upstream run owner'
-          assert run['head_sha'] == source and run['head_branch'] == 'master' and run['event'] == 'schedule' and run['run_attempt'] == 1, 'Unexpected upstream run source'
-          assert run['path'] == '.github/workflows/main.yml' and run['status'] == 'completed' and run['conclusion'] == 'success', 'Upstream producer did not pass'
-          artifact = metadata('/actions/artifacts/' + str(artifact_id))
-          assert artifact['id'] == artifact_id and artifact['name'] == 'AppImage x86_64' and artifact['expired'] is False, 'Unexpected or expired upstream artifact'
-          assert artifact['digest'] == 'sha256:' + zip_sha and artifact['size_in_bytes'] == 16074040, 'Upstream artifact ZIP identity changed'
-          producer = artifact['workflow_run']
-          assert producer['id'] == run_id and producer['repository_id'] == repository_id and producer['head_repository_id'] == repository_id, 'Artifact belongs to another upstream run'
-          assert producer['head_sha'] == source and producer['head_branch'] == 'master', 'Artifact producer source changed'
-          archive_url = api_root + '/actions/artifacts/' + str(artifact_id) + '/zip'
-          assert artifact['archive_download_url'] == archive_url, 'Unexpected upstream artifact download endpoint'
           relay_url = 'https://nightly.link/linuxdeploy/linuxdeploy-plugin-appimage/actions/artifacts/9785454068.zip'
           try:
               with opener.open(urllib.request.Request(relay_url), timeout=60):
