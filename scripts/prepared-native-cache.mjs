@@ -779,7 +779,8 @@ export async function materializedGitTree(root) {
     if (!/^[a-f0-9]{40,64}$/.test(tree)) throw new Error(`Invalid materialized c-toxcore tree: ${tree}`);
     return tree;
   } finally {
-    await rm(temporary, { recursive: true, force: true });
+    // Allow transient Windows file locks to clear before reporting cleanup failure.
+    await rm(temporary, { recursive: true, force: true, maxRetries: 10, retryDelay: 150 });
   }
 }
 
