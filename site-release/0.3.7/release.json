@@ -10,13 +10,13 @@
   "sourceFiles": [
     {
       "path": ".openai/hosting.json",
-      "size": 35,
-      "sha256": "d2841f8a91a91bab4f4a1e27671e7d3fe8f02261eb41996f43ac61e6970a9d74"
+      "size": 31,
+      "sha256": "d532abb65cf9ae20634b464d954cb4a08a0de9f3cd3cdf7f9c3ec8948826d947"
     },
     {
       "path": "README.md",
-      "size": 2185,
-      "sha256": "557820e5d219c7693ed4a0922762f2072b7523207a3fe4b50fb8a53f28bc2f1b"
+      "size": 2166,
+      "sha256": "4effc5138aed510a59157356149e263e2b1c6ea47c0df70f9757ac991815fd85"
     },
     {
       "path": "assets/apple-touch-icon.png",
@@ -115,58 +115,58 @@
     },
     {
       "path": "i18n.js",
-      "size": 195983,
-      "sha256": "78242f0c498c4181d8ab038764d36cc2fcf56a86069390d5ee00e2c7261efed7"
+      "size": 194309,
+      "sha256": "cf0b7b2b6eeb1188b58163d3bb5db74d4763e88d237a374442180bd4fb92069a"
     },
     {
       "path": "index.html",
-      "size": 92880,
-      "sha256": "f684c9d391c3280adf2d9c7cd4a1dd283253e9b56a2eecf7269998b68f55c51e"
+      "size": 91998,
+      "sha256": "f91d3d773f535e43315633c9676fa737229328619a37341b4ad2359bbf126693"
     },
     {
       "path": "package-lock.json",
-      "size": 80084,
-      "sha256": "e1c08c37f3e00e33dfa9edf674fb52386a68dc1c776966a424a7fe334c143474"
+      "size": 77623,
+      "sha256": "9786cf416873dd5c542a769e3429e6130dbdcb39615262752cea5e84e288108e"
     },
     {
       "path": "package.json",
-      "size": 539,
-      "sha256": "7cb50313c6187f70ee5f905746c141446ce7bec36553e62ea2213ec4070613cd"
+      "size": 518,
+      "sha256": "d68170386f3611e8b63df8d168d06a349cd6d6626885d42f65623f3e8b6f81fa"
     },
     {
       "path": "robots.txt",
-      "size": 25,
-      "sha256": "1cbdbc6504be7abe1267d01d7f565bfcfe5851ba3f6a3754d1d61c8f8a2c6aa3"
+      "size": 23,
+      "sha256": "16ceb5ee3e0dc13aa9adf31a3ebbe45a1d965b8c2b9f72eaf84e5911e140ed95"
     },
     {
       "path": "script.js",
-      "size": 19336,
-      "sha256": "a19ea05d928b27c587b61f25d82fe5f1df6456072cb8b757afc9110c76e30ddd"
+      "size": 18851,
+      "sha256": "c600b5ed2df9164bbc21f21d2c5a9be5a874943463084ad7a7bf4da024108ab1"
     },
     {
       "path": "scripts/prepare-site.mjs",
-      "size": 1077,
-      "sha256": "cf6987ec34f219e48eaa72622dca5e3c29a2da6b70b3c6b90a4d87d16ce86c29"
+      "size": 1056,
+      "sha256": "0a3829c539c18319c600e53262f37d0fb54d0bbad3f7ab429ed17ebfa561b2a8"
     },
     {
       "path": "site.webmanifest",
-      "size": 437,
-      "sha256": "0802ef061598113ea8d2084351dd6cf04e1e437b5cebe0382ef98fdd1e93bcd1"
+      "size": 424,
+      "sha256": "67d4965a2b4d0e70640a60689edc3f005a5511249d69a696335c19fa717ee6d2"
     },
     {
       "path": "styles.css",
-      "size": 59624,
-      "sha256": "aa5c3df7a99ff5453e3abb6385e60099ec513f09d260b44b5b7ec31df1eec42a"
+      "size": 58805,
+      "sha256": "aac55097e39c04fcdd9fe70801b853a72471e609939d5c40d42d3f8c9495e479"
     },
     {
       "path": "vite.config.ts",
-      "size": 667,
-      "sha256": "07a6e8cf0ab48d845bc88076acba9cf25078264f8987ed0bbacfdb2410503404"
+      "size": 643,
+      "sha256": "5a187c21ce76791ae9a811c28e0e8793c4ad423967a87b5f405bb8f76bdd69e4"
     },
     {
       "path": "worker/index.ts",
-      "size": 215,
-      "sha256": "7030c8de4b09008c2da3189ca0210ed5b4ceaa64a340f1cc4b4b12d2cdedee38"
+      "size": 204,
+      "sha256": "ac96f83b0166e40c7b9492631da1f46b1d174b18b3c0b789b5d43b33578e0d6e"
     }
   ],
   "originalAssets": [
