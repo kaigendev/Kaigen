@@ -45,15 +45,25 @@ function packageBlocks(text, header) {
 
 export async function readReleaseVersion(root = SOURCE_ROOT, { expectedTag, verificationCatalog } = {}) {
   const readJson = async file => JSON.parse(await readFile(path.join(root, file), 'utf8'));
-  const [manifest, lock, tauri, cargo, cargoLock, webCargo, webCargoLock] = await Promise.all([
+  const [manifest, lock, tauri, cargo, cargoLock, webCargo, webCargoLock, componentVersions] = await Promise.all([
     readJson('package.json'), readJson('package-lock.json'), readJson('src-tauri/tauri.conf.json'),
     readFile(path.join(root, 'src-tauri/Cargo.toml'), 'utf8'), readFile(path.join(root, 'src-tauri/Cargo.lock'), 'utf8'),
     readFile(path.join(root, 'web/kaigen-webd/Cargo.toml'), 'utf8'),
     readFile(path.join(root, 'web/kaigen-webd/Cargo.lock'), 'utf8'),
+    readFile(path.join(root, 'src/componentVersions.ts'), 'utf8'),
   ]);
   assert.equal(manifest.name, 'kaigen', 'package.json must identify the Kaigen source');
   const identity = releaseVersion(manifest.version);
   const same = (value, file) => assert.equal(value, identity.version, `${file} version differs from package.json`);
+  for (const [field, expected] of Object.entries({
+    app: identity.releaseLabel,
+    appManifest: identity.version,
+    webBackendManifest: identity.version,
+  })) {
+    const declarations = [...componentVersions.matchAll(new RegExp(`^[ \\t]*${field}:[ \\t]*"([^"\\r\\n]+)",[ \\t]*\\r?$`, 'gm'))];
+    assert.equal(declarations.length, 1, `src/componentVersions.ts must declare one literal ${field} version`);
+    assert.equal(declarations[0][1], expected, `src/componentVersions.ts ${field} version differs from package.json`);
+  }
   same(lock.version, 'package-lock.json');
   assert.equal(lock.name, manifest.name, 'package-lock.json package identity differs');
   assert.equal(lock.packages?.['']?.name, manifest.name, 'package-lock.json root package identity differs');

@@ -15,6 +15,7 @@ function filesFor(value = version) {
     'package.json': JSON.stringify({ name: 'kaigen', version: value }),
     'package-lock.json': JSON.stringify({ name: 'kaigen', version: value, lockfileVersion: 3, packages: { '': { name: 'kaigen', version: value } } }),
     'src-tauri/tauri.conf.json': JSON.stringify({ version: value }),
+    'src/componentVersions.ts': `export const COMPONENT_VERSIONS = Object.freeze({\n  app: "${releaseVersion(value).releaseLabel}",\n  appManifest: "${value}",\n  webBackendManifest: "${value}",\n});\n`,
     'src-tauri/Cargo.toml': `[package]\nname = "kaigen"\nversion = "${value}" # product version\n\n[dependencies]\nother = "99.0.0"\n`,
     'src-tauri/Cargo.lock': `version = 4\n\n[[package]]\nname = "dependency"\nversion = "99.0.0"\n\n[[package]]\nname = "kaigen"\nversion = "${value}"\ndependencies = [\n "dependency",\n]\n`,
     'web/kaigen-webd/Cargo.toml': `[package]\nname = "kaigen-webd"\nversion = "${value}"\n`,
@@ -67,6 +68,15 @@ for (const file of ['package.json', 'package-lock.json', 'src-tauri/tauri.conf.j
     await fixture(files, root => assert.rejects(() => readReleaseVersion(root), /version differs from package.json/));
   });
 }
+
+test('reject stale About and component manifest versions', async () => {
+  const file = 'src/componentVersions.ts';
+  for (const field of ['app', 'appManifest', 'webBackendManifest']) {
+    const files = filesFor('0.3.7');
+    files[file] = files[file].replace(`${field}: "0.3.7"`, `${field}: "0.3.6"`);
+    await fixture(files, root => assert.rejects(() => readReleaseVersion(root), new RegExp(`${field} version differs`)));
+  }
+});
 
 test('npm root lock mismatch cannot hide behind matching top-level version', async () => {
   const files = filesFor();
@@ -166,7 +176,8 @@ test('publisher workflow derives labels while preserving historical trust predic
 test('Unix jobs validate versions and Web artifacts use the same canonical label', async () => {
   const workflow = await readFile(path.join(sourceRoot, '.github/workflows/build-unix.yml'), 'utf8');
   assert.equal(workflow.split('run: node scripts/release-version.mjs --github-env').length - 1, 3);
-  assert.ok(workflow.includes('appendFileSync(process.env.GITHUB_ENV, `KAIGEN_WEB_BUILD_ID=${releaseWebBuildId(process.env.KAIGEN_PACKAGE_VERSION)}\\n`);'));
+  assert.ok(workflow.includes('const buildId = `${releaseWebBuildId(process.env.KAIGEN_PACKAGE_VERSION)}-${commit.slice(0, 12)}`;'));
+  assert.ok(workflow.includes('appendFileSync(process.env.GITHUB_ENV, `KAIGEN_WEB_BUILD_ID=${buildId}\\n`);'));
   assert.ok(workflow.includes('name: Kaigen-Web-Debian13-Nginx-${{ env.KAIGEN_RELEASE_LABEL }}'));
   assert.ok(workflow.includes('artifacts/Kaigen-Web-Debian13-Nginx-${{ env.KAIGEN_RELEASE_LABEL }}.tar.gz'));
   assert.ok(workflow.includes('artifacts/Kaigen-Web-Installer-${{ env.KAIGEN_RELEASE_LABEL }}.sh'));

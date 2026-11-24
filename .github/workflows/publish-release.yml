@@ -285,9 +285,14 @@ jobs:
           assert.equal(original.target_commitish, originalSha, 'unexpected published release target');
           assert.equal(original.draft, false);
           assert.equal(original.immutable, false);
-          assert.deepEqual(original.assets.map(asset => asset.name).sort(), names, 'unexpected original asset set');
-          const originals = orderedAssets(original.assets);
-          for (const asset of originals) {
+          const originalAssets = orderedAssets(original.assets);
+          const originals = originalAssets.filter(asset => names.includes(asset.name));
+          const siteName = 'Kaigen-Site-' + label + '.tar.gz';
+          const preserved = originalAssets.filter(asset => !names.includes(asset.name));
+          assert.deepEqual(originals.map(asset => asset.name).sort(), names, 'unexpected original product assets');
+          assert.ok(preserved.length === 0 || (preserved.length === 1 && preserved[0].name === siteName), 'unexpected original additional assets');
+          const siteAssets = release => orderedAssets(release.assets.filter(asset => asset.name === siteName));
+          for (const asset of originalAssets) {
             assert.equal(asset.state, 'uploaded');
             assert.match(asset.digest, /^sha256:[a-f0-9]{64}$/);
           }
@@ -327,7 +332,8 @@ jobs:
             const staged = await api(releaseRoute);
             assert.deepEqual(metadata(staged), metadata(original));
             assert.equal(staged.body, original.body);
-            assert.equal(staged.assets.length, 14);
+            assert.equal(staged.assets.length, originalAssets.length + candidates.length);
+            assert.deepEqual(siteAssets(staged), preserved);
             assert.deepEqual(orderedAssets(staged.assets.filter(asset => names.includes(asset.name))), originals);
             for (const candidate of candidates) {
               const uploaded = staged.assets.find(asset => asset.name === candidate.stagedName);
@@ -348,7 +354,8 @@ jobs:
             const promoted = await api(releaseRoute);
             assert.deepEqual(metadata(promoted), metadata(original));
             assert.equal(promoted.body, body);
-            assert.equal(promoted.assets.length, 14);
+            assert.equal(promoted.assets.length, originalAssets.length + candidates.length);
+            assert.deepEqual(siteAssets(promoted), preserved);
             assert.deepEqual(orderedAssets(promoted.assets.filter(asset => backups.some(backup => backup.id === asset.id))), backups);
             const expected = candidates.map(asset => ({ ...asset, state: 'uploaded' }));
             assert.deepEqual(orderedAssets(promoted.assets.filter(asset => names.includes(asset.name))), orderedAssets(expected));
@@ -370,7 +377,7 @@ jobs:
               }
               const restored = await api(releaseRoute);
               assert.deepEqual(metadata(restored), metadata(original));
-              assert.deepEqual(orderedAssets(restored.assets), originals);
+              assert.deepEqual(orderedAssets(restored.assets), originalAssets);
               assert.equal(restored.body ?? '', originalBody);
             } catch (rollbackError) {
               console.error('Release rollback requires recovery. Original assets were not deleted.', rollbackError);
@@ -381,7 +388,8 @@ jobs:
           const published = await api(releaseRoute);
           assert.deepEqual(metadata(published), metadata(original));
           assert.equal(published.body, body);
-          assert.deepEqual(orderedAssets(published.assets), orderedAssets(candidates.map(asset => ({ ...asset, state: 'uploaded' }))));
+          const replacements = candidates.map(asset => ({ ...asset, state: 'uploaded' }));
+          assert.deepEqual(orderedAssets(published.assets), orderedAssets([...replacements, ...preserved]));
           await verifyTag();
           console.log('Published release asset IDs and digests:', JSON.stringify(orderedAssets(published.assets)));
           JS
