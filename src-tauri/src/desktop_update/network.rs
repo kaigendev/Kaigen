@@ -48,12 +48,13 @@ impl Network {
         &self,
         input: &str,
         streaming: bool,
+        policy: &TransportPolicy,
     ) -> Result<crate::webgate::OfficialHttpBody, String> {
         let mut url = url::Url::parse(input).map_err(|_| "UPDATE_URL_INVALID")?;
         for _ in 0..6 {
             self.check()?;
             validate_url(&url)?;
-            let transport = OfficialTransport::official(url.clone(), self.policy.clone())?;
+            let transport = OfficialTransport::official(url.clone(), policy.clone())?;
             *self.active.lock().map_err(|_| "UPDATE_STATE_UNAVAILABLE")? =
                 Some(Arc::clone(&transport));
             let response = transport.official_get(streaming).map_err(|error| {
@@ -83,7 +84,38 @@ impl Network {
     }
 
     pub(super) fn json<T: DeserializeOwned>(&self, url: &str) -> Result<T, String> {
-        let mut response = self.response(url, false)?;
+        if !self
+            .policy
+            .require_tor
+            .as_ref()
+            .is_some_and(|required| required())
+        {
+            return self.read_json(url, &self.policy);
+        }
+        let mut policy = self.policy.clone();
+        // Both attempts must use Tor, even if the shared setting changes.
+        policy.require_tor = Some(Arc::new(|| true));
+        match self.read_json(url, &policy) {
+            Err(error)
+                if error == "UPDATE_NETWORK_FAILED"
+                    && policy
+                        .tor
+                        .as_ref()
+                        .and_then(|ready_endpoint| ready_endpoint())
+                        .is_some() =>
+            {
+                self.read_json(url, &policy)
+            }
+            result => result,
+        }
+    }
+
+    fn read_json<T: DeserializeOwned>(
+        &self,
+        url: &str,
+        policy: &TransportPolicy,
+    ) -> Result<T, String> {
+        let mut response = self.response(url, false, policy)?;
         if response
             .content_length
             .is_some_and(|length| length > 8 * 1024 * 1024)
@@ -110,7 +142,7 @@ impl Network {
         mut progress: impl FnMut(u64),
     ) -> Result<(), String> {
         let expected = asset.sha256()?;
-        let mut response = self.response(&asset.browser_download_url, true)?;
+        let mut response = self.response(&asset.browser_download_url, true, &self.policy)?;
         if response
             .content_length
             .is_some_and(|length| length != asset.size)

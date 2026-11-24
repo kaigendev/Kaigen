@@ -28,45 +28,60 @@ export function DesktopUpdateProvider({ children }: { children: ReactNode }) {
   const alive = useRef(true);
   const busyRequest = useRef(false);
   const manualCheck = useRef(false);
+  const viewRevision = useRef(0);
+  const receiveView = useCallback((current: UpdateView) => {
+    viewRevision.current += 1;
+    setView(current);
+    setError(false);
+    if (current.phase === "checking" || current.candidate || current.errorCode || current.phase === "failed") {
+      setNoUpdates(false);
+    }
+    if (manualCheck.current && current.phase !== "checking") {
+      setNoUpdates(current.phase === "idle" && !current.candidate && !current.errorCode);
+      manualCheck.current = false;
+    }
+  }, []);
   useEffect(() => {
     alive.current = true;
     if (!platformCapabilities.nativeFilesystem) return () => { alive.current = false; };
     let disposed = false;
     let unlisten: (() => void) | undefined;
-    let revision = 0;
     void (async () => {
       try {
         const stop = await listen<UpdateView>("desktop-update-state", ({ payload }) => {
-          if (!disposed) {
-            revision += 1; setView(payload); setError(false);
-            if (payload.phase === "checking" || payload.candidate || payload.errorCode || payload.phase === "failed") setNoUpdates(false);
-            if (manualCheck.current && payload.phase !== "checking") {
-              setNoUpdates(payload.phase === "idle" && !payload.candidate && !payload.errorCode);
-              manualCheck.current = false;
-            }
-          }
+          if (!disposed) receiveView(payload);
         });
         if (disposed) { stop(); return; }
         unlisten = stop;
-        const requestedAt = revision;
+        const requestedAt = viewRevision.current;
         const current = await invoke<UpdateView>("get_desktop_update_state");
-        if (!disposed && requestedAt === revision) setView(current);
+        if (!disposed && requestedAt === viewRevision.current) receiveView(current);
         if (!disposed) await invoke("acknowledge_desktop_update_renderer");
       } catch { if (!disposed) setError(true); }
     })();
     return () => { disposed = true; alive.current = false; unlisten?.(); };
-  }, []);
+  }, [receiveView]);
   const request = useCallback(async (command: string, args?: Record<string, unknown>) => {
     if (busyRequest.current) return;
-    if (command === "check_desktop_update") { manualCheck.current = true; setNoUpdates(false); }
+    const checking = command === "check_desktop_update";
+    if (checking) { manualCheck.current = true; setNoUpdates(false); }
     busyRequest.current = true; setPending(true); setError(false);
-    try { await invoke(command, args); }
+    const requestedAt = viewRevision.current;
+    try {
+      if (checking) {
+        const current = await invoke<UpdateView>(command, args);
+        if (alive.current && requestedAt === viewRevision.current) receiveView(current);
+      } else {
+        await invoke(command, args);
+      }
+    }
     catch {
+      if (checking && requestedAt !== viewRevision.current) return;
       manualCheck.current = false;
       if (alive.current) { setError(true); setNoUpdates(false); }
     }
     finally { busyRequest.current = false; if (alive.current) setPending(false); }
-  }, []);
+  }, [receiveView]);
   const value: UpdateContextValue = {
     view, pending, error, noUpdates,
     setEnabled: (enabled) => request("set_desktop_auto_update", { enabled }),

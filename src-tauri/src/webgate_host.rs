@@ -655,7 +655,9 @@ fn invalidate_prefixes(profile: &RemoteProfile, commands: &[&str]) {
 }
 
 fn invalidate_for_command(profile: &RemoteProfile, command: &str) {
-    if command.starts_with("send_tox_")
+    if command == "save_local_state" {
+        invalidate_prefixes(profile, &["load_local_state"]);
+    } else if command.starts_with("send_tox_")
         || matches!(
             command,
             "mark_friend_read" | "mark_requests_read" | "acknowledge_local_messages"

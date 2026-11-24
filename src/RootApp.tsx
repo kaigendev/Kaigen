@@ -20,6 +20,7 @@ import { WebgateConnectionFields } from "./webgate/WebgateConnectionFields";
 import { ConnectionCardSettings } from "./webgate/ConnectionCardSettings";
 import { isWebgateProfileId } from "./webgate/platformRouter";
 import { emptyWebgateConnection, makeWebgateCard } from "./webgate/connectionCard";
+import { ProfileContactFeed, ProfileViewSession } from "./profileViewSession";
 
 const ROOT_APP_UI_IDS = rootAppUiCatalog.ids;
 
@@ -503,6 +504,35 @@ export default function RootApp({ onLanguageChange, registerBeforeWorkspaceLock 
   const [unlockFlowOpen, setUnlockFlowOpen] = useState(false);
   const [showWelcome, setShowWelcome] = useState(false);
   const [messengerKey, setMessengerKey] = useState(0);
+  const [profileSessions] = useState(() => new Map<string, ProfileViewSession>());
+  const [emptyProfileSession] = useState(() => new ProfileViewSession());
+  useLayoutEffect(() => {
+    const loadedIds = new Set(startup?.profiles.filter((profile) => profile.loaded).map((profile) => profile.id));
+    for (const [id, session] of profileSessions) {
+      if (loadedIds.has(id)) continue;
+      session.close();
+      profileSessions.delete(id);
+    }
+  }, [profileSessions, startup?.profiles]);
+  useEffect(() => {
+    const replaceSession = (event: Event) => {
+      const id = (event as CustomEvent<string>).detail;
+      profileSessions.get(id)?.close();
+      profileSessions.delete(id);
+      setMessengerKey((value) => value + 1);
+    };
+    window.addEventListener("webgate-profile-replaced", replaceSession);
+    return () => {
+      window.removeEventListener("webgate-profile-replaced", replaceSession);
+      for (const session of profileSessions.values()) session.close();
+      profileSessions.clear();
+    };
+  }, [profileSessions]);
+  const flushProfileSaves = useCallback(async () => {
+    const sessions = [...profileSessions.values()];
+    await Promise.all(sessions.map((session) => session.localSaveQueue.current));
+    if (sessions.some((session) => session.switchSave)) throw new Error("PROFILE_SAVE_FAILED");
+  }, [profileSessions]);
   const [profileSwitching, setProfileSwitching] = useState(false);
   const [initialPresetBusy, setInitialPresetBusy] = useState<InitialConnectionPreset | null>(null);
   const [initialPresetError, setInitialPresetError] = useState("");
@@ -714,7 +744,6 @@ export default function RootApp({ onLanguageChange, registerBeforeWorkspaceLock 
     startupRefreshRevision.current += 1;
     setProfileSwitching(true);
     try { updateMainWindowProfiles(await invoke<ProfileSummary[]>("switch_profile", { profileId: id })); }
-    catch (error) { setFatal(String(error)); }
     finally {
       profileSwitchingRef.current = false;
       setProfileSwitching(false);
@@ -751,6 +780,9 @@ export default function RootApp({ onLanguageChange, registerBeforeWorkspaceLock 
     startupRefreshRevision.current += 1;
     setProfileSwitching(true);
     try {
+      const session = profileSessions.get(capturedProfileId);
+      await session?.localSaveQueue.current;
+      if (session?.switchSave) throw new Error("PROFILE_SAVE_FAILED");
       const profiles = await invoke<ProfileSummary[]>(command, { profileId: capturedProfileId });
       if (rootAliveRef.current) routeAfterProfileRemoval(profiles);
     } catch (error) {
@@ -838,6 +870,15 @@ export default function RootApp({ onLanguageChange, registerBeforeWorkspaceLock 
   }, [messengerVisible]);
   const messengerWasVisible = useRef(false);
   if (loaded && skipLocks && !showWelcome) messengerWasVisible.current = true;
+  const loadedProfileSessions = (startup?.profiles ?? []).filter((profile) => profile.loaded).map((profile) => {
+    let session = profileSessions.get(profile.id);
+    if (!session) {
+      session = new ProfileViewSession();
+      profileSessions.set(profile.id, session);
+    }
+    return { profile, session };
+  });
+  const activeSession = loadedProfileSessions.find(({ profile }) => profile.active)?.session ?? emptyProfileSession;
   const route = !startupReady || !startup
     ? <Splash />
     : fatal
@@ -848,12 +889,14 @@ export default function RootApp({ onLanguageChange, registerBeforeWorkspaceLock 
           ? <UnlockProfiles profiles={startup.profiles} onProfiles={onProfiles} onConnected={acceptUnlockedProfiles} onDisableProfile={(id) => runProfileRemoval("disable_profile", id)} onAddProfile={addAnotherProfile} onContinue={() => void continueUnlocked()} />
           : loaded
             ? <>
-              <div className="messenger-root" inert={!skipLocks && unlockFlowOpen || undefined}><MessengerApp registerBeforeWorkspaceLock={registerBeforeWorkspaceLock} statusAttention={statusAttention} onStatusAttentionComplete={completeStatusAttention} key={messengerKey} profiles={startup.profiles} profileSwitching={profileSwitching} onSwitchProfile={switchProfile} onDisableProfile={(id) => runProfileRemoval("disable_profile", id)} onDestroyActiveProfile={() => runProfileRemoval("destroy_active_profile")} onProfileStatusChange={changeProfileStatus} /></div>
+              <div className="messenger-root" inert={!skipLocks && unlockFlowOpen || undefined}><MessengerApp registerBeforeWorkspaceLock={registerBeforeWorkspaceLock} statusAttention={statusAttention} onStatusAttentionComplete={completeStatusAttention} key={messengerKey} profiles={startup.profiles} profileSession={activeSession} flushProfileSaves={flushProfileSaves} profileSwitching={profileSwitching} onSwitchProfile={switchProfile} onDisableProfile={(id) => runProfileRemoval("disable_profile", id)} onDestroyActiveProfile={() => runProfileRemoval("destroy_active_profile")} onProfileStatusChange={changeProfileStatus} /></div>
               {!skipLocks && unlockFlowOpen && <CompactModal className="startup-profiles-overlay" label={language === "ru" ? "Подключение профилей" : "Connect profiles"} onClose={() => void continueUnlocked()}><UnlockProfiles profiles={startup.profiles} onProfiles={onProfiles} onConnected={acceptUnlockedProfiles} onDisableProfile={(id) => runProfileRemoval("disable_profile", id)} onAddProfile={addAnotherProfile} onContinue={() => void continueUnlocked()} /></CompactModal>}
             </>
             : <Welcome onProfiles={reviewCreatedOrImportedProfiles} onBackToProfiles={startup.profiles.length > 0 ? returnToProfileConnection : undefined} />;
 
   return <I18nProvider language={language} setLanguage={changeLanguage}><DesktopUpdateProvider><GlobalLanguageBridge /><TextEditContextMenu />
+    {loadedProfileSessions.map(({ profile, session }) =>
+      <ProfileContactFeed key={profile.id} profileId={profile.id} active={profile.active} session={session} />)}
     {startupReady && webgateStoreError && dismissedWebgateStoreError !== webgateStoreError && <aside className="startup-error webgate-store-warning" role="alert" data-i18n-ignore translate="no">
       <p>{language === "ru" ? "Не удалось открыть сохранённые подключения Webgate. Сохранённые данные не изменены. Проверьте доступ к хранилищу этой учётной записи и повторите запуск; остальные профили доступны." : "Saved Webgate connections could not be opened. Stored data is unchanged. Check this account's storage access and restart; other profiles remain available."}</p>
       <button type="button" onClick={() => setDismissedWebgateStoreError(webgateStoreError)} aria-label={language === "ru" ? "Скрыть уведомление" : "Dismiss notice"}>×</button>

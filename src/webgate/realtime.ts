@@ -9,6 +9,8 @@ export function watchProfileUpdates(
   refresh: () => unknown | Promise<unknown>,
   localIntervalMs: number,
   onResync?: () => void,
+  shouldRefresh?: (event: unknown) => boolean,
+  shouldPollLocal?: () => boolean,
 ): () => void {
   const remote = isWebgateProfileId(profileId);
   let disposed = false;
@@ -35,10 +37,12 @@ export function watchProfileUpdates(
       if (payload.profileId !== profileId) return;
       if (payload.event && typeof payload.event === "object"
         && (payload.event as { event?: unknown }).event === "resync-required") onResync?.();
-      run();
+      if (!shouldRefresh || shouldRefresh(payload.event)) run();
     })
     : listen<string>("profiles-changed", ({ payload }) => { if (payload === profileId) run(); });
-  const timer = remote ? undefined : window.setInterval(run, localIntervalMs);
+  const timer = remote ? undefined : window.setInterval(() => {
+    if (!shouldPollLocal || shouldPollLocal()) run();
+  }, localIntervalMs);
   const visible = () => { if (document.visibilityState === "visible") run(); };
   document.addEventListener("visibilitychange", visible);
   window.addEventListener("focus", visible);

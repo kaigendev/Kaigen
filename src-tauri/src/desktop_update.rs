@@ -421,17 +421,22 @@ impl UpdateManager {
         if self.stopped.load(Ordering::Acquire) {
             return Err("UPDATE_STOPPED".into());
         }
-        if self.busy.swap(true, Ordering::AcqRel) {
-            return Err("UPDATE_BUSY".into());
-        }
-        self.network.begin();
-        self.publish(|state| {
+        let checking = {
+            let mut state = self.state.lock().map_err(|_| "UPDATE_STATE_UNAVAILABLE")?;
+            // Reserve the operation and publish its phase in the same state
+            // transaction so a joining caller cannot read the previous phase.
+            if self.busy.swap(true, Ordering::AcqRel) {
+                return Ok(state.view.clone());
+            }
+            self.network.begin();
             state.view.phase = "checking".into();
             state.view.error_code = None;
             state.view.retryable = false;
             state.metadata.last_attempt_at = Some(now());
             state.view.last_checked_at = state.metadata.last_attempt_at;
-        });
+            state.view.clone()
+        };
+        (self.emit)(checking.clone());
         let manager = Arc::clone(self);
         std::thread::spawn(move || {
             let result = manager.check_inner();
@@ -455,7 +460,7 @@ impl UpdateManager {
                 Err(error) => manager.failed(error),
             }
         });
-        self.view()
+        Ok(checking)
     }
 
     fn check_inner(&self) -> Result<Option<Candidate>, String> {

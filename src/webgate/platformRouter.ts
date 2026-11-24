@@ -37,7 +37,10 @@ export function createWebgatePlatformRouter(rawInvoke: RawInvoke, options: Webga
   return async function invoke<T>(command: string, args: Record<string, unknown> = {}): Promise<T> {
     if (command === "connect_webgate_profile" || command === "update_webgate_profile") {
       const view = await rawInvoke<ProfilesView>(command, args);
-      if (command === "update_webgate_profile" && typeof args.profileId === "string") options.onProfileReplaced?.(args.profileId);
+      if (command === "update_webgate_profile" && typeof args.profileId === "string") {
+        options.onProfileReplaced?.(args.profileId);
+        globalThis.dispatchEvent?.(new CustomEvent("webgate-profile-replaced", { detail: args.profileId }));
+      }
       return accept(view) as T;
     }
     if (["webgate_profiles", "webgate_select_profile", "webgate_disconnect_profile", "webgate_restore_profile", "webgate_forget_profile"].includes(command)) {

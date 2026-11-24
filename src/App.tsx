@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import type { CSSProperties } from "react";
 import { createPortal } from "react-dom";
 import { loadAttachmentMedia, openUrl, saveAttachmentCopy } from "@kaigen/platform";
@@ -34,6 +34,7 @@ import { formatChatDate } from "./chatDateFormat";
 import ProfileAvatar, { type ProfileAvatarState } from "./ProfileAvatar";
 import { contactPresence, profilePresence } from "./profilePresence";
 import type { ProfileSummary } from "./RootApp";
+import type { ProfileViewSession } from "./profileViewSession";
 import { watchProfileUpdates } from "./webgate/realtime";
 import { isWebgateProfileId } from "./webgate/platformRouter";
 import { transferRetryDelay } from "./web/transferPump";
@@ -226,7 +227,7 @@ function OfflineVisibilityIcon({ hidden }: { hidden: boolean }) {
 }
 
 type NetworkStatus = "connecting-tor" | "connecting" | "online" | "offline";
-type CoreFriend = { number: number; public_key: string; tox_id: string; authorized: boolean; connection: "online" | "offline"; name: string; status: UserStatus; status_message: string; avatar_path?: string | null; last_online?: number | null; last_event?: number | null; lastEventSequence?: number; addedAt?: number };
+export type CoreFriend = { number: number; public_key: string; tox_id: string; authorized: boolean; connection: "online" | "offline"; name: string; status: UserStatus; status_message: string; avatar_path?: string | null; last_online?: number | null; last_event?: number | null; lastEventSequence?: number; addedAt?: number };
 type IncomingFriendRequest = { public_key: string; message: string };
 type OutgoingFriendRequest = { toxId: string; message: string };
 type CoreMessage = { id?: string; operation_id?: string; friend_number: number; text: string; mine: boolean; timestamp: number; delivery?: Message["delivery"]; delivered_at?: number | null; attachment?: { name: string; size: number; mime: string; path: string; preview_source?: string; image: boolean; transferred?: number; speed_bytes_per_sec?: number; eta_seconds?: number | null; transfer_state?: "queued" | "sending" | "awaiting_confirmation" | "receiving" | "paused" | "cancelled" | "failed" | "complete"; completed?: boolean; completed_at?: number | null; transfer_error?: string | null; retry_count?: number } | null; event?: PqHistoryEvent | null; protocol_version?: Message["protocolVersion"]; quote?: ChatQuote; formatting?: readonly ChatFormattingSpan[]; reactions?: ChatMessageReactions; pq_protected?: boolean };
@@ -325,7 +326,7 @@ type WebQueuedSend = PendingSend & { webQueuedAt: number };
 type WebAcceptedSend = { operation: WebQueuedSend; messageId: string; delivery: Message["delivery"] };
 type NativePendingSend = { operation: PendingSend; queuedAt: number; messageId?: string; delivery: Message["delivery"] };
 type ChatCapabilities = { reactions: boolean; formatting: boolean; quotes: boolean; protocolVersion?: number };
-type LocalState = Partial<{
+export type LocalState = Partial<{
   activeChat: string;
   sendOnEnter: boolean;
   contactNames: Record<string, string>;
@@ -850,7 +851,7 @@ function writeProfileNickname(profileId: string, nickname: string, canInvoke: ()
   return request;
 }
 
-function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorkspaceLock, onProfileStatusChange, profileSwitching = false, statusAttention = false, onStatusAttentionComplete }: { profiles: ProfileSummary[]; onSwitchProfile: (id: string) => Promise<void>; onDisableProfile: (id: string) => Promise<void>; registerBeforeWorkspaceLock?: (handler: () => Promise<void>) => () => void; onDestroyActiveProfile: () => Promise<void>; onProfileStatusChange: (profileId: string, status: UserStatus) => Promise<void>; profileSwitching?: boolean; statusAttention?: boolean; onStatusAttentionComplete?: () => void }) {
+function App({ profiles, profileSession, flushProfileSaves, onSwitchProfile, onDisableProfile, registerBeforeWorkspaceLock, onProfileStatusChange, profileSwitching = false, statusAttention = false, onStatusAttentionComplete }: { profiles: ProfileSummary[]; profileSession: ProfileViewSession; flushProfileSaves: () => Promise<void>; onSwitchProfile: (id: string) => Promise<void>; onDisableProfile: (id: string) => Promise<void>; registerBeforeWorkspaceLock?: (handler: () => Promise<void>) => () => void; onDestroyActiveProfile: () => Promise<void>; onProfileStatusChange: (profileId: string, status: UserStatus) => Promise<void>; profileSwitching?: boolean; statusAttention?: boolean; onStatusAttentionComplete?: () => void }) {
   const { language, t } = useI18n();
   const { theme, setTheme } = useKaigenTheme();
   const activeProfileAtMount = profiles.find((profile) => profile.active && profile.loaded);
@@ -943,13 +944,17 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
   const [historyRequest, setHistoryRequest] = useState<{ rangeOffset?: number; targetMessageId?: string }>({});
   const [reactionEligibleIds, setReactionEligibleIds] = useState<string[]>([]);
   const latestHistoryMessageIdRef = useRef<string | undefined>(undefined);
-  const historyCacheRangesRef = useRef(new Map<string, { start: number; total: number; limit: HistoryMessageLimit; openingLimit: HistoryMessageLimit }>());
+  const historyCacheRangesRef = useRef(new Map<string, {
+    start: number; total: number; limit: HistoryMessageLimit; openingLimit: HistoryMessageLimit;
+    request: { rangeOffset?: number; targetMessageId?: string }; revision?: number; validationKey?: string;
+    reactionEligibleIds: string[]; latestMessageId?: string;
+  }>());
   const historySnapshotAtTailRef = useRef(true);
   const pendingHistoryIndexRef = useRef<number | null>(null);
   const [windowAnchorKey, setWindowAnchorKey] = useState<string | null>(null);
   const measuredMessageHeightsRef = useRef(new Map<string, number>());
   const [heightMeasurementRevision, setHeightMeasurementRevision] = useState(0);
-  const [localPersistenceError, setLocalPersistenceError] = useState(false);
+  const [localPersistenceError, setLocalPersistenceError] = useState(() => profileSession.switchSave?.failed ?? false);
   const [messages, setMessages] = useState(initialMessages);
   const [localWebgateDownloads, setLocalWebgateDownloads] = useState<Set<string>>(() => new Set());
   const [localWebgateDownloadRevision, setLocalWebgateDownloadRevision] = useState(0);
@@ -992,10 +997,9 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
   useEffect(() => {
     if (statusAttention && networkStatus !== "offline") onStatusAttentionComplete?.();
   }, [statusAttention, networkStatus, onStatusAttentionComplete]);
-  const [coreFriends, setCoreFriends] = useState<CoreFriend[]>([]);
+  const coreFriends = useSyncExternalStore(profileSession.subscribe, profileSession.readFriends);
   const coreFriendsRef = useRef(coreFriends);
   coreFriendsRef.current = coreFriends;
-  const friendMutationRevisionRef = useRef(0);
   const contactMutationRevisionsRef = useRef<Record<string, number>>({});
   const deletingContactKeysRef = useRef(new Set<string>());
   const [incomingFriendRequests, setIncomingFriendRequests] = useState<IncomingFriendRequest[]>([]);
@@ -1031,7 +1035,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
   const contactSortSavingRef = useRef(false);
   const [contactSortSaving, setContactSortSaving] = useState(false);
   const [hideOfflineContacts, setHideOfflineContacts] = useState(() => layoutAtMount?.hideOfflineContacts === true);
-  const [contactGroups, setContactGroups] = useState(() => normalizeContactGroups(null));
+  const [contactGroups, setContactGroups] = useState(() => profileSession.confirmedContactGroups ?? normalizeContactGroups(null));
   const confirmedContactGroupsRef = useRef(contactGroups);
   const groupActionSaveRef = useRef(false);
   const [groupActionSaving, setGroupActionSaving] = useState(false);
@@ -1094,7 +1098,6 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
   const [{ spellcheckEnabled, spellcheckRussian, spellcheckEnglish }, setSpellcheckPreferences] = useState<SpellcheckPreferences>({
     spellcheckEnabled: false, spellcheckRussian: false, spellcheckEnglish: false,
   });
-  const confirmedSpellcheckRef = useRef(new Map<string, SpellcheckPreferences>());
   const spellcheckSavePendingRef = useRef(false);
   const [spellcheckSave, setSpellcheckSave] = useState<{ profileId: string; status: "saving" | "failed" } | null>(null);
   const [showReceivedImages, setShowReceivedImages] = useState(true);
@@ -1351,7 +1354,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
   const localStateSnapshotRef = useRef<LocalState | null>(null);
   const historyClearEpochRef = useRef(0);
   const contactIncarnationsRef = useRef<Record<string, number>>({});
-  const localSaveQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const localSaveQueueRef = profileSession.localSaveQueue;
   const profileSwitchRequestRef = useRef<Promise<void> | null>(null);
   const nicknameUpdateOwnerRef = useRef(activeProfileId);
   const nicknameOwnerGenerationRef = useRef(0);
@@ -1433,18 +1436,27 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
     const result = localSaveQueueRef.current.catch(() => {}).then(operation);
     localSaveQueueRef.current = result.then(() => {}, () => {});
     return result;
-  }, []);
+  }, [localSaveQueueRef]);
+
+  function enqueueContactMutation<T>(operation: () => Promise<T>): Promise<T> {
+    profileSession.pendingContactEdits += 1;
+    return enqueueLocalStateOperation(operation).finally(() => {
+      profileSession.pendingContactEdits -= 1;
+    });
+  }
 
   const publishContactGroups = useCallback((groups: ContactGroupsState) => {
+    profileSession.confirmedContactGroups = groups;
     confirmedContactGroupsRef.current = groups;
     if (localStateSnapshotRef.current) localStateSnapshotRef.current.contactGroups = groups;
     setContactGroups(groups);
-  }, []);
+  }, [profileSession]);
 
   const persistLocalState = useCallback(async (
     required = false,
     updateGroups?: (current: ContactGroupsState) => ContactGroupsState,
     updateSpellcheck?: SpellcheckChange,
+    backgroundSwitch = false,
   ) => {
     let owner: ProfileOwnerLease;
     try { owner = captureProfileOwner(); }
@@ -1457,6 +1469,8 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
       pendingSendOperations: Object.fromEntries(Object.entries(pendingSendOperationsRef.current)
         .filter(([id, operation]) => operation.profileId === owner.profileId && !freshSendAdmissionsRef.current.has(id))),
     });
+    if (backgroundSwitch) profileSession.switchSave = { state, failed: false };
+    const pendingSwitchSave = profileSession.switchSave;
     const contactRevisions = { ...contactMutationRevisionsRef.current };
     function changedContacts() {
       return Object.entries(contactMutationRevisionsRef.current).flatMap(([key, revision]) => {
@@ -1467,10 +1481,13 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
     }
     const save = enqueueLocalStateOperation(async () => {
       try {
-        // Profile changes keep this App alive; workspace teardown does not.
-        if (!appOwnerMountedRef.current) throw new Error("PROFILE_OWNER_CHANGED");
-        if ((updateGroups || updateSpellcheck) && !currentProfileOwner(owner)) return false;
-        const confirmedSpellcheck = confirmedSpellcheckRef.current.get(owner.profileId);
+        if (!profileSession.live) throw new Error("PROFILE_OWNER_CHANGED");
+        if (!backgroundSwitch && !updateGroups && !updateSpellcheck) {
+          if (!appOwnerMountedRef.current) throw new Error("PROFILE_OWNER_CHANGED");
+        }
+        // Confirmed preferences belong to the loaded profile, including while
+        // its messenger view is unmounted. Resolve edits in the shared queue.
+        const confirmedSpellcheck = profileSession.confirmedSpellcheck;
         if (updateSpellcheck && !confirmedSpellcheck) return false;
         const nextSpellcheck = updateSpellcheck && confirmedSpellcheck
           ? { ...confirmedSpellcheck, [updateSpellcheck.key]: updateSpellcheck.enabled }
@@ -1479,11 +1496,9 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
         if (nextSpellcheck) Object.assign(state, nextSpellcheck);
         // Resolve queued group edits in order. A queued automatic save must not
         // overwrite a group edit that was acknowledged after it was captured.
-        if (currentProfileOwner(owner)) {
-          const currentGroups = confirmedContactGroupsRef.current;
-          state.contactGroups = updateGroups ? updateGroups(currentGroups) : currentGroups;
-          if (updateGroups && state.contactGroups === currentGroups) return false;
-        }
+        const currentGroups = profileSession.confirmedContactGroups ?? confirmedContactGroupsRef.current;
+        state.contactGroups = updateGroups ? updateGroups(currentGroups) : currentGroups;
+        if (updateGroups && state.contactGroups === currentGroups) return false;
         // A clone queued during contact deletion must not restore that contact's data.
         // Preserve preferences and other contacts, including those in another profile.
         for (const publicKey of changedContacts()) {
@@ -1499,19 +1514,26 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
           if (state.contactGroups) state.contactGroups = removeContactFromGroups(state.contactGroups, publicKey);
         }
         await invoke("save_local_state", { profileId: owner.profileId, state });
+        if (!profileSession.live) return false;
+        if (profileSession.switchSave === pendingSwitchSave) profileSession.switchSave = null;
         const stillCurrent = currentProfileOwner(owner);
         if (updateSpellcheck && nextSpellcheck) {
-          confirmedSpellcheckRef.current.set(owner.profileId, nextSpellcheck);
+          profileSession.confirmedSpellcheck = nextSpellcheck;
           if (stillCurrent) setSpellcheckPreferences(nextSpellcheck);
         }
-        if (stillCurrent) {
-          if (updateGroups && state.contactGroups) {
-            publishContactGroups(changedContacts().reduce(removeContactFromGroups, state.contactGroups));
-          }
-          setLocalPersistenceError(false);
+        if (updateGroups && state.contactGroups) {
+          const groups = changedContacts().reduce(removeContactFromGroups, state.contactGroups);
+          profileSession.confirmedContactGroups = groups;
+          if (stillCurrent) publishContactGroups(groups);
         }
-        return !(updateGroups || updateSpellcheck) || stillCurrent;
+        if (updateGroups || updateSpellcheck) profileSession.preferenceSaveFailed = false;
+        if (stillCurrent) {
+          setLocalPersistenceError(profileSession.preferenceSaveFailed);
+        }
+        return true;
       } catch (error) {
+        if (profileSession.live && (updateGroups || updateSpellcheck)) profileSession.preferenceSaveFailed = true;
+        if (backgroundSwitch && pendingSwitchSave) pendingSwitchSave.failed = true;
         if (pqErrorCode(error) === "CHAT_CONTACT_INCARNATION_CHANGED" && currentProfileOwner(owner)) {
           const saved = await invoke<LocalState | null>("load_local_state", { profileId: owner.profileId });
           if (currentProfileOwner(owner)) {
@@ -1528,7 +1550,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
       }
     });
     return required ? save : save.catch(() => false);
-  }, [captureProfileOwner, currentProfileOwner, enqueueLocalStateOperation, language, publishContactGroups]);
+  }, [captureProfileOwner, currentProfileOwner, enqueueLocalStateOperation, language, profileSession, publishContactGroups]);
 
   function updateNotificationPreference(setting: "notifyMessages" | "notifyRequests", enabled: boolean) {
     const snapshot = localStateSnapshotRef.current;
@@ -1573,7 +1595,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
 
   const prepareWorkspaceLock = useCallback(async () => {
     if (profileSwitchRequestRef.current) throw new Error("PROFILE_ACTION_BUSY");
-    const request = persistProfileBeforeTransition();
+    const request = persistProfileBeforeTransition(flushProfileSaves);
     profileSwitchRequestRef.current = request;
     setProfileSwitchPending(true);
     try {
@@ -1582,7 +1604,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
       if (profileSwitchRequestRef.current === request) profileSwitchRequestRef.current = null;
       if (nicknameUpdateMountedRef.current) setProfileSwitchPending(false);
     }
-  }, [persistProfileBeforeTransition]);
+  }, [flushProfileSaves, persistProfileBeforeTransition]);
 
   useLayoutEffect(() => registerBeforeWorkspaceLock?.(prepareWorkspaceLock), [registerBeforeWorkspaceLock, prepareWorkspaceLock]);
 
@@ -1669,7 +1691,13 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
     setPendingFiles([]);
     setFileSendError(null);
     setProfileSwitchPending(true);
-    const request = persistProfileBeforeTransition(() => onSwitchProfile(profileId)).then(() => setProfileDrawerOpen(false));
+    const select = () => onSwitchProfile(profileId);
+    const canSaveInBackground = (isWebgateProfileId(activeProfileId) || isWebgateProfileId(profileId))
+      && profiles.some((profile) => profile.id === profileId && profile.loaded)
+      && profileSession.pendingContactEdits === 0
+      && !nicknameWriteRequestRef.current && !groupActionSaveRef.current;
+    if (canSaveInBackground) void persistLocalState(false, undefined, undefined, true);
+    const request = (canSaveInBackground ? select() : persistProfileBeforeTransition(select)).then(() => setProfileDrawerOpen(false));
     profileSwitchRequestRef.current = request;
     void request.catch((error) => showTransferNotice(formatUserFacingError(error, {
       ru: "Не удалось переключить профиль",
@@ -1678,7 +1706,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
       if (profileSwitchRequestRef.current === request) profileSwitchRequestRef.current = null;
       setProfileSwitchPending(false);
     });
-  }, [activeProfileId, onSwitchProfile, persistProfileBeforeTransition, language]);
+  }, [activeProfileId, onSwitchProfile, persistLocalState, persistProfileBeforeTransition, profileSession, profiles, language]);
 
   useEffect(() => {
     sessionStorage.setItem("kaigen-active-screen", screen);
@@ -2519,8 +2547,12 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
       setHistoryTotal(range.total);
       setHistoryHasMore(range.start > 0);
       setHistoryHasAfter(range.start + restored.length < range.total);
+      setReactionEligibleIds(range.reactionEligibleIds);
+      latestHistoryMessageIdRef.current = range.latestMessageId;
       historySnapshotAtTailRef.current = range.start + restored.length >= range.total;
-      setHistoryRequest({ rangeOffset: range.start });
+      // Keep the query that produced these rows. Turning a tail into a fixed
+      // range loses the transport delta base and can miss later live appends.
+      setHistoryRequest(range.request);
     } else if (!cached) {
       if (displayedChatActiveRef.current) {
         delete scrollAnchorsRef.current[active.id];
@@ -2628,15 +2660,12 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
   }, [viewKey, active.id, historyContactIncarnation, messages, historyHasAfter, messageWindow.start, messageWindow.end, profileSwitching, profileSwitchPending]);
 
   useLayoutEffect(() => {
-    // App survives profile switches; old counts and peer rows must not paint in the new owner.
-    friendMutationRevisionRef.current += 1;
+    // Old counts and request rows must not paint in the new owner.
     unreadMutationRevisionRef.current += 1;
     incomingRequestActionRef.current = { pending: false, revision: incomingRequestActionRef.current.revision + 1 };
     seenIncomingRequestKeys.current.clear();
-    coreFriendsRef.current = [];
     unreadFriendCountsRef.current = {};
     lastUnreadSnapshot.current = "";
-    setCoreFriends([]);
     setUnreadFriendCounts({});
     setIncomingFriendRequests([]);
     setUnreadIncomingRequestKeys([]);
@@ -2648,19 +2677,10 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
     let owner: ProfileOwnerLease;
     try { owner = captureProfileOwner(); } catch { return; }
     let mounted = true;
-    let friendsRefreshPending = false;
     const refresh = () => {
       if (!mounted || !currentProfileOwner(owner) || document.visibilityState !== "visible") return;
-      let friendsRequest: Promise<unknown> = Promise.resolve();
-      if (!friendsRefreshPending) {
-        friendsRefreshPending = true;
-        const friendRevision = friendMutationRevisionRef.current;
-        friendsRequest = invoke<CoreFriend[]>("get_tox_friends", { profileId: owner.profileId }).then((friends) => {
-          if (mounted && currentProfileOwner(owner) && friendRevision === friendMutationRevisionRef.current) setCoreFriends((current) => !mounted || !currentProfileOwner(owner) || friendRevision !== friendMutationRevisionRef.current || sameData(current, friends) ? current : friends);
-        }).catch(() => {}).finally(() => { friendsRefreshPending = false; });
-      }
       const requestRevision = incomingRequestActionRef.current.revision;
-      const requestsRequest = invoke<IncomingFriendRequest[]>("get_incoming_friend_requests", { profileId: owner.profileId }).then((requests) => {
+      return invoke<IncomingFriendRequest[]>("get_incoming_friend_requests", { profileId: owner.profileId }).then((requests) => {
         if (!mounted || !currentProfileOwner(owner) || requestRevision !== incomingRequestActionRef.current.revision) return;
         setIncomingFriendRequests((current) => !mounted || !currentProfileOwner(owner) || requestRevision !== incomingRequestActionRef.current.revision || sameData(current, requests) ? current : requests);
         if (incomingRequestsOpen) {
@@ -2678,7 +2698,6 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
           return sameData(current, next) ? current : next;
         });
       }).catch(() => {});
-      return Promise.all([friendsRequest, requestsRequest]);
     };
     const stop = watchProfileUpdates(owner.profileId, refresh, 5000);
     return () => {
@@ -2760,7 +2779,17 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
     let mounted = true;
     let refreshPending = false;
     const ownsView = () => mounted && viewOwnerRef.current.leaseId === viewLeaseId;
-    historyRevisionRef.current = undefined;
+    const cacheKey = `${activeProfileId}:${active.id}`;
+    const validationKey = JSON.stringify([
+      active.friendNumber, historyMessageLimit, boundedHistoryRequestLimit(loadedHistoryLimit),
+      historyRequest.rangeOffset ?? null, historyRequest.targetMessageId ?? null,
+      language, showReceivedImages, revealedImages, transferUiStateOverrides,
+    ]);
+    const cachedRange = historyCacheRangesRef.current.get(cacheKey);
+    // Revision equality is meaningful only for the exact window and rendering
+    // inputs whose rows we still retain. Unread/UI changes do not discard it.
+    historyRevisionRef.current = historyCacheRef.current.has(cacheKey)
+      && cachedRange?.validationKey === validationKey ? cachedRange.revision : undefined;
     const refresh = () => {
       if (!ownsView() || document.visibilityState !== "visible") return;
       if (refreshPending) return;
@@ -2782,7 +2811,11 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
         const resumed = resumedHistoryAnchorRef.current?.chatId === active.id ? resumedHistoryAnchorRef.current : null;
         receivePeerReactionEvents(active.id, snapshot.peerReactionEvents ?? []);
         setHistoryError(false);
-        if (!snapshot.messages) return;
+        if (!snapshot.messages) {
+          resumedHistoryAnchorRef.current = null;
+          if (pendingScrollRestore.current === active.id) setScrollRestoreTick((tick) => tick + 1);
+          return;
+        }
         const resumedAnchorIndex = resumed
           ? snapshot.messages.findIndex((message) => message.id === resumed.anchor.messageKey)
           : -1;
@@ -2937,6 +2970,8 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
         historyCacheRangesRef.current.delete(`${activeProfileId}:${active.id}`);
         historyCacheRangesRef.current.set(`${activeProfileId}:${active.id}`, {
           start: snapshot.windowStart, total: snapshot.total, limit: loadedHistoryLimit, openingLimit: historyMessageLimit,
+          request: historyRequest, revision: snapshot.revision, validationKey,
+          reactionEligibleIds: snapshot.reactionEligibleIds ?? [], latestMessageId: snapshot.latestMessageId,
         });
         for (const key of historyCacheRangesRef.current.keys()) {
           if (historyCacheRef.current.has(key)) continue;
@@ -2978,6 +3013,8 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
     setHistoryLoading(true);
     const stop = watchProfileUpdates(activeProfileId, refresh, 1000, () => {
       historyRevisionRef.current = undefined;
+      const range = historyCacheRangesRef.current.get(cacheKey);
+      if (range) range.revision = undefined;
       historyMutationRevisionRef.current += 1;
     });
     return () => { mounted = false; stop(); };
@@ -3406,6 +3443,9 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
     const loadState = () => void enqueueLocalStateOperation(() => invoke<LocalState | null>("load_local_state", { profileId: activeProfileId }))
       .then((saved) => {
         if (!mounted) return;
+        const pending = profileSession.switchSave?.state;
+        if (pending && sameData(pending.contactIncarnations ?? {}, saved?.contactIncarnations ?? {})) saved = pending;
+        setLocalPersistenceError(profileSession.preferenceSaveFailed || (profileSession.switchSave?.failed ?? false));
         contactIncarnationsRef.current = { ...saved?.contactIncarnations };
         publishContactGroups(normalizeContactGroups(saved?.contactGroups));
         const spellcheck = {
@@ -3413,7 +3453,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
           spellcheckRussian: saved?.spellcheckRussian ?? true,
           spellcheckEnglish: saved?.spellcheckEnglish ?? false,
         };
-        confirmedSpellcheckRef.current.set(activeProfileId, spellcheck);
+        profileSession.confirmedSpellcheck = spellcheck;
         setSpellcheckPreferences(spellcheck);
         setNotifyMessages(typeof saved?.notifyMessages === "boolean" ? saved.notifyMessages : DEFAULT_NOTIFICATION_SETTINGS.messages);
         setNotifyRequests(typeof saved?.notifyRequests === "boolean" ? saved.notifyRequests : DEFAULT_NOTIFICATION_SETTINGS.requests);
@@ -3482,7 +3522,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
       mounted = false;
       window.clearTimeout(retryTimer);
     };
-  }, [activeProfileId, enqueueLocalStateOperation, publishContactGroups]);
+  }, [activeProfileId, enqueueLocalStateOperation, profileSession, publishContactGroups]);
 
   useEffect(() => {
     if (!persistenceReady) return;
@@ -3576,7 +3616,10 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
     const request = writeProfileNickname(owner, nickname, canInvoke);
     nicknameWriteRequestRef.current = request;
     void request
-      .then(() => { if (isCurrent()) window.dispatchEvent(new Event("profiles-changed")); })
+      .then(() => {
+        if (nicknameWriteRequestRef.current === request) nicknameWriteRequestRef.current = null;
+        if (isCurrent()) window.dispatchEvent(new Event("profiles-changed"));
+      })
       .catch(() => {
         if (isCurrent()) showTransferNotice(language === "en"
           ? "Could not update the Tox nickname" : "Не удалось обновить ник Tox");
@@ -4500,7 +4543,10 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
   function exitApplication() {
     if (profileSwitchRequestRef.current) return;
     setProfileMenuOpen(false);
-    const request = persistProfileBeforeTransition(() => invoke<void>("exit_application"));
+    const request = persistProfileBeforeTransition(async () => {
+      await flushProfileSaves();
+      await invoke<void>("exit_application");
+    });
     profileSwitchRequestRef.current = request;
     setProfileSwitchPending(true);
     void request.catch((error) => showTransferNotice(formatUserFacingError(error, {
@@ -5719,12 +5765,12 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
     if (current && current.number !== target.friendNumber) return;
     const numericOwner = coreFriendsRef.current.find((friend) => friend.number === target.friendNumber);
     const ownsNumericSlot = numericOwner?.public_key.toUpperCase() === target.expectedPublicKey;
-    friendMutationRevisionRef.current += 1;
+    profileSession.contactRevision += 1;
     unreadMutationRevisionRef.current += 1;
     pqStatusRequestsRef.current[target.statusKey] = ++pqStatusSequenceRef.current;
     const friends = coreFriendsRef.current.filter((friend) => friend.public_key.toUpperCase() !== target.expectedPublicKey);
     coreFriendsRef.current = friends;
-    setCoreFriends((items) => currentProfileOwner(target) ? friends : items);
+    profileSession.publishFriends(friends);
     setPqStatuses((statuses) => { if (!currentProfileOwner(target)) return statuses; const next = { ...statuses }; delete next[target.statusKey]; return next; });
     const requests = (localStateSnapshotRef.current?.outgoingFriendRequests ?? outgoingFriendRequests)
       .filter((request) => !outgoingRequestMatchesPeer(request.toxId, target.expectedPublicKey));
@@ -5774,9 +5820,9 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
     const target = capturePqTarget(chat.friendNumber, chat.publicKey);
     if (target.chatId !== chat.id || deletingContactKeysRef.current.has(target.statusKey)) return;
     deletingContactKeysRef.current.add(target.statusKey);
-    friendMutationRevisionRef.current += 1;
+    profileSession.contactRevision += 1;
     try {
-      await enqueueLocalStateOperation(() => removeContactForTarget(target, "delete_tox_friend"));
+      await enqueueContactMutation(() => removeContactForTarget(target, "delete_tox_friend"));
     } finally {
       deletingContactKeysRef.current.delete(target.statusKey);
     }
@@ -6065,7 +6111,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
     setIncomingRequestBusy(publicKey);
     setIncomingRequestError(null);
     try {
-      await enqueueLocalStateOperation(async () => {
+      await enqueueContactMutation(async () => {
         if (!appOwnerMountedRef.current) throw new Error("PROFILE_OWNER_CHANGED");
         // Resolve after earlier queued additions, against the captured profile owner.
         const friends = decision === "reject" ? await invoke<CoreFriend[]>("get_tox_friends", { profileId: owner.profileId }) : [];
@@ -6074,7 +6120,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
           const expectedPublicKey = pendingFriend.public_key.toUpperCase();
           const target: PqContactTarget = { ...owner, friendNumber: pendingFriend.number, expectedPublicKey, expectedContactIncarnation: requestIncarnation, chatId: toxChatId(expectedPublicKey), statusKey: pqContactKey(owner.profileId, expectedPublicKey) };
           deletingContactKeysRef.current.add(target.statusKey);
-          friendMutationRevisionRef.current += 1;
+          profileSession.contactRevision += 1;
           try { await removeContactForTarget(target, "reject_incoming_friend_request"); }
           finally { deletingContactKeysRef.current.delete(target.statusKey); }
         } else {
@@ -6222,9 +6268,9 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
     const toxId = contactToxId.trim().toUpperCase();
     const message = friendRequestMessage;
     const statusKey = pqContactKey(owner.profileId, toxId.slice(0, 64));
-    friendMutationRevisionRef.current += 1;
+    profileSession.contactRevision += 1;
     setAddContactStatus(null);
-    void enqueueLocalStateOperation(async () => {
+    void enqueueContactMutation(async () => {
         if (!appOwnerMountedRef.current) throw new Error("PROFILE_OWNER_CHANGED");
         const number = await invoke<number>("add_tox_friend", { profileId: owner.profileId, toxId, message });
         // A re-add is a new contact incarnation. Load its backend-issued token
@@ -6232,7 +6278,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
         const saved = await invoke<LocalState | null>("load_local_state", { profileId: owner.profileId });
         contactMutationRevisionsRef.current[statusKey] = (contactMutationRevisionsRef.current[statusKey] ?? 0) + 1;
         if (!currentProfileOwner(owner)) return;
-        friendMutationRevisionRef.current += 1;
+        profileSession.contactRevision += 1;
         const publicKey = toxId.slice(0, 64);
         adoptContactIncarnation(owner, publicKey, saved);
         const existing = coreFriendsRef.current.find((friend) => friend.public_key.toUpperCase() === publicKey);
@@ -6242,7 +6288,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
         };
         const friends = [...coreFriendsRef.current.filter((item) => item.public_key.toUpperCase() !== publicKey), friend];
         coreFriendsRef.current = friends;
-        setCoreFriends(friends);
+        profileSession.publishFriends(friends);
         const requests = (localStateSnapshotRef.current?.outgoingFriendRequests ?? outgoingFriendRequests)
           .filter((request) => !outgoingRequestMatchesPeer(request.toxId, publicKey));
         if (!friend.authorized) requests.push({ toxId, message });

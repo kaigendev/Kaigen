@@ -237,11 +237,16 @@ pub(crate) async fn webgate_select_profile(
     state: tauri::State<'_, AppState>,
     profile_id: Option<String>,
 ) -> Result<Value, String> {
-    match profile_id {
-        Some(id) => state.remote_profiles.set_active(&id)?,
-        None => state.remote_profiles.clear_active()?,
-    }
-    combined_profiles(&state)
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        match profile_id {
+            Some(id) => state.remote_profiles.set_active(&id)?,
+            None => state.remote_profiles.clear_active()?,
+        }
+        combined_profiles(&state)
+    })
+    .await
+    .map_err(|_| "WEBGATE_TASK_FAILED".to_string())?
 }
 
 #[tauri::command]
